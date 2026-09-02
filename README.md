@@ -213,6 +213,12 @@ cargo test                            # engine logic: categories, scheduling, ar
 node extension/test/capture.test.js   # capture rules and header parsing
 ```
 
+If you have moved or renamed the checkout, run `cargo clean` first. Cargo
+records absolute paths in `target/` and cannot relocate that cache, so the
+stale entries still look fresh and the build follows one of them to a directory
+that is gone — surfacing as `tauri-build` failing to read a plugin permission
+file. `install.sh` detects this and cleans for you.
+
 The capture tests load `util.js` and `capture.js` in a bare VM context — those
 two files hold no `browser.*` reference precisely so the decision logic can be
 exercised without a browser.

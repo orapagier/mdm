@@ -189,8 +189,25 @@ command -v zenity >/dev/null || command -v kdialog >/dev/null || \
 
 # ---------------------------------------------------------------- build
 
-say "Building (release)"
 cd "$REPO"
+
+# Cargo bakes absolute paths into target/, and it cannot relocate that cache:
+# a checkout that has been renamed or moved leaves every recorded path aimed at
+# a directory that no longer exists. Nothing rebuilds to fix it, because the
+# stale entries still look fresh. The first thing to trip over it is
+# tauri-build, which reads plugin permissions through one of those paths and
+# fails with "No such file or directory" for a file the current tree never had.
+TARGET_DIR="${CARGO_TARGET_DIR:-$REPO/target}"
+recorded="$(grep -rhoE '/[^ ":=]+/build/[A-Za-z0-9_.-]+/out\b' \
+              "$TARGET_DIR"/*/build/*/output 2>/dev/null | head -1 || true)"
+if [[ -n "$recorded" && "$recorded" != "$TARGET_DIR"/* ]]; then
+  warn "target/ was built under ${recorded%%/build/*}, which is not
+  $TARGET_DIR. Cargo cannot move a cache, so this one is being discarded and
+  the build starts from scratch."
+  cargo clean
+fi
+
+say "Building (release)"
 cargo build --release --workspace
 
 APP_BIN="$REPO/target/release/mdm"
