@@ -877,10 +877,10 @@ async function grabVideo(msg, tabId) {
 function videoCandidates(msg, tabId) {
   const out = [];
   const seen = new Set([msg.pageUrl || ""]);
-  const add = (url, kind) => {
+  const add = (url, kind, mime = "") => {
     if (!/^https?:\/\//i.test(url || "") || seen.has(url)) return;
     seen.add(url);
-    out.push({ url, kind });
+    out.push({ url, kind, mime });
   };
 
   const found = msg.candidates || [];
@@ -894,8 +894,8 @@ function videoCandidates(msg, tabId) {
   // What the player has actually fetched in this tab. A manifest is the whole
   // stream and outranks a fragment, which is one slice of it.
   const sniffed = [...(tabMedia.get(tabId)?.values() ?? [])];
-  for (const m of sniffed.filter((m) => m.kind === "stream")) add(m.url, "media");
-  for (const m of sniffed.filter((m) => m.kind !== "stream")) add(m.url, "media");
+  for (const m of sniffed.filter((m) => m.kind === "stream")) add(m.url, "media", m.mime);
+  for (const m of sniffed.filter((m) => m.kind !== "stream")) add(m.url, "media", m.mime);
 
   // A ceiling, because each one the app tries costs an extraction.
   return out.slice(0, 6);

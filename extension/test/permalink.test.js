@@ -32,12 +32,12 @@ function extract(name) {
   throw new Error(`${name} has unbalanced braces`);
 }
 
-/* The two constants the function closes over, read from the source as well so
- * a change to either is exercised here rather than only in a browser. */
-const permalinkPattern = /const PERMALINK\s*=\s*([\s\S]*?);\n/.exec(text);
-assert.ok(permalinkPattern, "PERMALINK is not in video-panel.js");
-const maxClimb = /const MAX_CLIMB = (\d+);/.exec(text);
-assert.ok(maxClimb, "MAX_CLIMB is not in video-panel.js");
+/** Lift a top-level-in-the-IIFE `const` out by name, value and all. */
+function constant(name) {
+  const m = new RegExp(`  const ${name}\\s*=\\s*([\\s\\S]*?);\\n`).exec(text);
+  assert.ok(m, `${name} is not in ${path.basename(SOURCE)}`);
+  return m[1];
+}
 
 /* ---------------- stub DOM ---------------- */
 
@@ -75,15 +75,17 @@ vm.runInContext(
   `
   const location = { href: "https://www.facebook.com/" };
   const document = { querySelectorAll: (s) => (s === "a[href]" ? anchors : []) };
-  const PERMALINK = ${permalinkPattern[1]};
-  const MAX_CLIMB = ${maxClimb[1]};
+  const MEDIA_SECTION = ${constant("MEDIA_SECTION")};
+  const NOT_AN_ID = ${constant("NOT_AN_ID")};
+  const MAX_CLIMB = ${constant("MAX_CLIMB")};
   function absolute(url) { try { return new URL(url, location.href).href; } catch { return ""; } }
+  ${extract("namesOneMedia")}
   ${extract("permalinkNear")}
   `,
   context,
   { filename: "video-panel.js (extracted)" }
 );
-const { permalinkNear } = context;
+const { permalinkNear, namesOneMedia } = context;
 const FB = "https://www.facebook.com";
 
 /* ---------------- harness ---------------- */
@@ -163,25 +165,65 @@ check("a link beyond the climb limit is not reached", () => {
   assert.strictEqual(run(video(nest(root, 200))), "");
 });
 
-for (const href of [
-  "/permalink.php?story_fbid=123&id=456",
-  "/video.php?v=789",
-  "/watch/?v=42",
-  "/reel/9999",
-  "/user/status/1234567890",
-  "/p/CxYz123/",
-]) {
-  check(`recognises ${href}`, () => {
-    const root = page();
-    anchor(nest(root, 1), href);
-    assert.strictEqual(run(video(nest(root, 6))), new URL(href, `${FB}/`).href);
-  });
-}
-
 check("a relative permalink is resolved against the page", () => {
   const root = page();
   anchor(nest(root, 1), "/pageC/videos/7/");
   assert.ok(run(video(nest(root, 6))).startsWith("https://"));
+});
+
+
+/* ---------------- sections are not videos ---------------- */
+
+/* Both of these were picked out of a real Facebook feed and handed to yt-dlp
+ * as the video's address. They are navigation: a hashtag's videos, and the
+ * Reels tab. A post's markup is full of links like them. */
+
+const names = (href) => namesOneMedia(new URL(href, `${FB}/`));
+
+for (const href of [
+  "/watch/hashtag/onevoice27/?__cft__%5B0%5D=AZgngAWB6a86qnZEwEeC87YaNnEVFTC4",
+  "/reel/?s=tab",
+  "/watch/",
+  "/watch/live/",
+  "/videos/",
+  "/reels/tab/",
+  "/posts/",
+  "/explore/",
+]) {
+  check(`${href} names no single video`, () => assert.strictEqual(names(href), false));
+}
+
+for (const href of [
+  "/reel/1234567890",
+  "/pageB/videos/2222/",
+  "/watch/?v=987654321",
+  "/user/status/1234567890",
+  "/p/CxYz123/",
+  "/shorts/dQw4w9WgXcQ",
+  "/@someone/video/7212345678",
+  "/permalink.php?story_fbid=123&id=456",
+  "/video.php?v=789012",
+]) {
+  check(`${href} names one video`, () => assert.strictEqual(names(href), true));
+}
+
+check("a section link is passed over for the real permalink beside it", () => {
+  // The hashtag sits in the post body, nearer the player than the timestamp
+  // in the header — so being rejected outright is what matters, not distance.
+  const root = page();
+  const post = child(root, el("div"));
+  anchor(nest(post, 2), "/watch/hashtag/onevoice27/");
+  const header = nest(post, 1);
+  anchor(header, "/pageB/videos/778899/");
+  assert.strictEqual(run(video(nest(post, 12))), `${FB}/pageB/videos/778899/`);
+});
+
+check("a feed with only section links yields nothing rather than one of them", () => {
+  const root = page();
+  const post = child(root, el("div"));
+  anchor(nest(post, 2), "/reel/?s=tab");
+  anchor(nest(post, 2), "/watch/hashtag/x/");
+  assert.strictEqual(run(video(nest(post, 10))), "");
 });
 
 /* ---------------- report ---------------- */

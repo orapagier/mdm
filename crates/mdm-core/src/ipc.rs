@@ -50,6 +50,11 @@ pub struct Candidate {
     /// "media" for a file, "page" for something to extract from.
     #[serde(default)]
     pub kind: String,
+    /// What the server called it, when the sniffer saw the response. A CDN
+    /// path often carries no extension, and this is the only thing left to
+    /// name the file by if nothing on the page resolves.
+    #[serde(default)]
+    pub mime: String,
 }
 
 /// Things the extension asks the *window* to do, as opposed to the engine.

@@ -255,6 +255,9 @@ function reset() {
   direct = null;
   kind = "both";
   say("vid-status", "");
+  // The direct-download note parks its reason here; a stale one would explain
+  // a page this window is no longer looking at.
+  $("vid-status").removeAttribute("title");
   $("vid-head").hidden = true;
   $("vid-tabs").hidden = true;
   $("vid-save").hidden = true;
@@ -276,18 +279,33 @@ function reset() {
  * successful extraction of the wrong thing — so anything that looks like a
  * single video's own address is worth asking about first.
  */
-/* Kept in step with the same table in the extension's video panel, which uses
- * it to *find* these links; here it only decides which to ask about first. */
-const PERMALINK =
-  /\/(?:watch|videos?|reels?|clips?|status|posts?|shorts|embed|p|v)\/|[?&]v=|\/(?:permalink|story|video)\.php|[?&]story_fbid=/i;
+/* Kept in step with `namesOneMedia` in the extension's video panel, which uses
+ * the same reading to *find* these links; here it only decides which to ask
+ * about first. A section like /watch/hashtag/x or /reel/?s=tab names a listing,
+ * not a video, and is no more specific than the feed it was found on. */
+const MEDIA_SECTION =
+  /^(?:watch|video|videos|reel|reels|clip|clips|status|post|posts|shorts|embed|p|v)$/i;
+const NOT_AN_ID =
+  /^(?:hashtag|tab|tabs|search|live|explore|browse|following|followers|saved|category|categories|page|pages|me|new|popular|trending|feed|home|all|watch|videos?|reels?|shorts)$/i;
 
 function looksSpecific(url) {
+  let u;
   try {
-    const u = new URL(url);
-    return PERMALINK.test(u.pathname + u.search);
+    u = new URL(url);
   } catch {
     return false;
   }
+  const segments = u.pathname.split("/").filter(Boolean);
+  for (let i = 0; i < segments.length - 1; i++) {
+    if (!MEDIA_SECTION.test(segments[i])) continue;
+    const id = segments[i + 1];
+    if (NOT_AN_ID.test(id)) continue;
+    if (/^\d+$/.test(id) || /^[A-Za-z0-9_.-]{5,}$/.test(id)) return true;
+  }
+  if (/\/(?:permalink|story|video)\.php$/i.test(u.pathname)) {
+    return /[?&](?:v|story_fbid|fbid|id)=[A-Za-z0-9_.-]+/i.test(u.search);
+  }
+  return /[?&]v=[A-Za-z0-9_.-]{5,}/i.test(u.search);
 }
 
 /**
@@ -422,13 +440,55 @@ async function probe(pageTitle) {
   fitWindow();
 }
 
+/** Containers a media type implies, for a URL that names none. */
+const MIME_EXTENSION = {
+  "video/mp4": "mp4", "video/webm": "webm", "video/quicktime": "mov",
+  "video/x-matroska": "mkv", "video/mpeg": "mpeg", "video/3gpp": "3gp",
+  "video/x-msvideo": "avi", "video/ogg": "ogv",
+  "audio/mpeg": "mp3", "audio/mp4": "m4a", "audio/aac": "aac", "audio/ogg": "ogg",
+  "audio/opus": "opus", "audio/wav": "wav", "audio/flac": "flac", "audio/webm": "weba",
+};
+
+/** Long enough to tell two downloads apart, short enough to read. */
+const MAX_STEM = 60;
+
 /**
- * Last resort: the file the page is using, fetched as a file.
+ * A usable name for a file that only its URL identifies.
  *
- * When no page in the chain resolves — an extractor that does not know the
- * site, or no yt-dlp on the machine at all — there may still be a plain media
- * URL among the candidates. There is no quality to choose, so the picker stays
- * empty and only the name and folder are offered.
+ * A CDN serves video from a path like `/o1/v/t2/f2/m412/AQOtK6Sp4dPC_XWT4…`,
+ * so the last segment is a hundred characters of opaque token with no
+ * extension on the end. Saved as it stands that is a name no one can read, and
+ * one the app files under "Other" and the system opens with nothing — the
+ * extension is what says it is a video. So the token is trimmed and the
+ * container the type implies is put back on.
+ */
+function directName(url, mime) {
+  const raw = nameFromUrl(url);
+  const dot = raw.lastIndexOf(".");
+  const named = dot > 0 && raw.length - dot <= 6 && /^[a-z0-9]+$/i.test(raw.slice(dot + 1));
+
+  const stem = (named ? raw.slice(0, dot) : raw).slice(0, MAX_STEM) || "video";
+  // A media candidate is a video unless its type says otherwise: it came from
+  // a <video> element, or from a response the sniffer saw play as one.
+  const ext = named
+    ? raw.slice(dot + 1)
+    : MIME_EXTENSION[(mime || "").split(";", 1)[0].trim().toLowerCase()] || "mp4";
+  return `${stem}.${ext}`;
+}
+
+/**
+ * The file the page is using, fetched as a file.
+ *
+ * When no page in the chain resolves — a feed with no permalink to find, an
+ * extractor that does not know the site, no yt-dlp on the machine at all —
+ * there may still be a plain media URL among the candidates. There is no
+ * quality to choose then, so the picker stays empty and only the name and
+ * folder are offered.
+ *
+ * Not phrased as a failure when that file exists, because it is not one: the
+ * user asked for the video and the video is about to be downloaded. Losing the
+ * choice of quality is worth a note, not an error in red — and the reason is
+ * kept on the line for anyone who wants to know why there was no choice.
  */
 function offerDirect(reason) {
   const media = candidates.find(
@@ -438,13 +498,15 @@ function offerDirect(reason) {
 
   direct = media.url;
   $("vid-url").value = direct;
-  $("vid-name").value = nameFromUrl(direct);
+  $("vid-name").value = directName(direct, media.mime);
   $("vid-save").hidden = false;
   say(
     "vid-status",
-    `${reason} — the media file the page is using can still be downloaded as it is.`,
-    "hint bad"
+    "No quality to choose for this one — the file the page is playing will be " +
+      "downloaded as it is.",
+    "hint"
   );
+  $("vid-status").title = reason;
   fitWindow();
 }
 

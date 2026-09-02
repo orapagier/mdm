@@ -185,8 +185,44 @@
    * permalink, because that is what its timestamp links to. Finding it is what
    * lets the button work on a video nobody has opened, let alone played.
    */
-  const PERMALINK =
-    /\/(?:watch|videos?|reels?|clips?|status|posts?|p|v|embed|shorts)\/|[?&]v=|\/(?:permalink|story|video)\.php|[?&]story_fbid=/i;
+  /** Sections whose *next* path segment names a piece of media. */
+  const MEDIA_SECTION =
+    /^(?:watch|video|videos|reel|reels|clip|clips|status|post|posts|shorts|embed|p|v)$/i;
+
+  /**
+   * Words that sit where an identifier would and name nothing — a site's own
+   * navigation, which is most of what a feed page is built from.
+   */
+  const NOT_AN_ID =
+    /^(?:hashtag|tab|tabs|search|live|explore|browse|following|followers|saved|category|categories|page|pages|me|new|popular|trending|feed|home|all|watch|videos?|reels?|shorts)$/i;
+
+  /**
+   * Does this URL name one piece of media?
+   *
+   * A section on its own does not, and on a feed that is the whole difference:
+   * "/watch/hashtag/onevoice27" is a hashtag's videos and "/reel/?s=tab" is the
+   * Reels tab. Both sit inside a post's own markup as ordinary navigation, so
+   * matching the section alone handed one of them to yt-dlp as the video's
+   * address — which is how a hashtag feed came back as "Unsupported URL".
+   *
+   * So what follows the section has to look like an identifier: present, and
+   * either plainly numeric or long enough to be an id rather than a word.
+   */
+  function namesOneMedia(u) {
+    const segments = u.pathname.split("/").filter(Boolean);
+    for (let i = 0; i < segments.length - 1; i++) {
+      if (!MEDIA_SECTION.test(segments[i])) continue;
+      const id = segments[i + 1];
+      if (NOT_AN_ID.test(id)) continue;
+      if (/^\d+$/.test(id) || /^[A-Za-z0-9_.-]{5,}$/.test(id)) return true;
+    }
+    // The older query forms: facebook's video.php and permalink.php, and the
+    // ?v= that YouTube and facebook/watch both still use.
+    if (/\/(?:permalink|story|video)\.php$/i.test(u.pathname)) {
+      return /[?&](?:v|story_fbid|fbid|id)=[A-Za-z0-9_.-]+/i.test(u.search);
+    }
+    return /[?&]v=[A-Za-z0-9_.-]{5,}/i.test(u.search);
+  }
 
   /**
    * How far up either chain to climb before giving up.
@@ -240,7 +276,7 @@
       } catch {
         continue;
       }
-      if (!PERMALINK.test(u.pathname + u.search)) continue;
+      if (!namesOneMedia(u)) continue;
 
       for (let p = a, d = 0; p && d < MAX_CLIMB; d++, p = p.parentElement) {
         const meeting = chain.get(p);
@@ -281,7 +317,7 @@
       } catch {
         continue;
       }
-      if (!PERMALINK.test(u.pathname + u.search)) continue;
+      if (!namesOneMedia(u)) continue;
 
       const b = a.getBoundingClientRect();
       const overlap =
