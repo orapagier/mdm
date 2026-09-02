@@ -373,11 +373,20 @@ fn media_info(v: &serde_json::Value) -> Result<MediaInfo> {
         .unwrap_or_default();
 
     if formats.is_empty() && entries.is_none() {
+        // Named from the extraction rather than assumed. This fires for any
+        // site that answers about a page and offers nothing playable on it,
+        // and reporting every one of those as YouTube sent people to check a
+        // YouTube login over a video that was never on YouTube.
+        let site = v
+            .get("extractor_key")
+            .and_then(|t| t.as_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or("That site");
         bail!(
-            "YouTube returned no downloadable formats for this video — only \
-             storyboard images. It is gated server-side; signing in to that \
-             browser, or trying a different player client under Settings, \
-             sometimes helps."
+            "{site} returned no downloadable formats for this video — only \
+             storyboard images, or nothing at all. It is gated server-side; \
+             signing in to that browser, or trying a different player client \
+             under Settings, sometimes helps."
         );
     }
 

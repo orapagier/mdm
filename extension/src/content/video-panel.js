@@ -185,10 +185,17 @@
    * permalink, because that is what its timestamp links to. Finding it is what
    * lets the button work on a video nobody has opened, let alone played.
    */
-  const PERMALINK = /\/(?:watch|videos?|reels?|clips?|status|posts?|p|v|embed|shorts)\/|[?&]v=/i;
+  const PERMALINK =
+    /\/(?:watch|videos?|reels?|clips?|status|posts?|p|v|embed|shorts)\/|[?&]v=|\/(?:permalink|story|video)\.php|[?&]story_fbid=/i;
 
-  /** How far up from the video to look for the post it belongs to. */
-  const ANCESTOR_DEPTH = 10;
+  /**
+   * How far up either chain to climb before giving up.
+   *
+   * Generous, because this is a bound on a pathological DOM rather than a
+   * guess at a normal one — see `permalinkNear`, which measures distance
+   * instead of assuming it.
+   */
+  const MAX_CLIMB = 60;
 
   function absolute(url) {
     try {
@@ -201,23 +208,51 @@
   /**
    * The post permalink nearest this video.
    *
-   * Nearest, not first on the page: a feed is a column of posts and the one
-   * being watched is the one the button is sitting on. So the search widens a
-   * level at a time from the player and stops at the first link that names a
-   * single piece of media.
+   * Nearest by tree distance, not by document order: a feed is a column of
+   * posts, and the one being watched is the one the player sits inside. So
+   * every candidate link is walked up until it meets the video's own ancestry,
+   * and the link whose meeting point is closest to the video wins. That is the
+   * link belonging to the same post, whatever a site builds its posts out of.
+   *
+   * Measuring the distance rather than assuming it is what makes this work on
+   * a deep page. Facebook nests a feed video some twenty elements below the
+   * post around it; widening a fixed ten levels never reached the timestamp
+   * link, which left the feed's own address as the only thing to hand over —
+   * and "https://www.facebook.com/" is a page yt-dlp rightly refuses.
    */
   function permalinkNear(video) {
+    // The video's ancestry, each element mapped to its distance from the
+    // player. Anything a link's own ancestry runs into is a shared container.
+    const chain = new Map();
     let node = video;
-    for (let i = 0; i < ANCESTOR_DEPTH && node; i++) {
-      node = node.parentElement;
-      if (!node) break;
-      for (const a of node.querySelectorAll("a[href]")) {
-        const href = absolute(a.getAttribute("href") || "");
-        if (!/^https?:/i.test(href) || href === location.href) continue;
-        if (PERMALINK.test(new URL(href).pathname + new URL(href).search)) return href;
+    for (let d = 0; node && d < MAX_CLIMB; d++, node = node.parentElement) {
+      chain.set(node, d);
+    }
+
+    let best = "";
+    let bestMeeting = Infinity;
+    for (const a of document.querySelectorAll("a[href]")) {
+      const href = absolute(a.getAttribute("href") || "");
+      if (!/^https?:/i.test(href) || href === location.href) continue;
+      let u;
+      try {
+        u = new URL(href);
+      } catch {
+        continue;
+      }
+      if (!PERMALINK.test(u.pathname + u.search)) continue;
+
+      for (let p = a, d = 0; p && d < MAX_CLIMB; d++, p = p.parentElement) {
+        const meeting = chain.get(p);
+        if (meeting === undefined) continue;
+        if (meeting < bestMeeting) {
+          bestMeeting = meeting;
+          best = href;
+        }
+        break;
       }
     }
-    return "";
+    return best;
   }
 
   /**

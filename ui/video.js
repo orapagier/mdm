@@ -276,7 +276,10 @@ function reset() {
  * successful extraction of the wrong thing — so anything that looks like a
  * single video's own address is worth asking about first.
  */
-const PERMALINK = /\/(?:watch|videos?|reels?|clips?|status|posts?|shorts|embed|p|v)\/|[?&]v=/i;
+/* Kept in step with the same table in the extension's video panel, which uses
+ * it to *find* these links; here it only decides which to ask about first. */
+const PERMALINK =
+  /\/(?:watch|videos?|reels?|clips?|status|posts?|shorts|embed|p|v)\/|[?&]v=|\/(?:permalink|story|video)\.php|[?&]story_fbid=/i;
 
 function looksSpecific(url) {
   try {
@@ -288,21 +291,47 @@ function looksSpecific(url) {
 }
 
 /**
+ * A manifest is a whole stream written down, and yt-dlp reads real formats out
+ * of one. A plain media file has nothing to extract.
+ */
+const MANIFEST = /\.(?:m3u8|mpd)(?:[?#]|$)/i;
+
+/**
  * Everything worth asking yt-dlp about, in order, without repeats.
  *
- * The typed URL leads because it is either what the user asked for or the page
- * the button was pressed on — but only among URLs of equal standing. Press
- * Download on a video in a feed and the page is the feed, while the extension
- * has read the post's own permalink out of the DOM; asking about the feed
- * first spends a slow extraction to learn what its shape already said. So the
- * list is partitioned by specificity and the original order kept inside each
- * half. Capped, because each one that fails costs a full extraction.
+ * Pages only, plus the manifests among the media. That distinction matters:
+ * these patterns are shapes of a *page* URL, and a CDN path is under no
+ * obligation to avoid them — Facebook serves its video files from
+ * `/o1/v/t2/...`, whose "/v/" made a raw .mp4 look like the most specific page
+ * on offer. It was asked about first, failed the way a video file does when
+ * something tries to extract a page from it, and that failure became the error
+ * the window reported for the whole attempt. A media file is not a page and is
+ * no longer treated as one; it is what `offerDirect` falls back to.
+ *
+ * Among pages, the typed URL leads — it is what the user asked for, or the
+ * page the button was pressed on — but only against URLs of equal standing.
+ * Press Download on a video in a feed and the page is the feed, while the
+ * extension has read the post's own permalink out of the DOM; asking about the
+ * feed first spends a slow extraction to learn what its shape already said.
+ * Capped, because each one that fails costs another.
  */
 function sources() {
+  const pages = [
+    $("vid-url").value.trim(),
+    ...candidates.filter((c) => c.kind !== "media").map((c) => c.url),
+  ];
+  const streams = candidates
+    .filter((c) => c.kind === "media" && MANIFEST.test(c.url))
+    .map((c) => c.url);
+
   const seen = new Set();
-  const all = [$("vid-url").value.trim(), ...candidates.map((c) => c.url)]
-    .filter((u) => /^https?:\/\//i.test(u) && !seen.has(u) && seen.add(u));
-  return [...all.filter(looksSpecific), ...all.filter((u) => !looksSpecific(u))].slice(0, 4);
+  return [
+    ...pages.filter(looksSpecific),
+    ...pages.filter((u) => !looksSpecific(u)),
+    ...streams,
+  ]
+    .filter((u) => /^https?:\/\//i.test(u) && !seen.has(u) && seen.add(u))
+    .slice(0, 4);
 }
 
 async function probe(pageTitle) {
