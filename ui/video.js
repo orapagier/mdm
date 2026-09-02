@@ -269,17 +269,40 @@ function reset() {
 }
 
 /**
+ * Paths that name one piece of media rather than a listing of them.
+ *
+ * A home page, a feed or a profile is a page *full* of videos. yt-dlp reads
+ * one as a playlist and answers with entries and no formats — a perfectly
+ * successful extraction of the wrong thing — so anything that looks like a
+ * single video's own address is worth asking about first.
+ */
+const PERMALINK = /\/(?:watch|videos?|reels?|clips?|status|posts?|shorts|embed|p|v)\/|[?&]v=/i;
+
+function looksSpecific(url) {
+  try {
+    const u = new URL(url);
+    return PERMALINK.test(u.pathname + u.search);
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Everything worth asking yt-dlp about, in order, without repeats.
  *
  * The typed URL leads because it is either what the user asked for or the page
- * the button was pressed on; the rest are the extension's readings of that
- * page. Capped, because each one that fails costs a full extraction.
+ * the button was pressed on — but only among URLs of equal standing. Press
+ * Download on a video in a feed and the page is the feed, while the extension
+ * has read the post's own permalink out of the DOM; asking about the feed
+ * first spends a slow extraction to learn what its shape already said. So the
+ * list is partitioned by specificity and the original order kept inside each
+ * half. Capped, because each one that fails costs a full extraction.
  */
 function sources() {
   const seen = new Set();
-  return [$("vid-url").value.trim(), ...candidates.map((c) => c.url)]
-    .filter((u) => /^https?:\/\//i.test(u) && !seen.has(u) && seen.add(u))
-    .slice(0, 4);
+  const all = [$("vid-url").value.trim(), ...candidates.map((c) => c.url)]
+    .filter((u) => /^https?:\/\//i.test(u) && !seen.has(u) && seen.add(u));
+  return [...all.filter(looksSpecific), ...all.filter((u) => !looksSpecific(u))].slice(0, 4);
 }
 
 async function probe(pageTitle) {
@@ -290,6 +313,10 @@ async function probe(pageTitle) {
 
   let result = null;
   let failure = null;
+  // A page that resolved to a *list* of videos rather than one. Remembered so
+  // the failure can say so, since it is a different problem from a page that
+  // could not be read at all.
+  let listing = false;
   for (const [i, url] of urls.entries()) {
     // Name the page being read: extraction is slow enough that "which video is
     // this working on?" is a fair question. After the first, say which attempt
@@ -315,6 +342,16 @@ async function probe(pageTitle) {
     }
     // The window was pointed at another page while this was in flight.
     if (seq !== probeSeq) return;
+    // Answering is not the same as answering about a video. A feed or a home
+    // page extracts cleanly into a playlist: entries, and no formats to choose
+    // between. Taking that as the answer is what left the picker reading
+    // "0 formats" for a video the next candidate could have resolved — so it
+    // is not an answer, and the remaining sources still get their turn.
+    if (!result.formats.length) {
+      listing = true;
+      result = null;
+      continue;
+    }
     // Show what actually answered, so a grab from a feed says which post it
     // resolved to rather than silently downloading something else.
     $("vid-url").value = url;
@@ -323,7 +360,12 @@ async function probe(pageTitle) {
 
   if (!result) {
     if (seq !== probeSeq) return;
-    return offerDirect(failure || "Nothing on that page could be read.");
+    return offerDirect(
+      failure ||
+        (listing
+          ? "Every page tried is a list of videos rather than one video."
+          : "Nothing on that page could be read.")
+    );
   }
 
   info = result;

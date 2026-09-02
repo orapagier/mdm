@@ -210,3 +210,37 @@ function extensionOf(name) {
   const ext = name.slice(dot + 1).toLowerCase();
   return /^[a-z0-9]{1,12}$/.test(ext) ? ext : "";
 }
+
+/**
+ * Split `data:[<mime>][;charset=…][;base64],<payload>` into bytes.
+ *
+ * base64 either way, because that is the shape the app's job format takes —
+ * which for an already-base64 URL means passing the payload straight through.
+ */
+function decodeDataUrl(url) {
+  const comma = url.indexOf(",");
+  if (comma < 0) return null;
+  const meta = url.slice("data:".length, comma);
+  const body = url.slice(comma + 1);
+  const mime = meta.split(";", 1)[0].trim().toLowerCase();
+
+  try {
+    if (/;base64\s*$/i.test(meta)) {
+      const data = body.replace(/\s+/g, "");
+      const padding = (data.match(/=*$/) || [""])[0].length;
+      return { mime, data, size: Math.floor((data.length * 3) / 4) - padding };
+    }
+    // A percent-encoded body is text. Encode it to bytes before base64, or a
+    // multi-byte character is cut in half on the way through.
+    const bytes = new TextEncoder().encode(decodeURIComponent(body));
+    let binary = "";
+    const CHUNK = 0x8000;
+    for (let i = 0; i < bytes.length; i += CHUNK) {
+      binary += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
+    }
+    return { mime, data: btoa(binary), size: bytes.length };
+  } catch (e) {
+    console.warn("[mdm] could not decode a data: url:", e.message);
+    return null;
+  }
+}

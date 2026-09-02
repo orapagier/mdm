@@ -211,6 +211,25 @@ function buildJob(req, details, headers, reason) {
  * had already classified them.
  * ------------------------------------------------------------------ */
 
+/**
+ * Bring the native port up, and give it a moment to answer.
+ *
+ * `isAvailable()` is false for the whole window between the browser starting
+ * and the host's first connection, and again after a host dies while its
+ * reconnect is pending. Downloads that landed in either window were dropped on
+ * the floor — the one thing this listener exists to prevent. Waiting costs
+ * nothing that matters: the browser has not begun transferring yet.
+ */
+async function ensureNative(timeoutMs = 2000) {
+  if (Native.isAvailable()) return true;
+  Native.connect();
+  const deadline = Date.now() + timeoutMs;
+  while (!Native.isAvailable() && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  return Native.isAvailable();
+}
+
 browser.downloads.onCreated.addListener(async (item) => {
   if (!cfg.enabled) return;
   if (wasRecentlyCaptured(item.url)) return;
@@ -218,10 +237,15 @@ browser.downloads.onCreated.addListener(async (item) => {
     state.bypass.delete(item.url);
     return;
   }
-  if (!Native.isAvailable()) return;
+  if (!(await ensureNative())) return;
+
   // A blob has no server to re-fetch it from; the page is the only source.
   if (/^blob:/i.test(item.url)) return captureBlob(item);
-  if (!/^https?:\/\//i.test(item.url)) return; // data: cannot be re-fetched
+  // A data: URL cannot be re-fetched either — but it does not need to be. It
+  // *is* the bytes, spelled out in the URL, so it is handed over the way a
+  // blob's are rather than left behind as unfetchable.
+  if (/^data:/i.test(item.url)) return captureDataUrl(item);
+  if (!/^https?:\/\//i.test(item.url)) return;
 
   const host = hostOf(item.url);
   if (host && cfg.blockedSites.some((s) => hostMatches(host, s))) return;
@@ -231,12 +255,17 @@ browser.downloads.onCreated.addListener(async (item) => {
   );
   const ext = extensionOf(filename);
   if (cfg.blockedExtensions.includes(ext)) return;
-  // The size floor exists to keep MDM out of *automatic* captures. Everything
-  // arriving here is a download the browser already decided on — a photo saved
-  // from a chat is a real download at 200 KB — so pictures are exempt from it.
-  const image = looksLikeImage(item.mime || "", ext);
-  if (image && !cfg.captureImages) return;
-  if (!image && item.fileSize > 0 && item.fileSize < cfg.minSize) return;
+  if (looksLikeImage(item.mime || "", ext) && !cfg.captureImages) return;
+
+  // No size floor here, deliberately, and none by file type either.
+  //
+  // That threshold belongs to the *automatic* net, where a small response is
+  // far more likely to be an API reply than a file and guessing wrong costs
+  // the user a download they never asked for. Nothing reaches this listener by
+  // guesswork: the browser has already decided every one of these is a
+  // download. A 40 KB photo saved out of a chat is exactly as much a download
+  // as a 4 GB image, and skipping it only meant MDM captured some of what the
+  // browser downloaded rather than all of it.
 
   const job = {
     url: item.url,
@@ -352,6 +381,58 @@ async function captureBlob(item) {
   }
 }
 
+/**
+ * A download the page spelled out in the URL itself.
+ *
+ * `data:` is what a page reaches for when it has something to hand over and no
+ * server behind it — a canvas export, a generated document, a small attachment
+ * decoded in script. There is no request to re-issue, so as with a blob it is
+ * the bytes that are handed over rather than an address.
+ */
+async function captureDataUrl(item) {
+  if (!cfg.captureBlobs) return;
+
+  const payload = decodeDataUrl(item.url);
+  if (!payload) return;
+  if (payload.size > MAX_BLOB_BYTES) return;
+
+  const mime = payload.mime || item.mime || "";
+  let filename = sanitizeFilename((item.filename || "").split("/").pop());
+  filename = filename || "download" + extensionForMime(mime);
+  if (cfg.blockedExtensions.includes(extensionOf(filename))) return;
+  if (looksLikeImage(mime, extensionOf(filename)) && !cfg.captureImages) return;
+
+  // The bytes are in hand, so the browser's copy is now the duplicate.
+  markCaptured(item.url);
+  await takeOverDownload(item.id);
+
+  const job = {
+    // Not the data: URL itself — that *is* the file, and megabytes of base64
+    // would be written into the database and shown as the download's address.
+    // The browser's own id for this download is short, unique, and enough to
+    // keep two saves of different bytes from being read as a repeat of one.
+    url: `data:${mime || "application/octet-stream"};download=${item.id}`,
+    filename,
+    size: payload.size,
+    mime,
+    data: payload.data,
+    headers: [],
+    referrer: item.referrer || "",
+    cookieStoreId: "",
+    tabId: -1,
+    reason: "data url download",
+    source: "data",
+  };
+
+  try {
+    const reply = await Native.request({ type: "download", job }, 20000);
+    if (!reply || !reply.accepted) notifyPlain("MDM could not save " + filename);
+  } catch (e) {
+    console.warn("[mdm] data url handoff failed:", e.message);
+    notifyPlain("MDM could not save " + filename + ": " + e.message);
+  }
+}
+
 /** Enough of a mapping to name a file the browser did not name. */
 const MIME_EXTENSION = {
   "image/jpeg": ".jpg", "image/png": ".png", "image/gif": ".gif",
@@ -376,49 +457,66 @@ function originOfBlob(url) {
 }
 
 /**
- * Ask the tabs on that origin to read the blob back for us.
+ * Ask the document that owns the blob to read it back for us.
  *
- * Only a document of the same origin can resolve the handle, so every open tab
- * on it is asked in turn, the active one first — the download almost always
- * came from the tab in front of the user. Frames that do not know the blob
- * answer nothing, so the reply comes from whichever one does.
+ * Only a document of the blob's own origin can resolve the handle, so the
+ * search is over *frames*, not tabs. That distinction is the whole point: a
+ * chat, a mail client or an embedded viewer runs its interface in a frame, and
+ * a blob it creates belongs to that frame's origin while the tab around it
+ * still reads as the site it is embedded in. Matching tabs by address bar
+ * looked straight past those documents — so a photo saved from a conversation
+ * rendered in a frame fell through to the browser while the same photo from
+ * one rendered in the page was captured.
+ *
+ * Frames that do not hold the blob answer nothing, so the reply comes from
+ * whichever one does; the active tab goes first because that is where a
+ * download nearly always starts.
  */
 async function readBlobFromPage(url, origin) {
   let tabs = [];
   try {
-    tabs = await browser.tabs.query({ url: origin + "/*" });
+    tabs = await browser.tabs.query({});
   } catch (e) {
     console.warn("[mdm] tab lookup failed:", e.message);
     return null;
   }
   tabs.sort((a, b) => Number(b.active) - Number(a.active));
 
+  // Collected before any of them is asked, so the budget below is spent on
+  // documents actually on the origin rather than on whichever tabs came first.
+  const targets = [];
+  for (const tab of tabs) {
+    for (const frameId of await framesOn(tab, origin)) {
+      targets.push({ tabId: tab.id, frameId });
+    }
+    if (targets.length >= MAX_FRAMES_ASKED) break;
+  }
+
   let refusal = null;
-  let asked = 0;
-  for (const tab of tabs.slice(0, 5)) {
-    for (const frameId of await framesOn(tab.id, origin)) {
-      if (asked++ >= MAX_FRAMES_ASKED) break;
-      try {
-        const reply = await browser.tabs.sendMessage(
-          tab.id,
-          { type: "mdm-read-blob", url, limit: MAX_BLOB_BYTES },
-          { frameId }
-        );
-        if (reply && reply.ok) return reply;
-        // A frame on the right origin that does not hold this blob fails its
-        // fetch, which is not an answer about the blob — keep asking.
-        if (reply && reply.error) refusal = reply.error;
-      } catch {
-        /* no content script in that frame */
-      }
+  for (const { tabId, frameId } of targets.slice(0, MAX_FRAMES_ASKED)) {
+    try {
+      const reply = await browser.tabs.sendMessage(
+        tabId,
+        { type: "mdm-read-blob", url, limit: MAX_BLOB_BYTES },
+        { frameId }
+      );
+      if (reply && reply.ok) return reply;
+      // A frame on the right origin that does not hold this blob fails its
+      // fetch, which is not an answer about the blob — keep asking.
+      if (reply && reply.error) refusal = reply.error;
+    } catch {
+      /* no content script in that frame */
     }
   }
   if (refusal) console.warn("[mdm] blob could not be read:", refusal);
   return null;
 }
 
-/** A ceiling, because an ad-heavy page can carry dozens of frames. */
-const MAX_FRAMES_ASKED = 12;
+/**
+ * A ceiling, because every open tab is now considered and an ad-heavy page can
+ * carry dozens of frames on its own.
+ */
+const MAX_FRAMES_ASKED = 24;
 
 /**
  * Every frame of a tab that shares the blob's origin.
@@ -428,22 +526,23 @@ const MAX_FRAMES_ASKED = 12;
  * answers with whichever replies first — which is the frame that failed
  * fastest, not the one holding the bytes.
  */
-async function framesOn(tabId, origin) {
+async function framesOn(tab, origin) {
   try {
-    const frames = await browser.webNavigation.getAllFrames({ tabId });
-    return frames
-      .filter((f) => {
-        try {
-          return new URL(f.url).origin === origin;
-        } catch {
-          return false;
-        }
-      })
-      .map((f) => f.frameId);
+    const frames = await browser.webNavigation.getAllFrames({ tabId: tab.id });
+    return frames.filter((f) => originOfUrl(f.url) === origin).map((f) => f.frameId);
   } catch {
-    // Without the frame list the top frame is the best guess, and it is where
-    // all but a handful of these downloads start.
-    return [0];
+    // Without a frame list there is only the top document to guess at, and
+    // guessing is only worth it for a tab that is on the origin itself —
+    // every other tab would spend a slot in the budget to be told nothing.
+    return originOfUrl(tab.url) === origin ? [0] : [];
+  }
+}
+
+function originOfUrl(url) {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return "";
   }
 }
 

@@ -220,6 +220,47 @@
     return "";
   }
 
+  /**
+   * The permalink whose link box sits over the video.
+   *
+   * A fallback for players the ancestor walk cannot reach. YouTube's hover
+   * preview is one shared player the page moves into whichever card is under
+   * the pointer, so how far the card's own link is from the video depends on a
+   * layout that is none of our business. What holds regardless is that the
+   * link covers the thumbnail the player was dropped on top of — geometry says
+   * plainly what the DOM shape only sometimes does.
+   */
+  function permalinkOver(video) {
+    const r = video.getBoundingClientRect();
+    const area = r.width * r.height;
+    if (!area) return "";
+
+    let best = "";
+    let bestOverlap = 0;
+    for (const a of document.querySelectorAll("a[href]")) {
+      const href = absolute(a.getAttribute("href") || "");
+      if (!/^https?:/i.test(href) || href === location.href) continue;
+      let u;
+      try {
+        u = new URL(href);
+      } catch {
+        continue;
+      }
+      if (!PERMALINK.test(u.pathname + u.search)) continue;
+
+      const b = a.getBoundingClientRect();
+      const overlap =
+        Math.max(0, Math.min(r.right, b.right) - Math.max(r.left, b.left)) *
+        Math.max(0, Math.min(r.bottom, b.bottom) - Math.max(r.top, b.top));
+      if (overlap > bestOverlap) {
+        bestOverlap = overlap;
+        best = href;
+      }
+    }
+    // A few pixels of contact is the card next door, not this one.
+    return bestOverlap > area * 0.3 ? best : "";
+  }
+
   /** Media the page declares in its own metadata, played or not. */
   function declaredMedia() {
     const out = [];
@@ -278,7 +319,12 @@
     }
     for (const url of declaredMedia()) add(url, "media");
 
-    if (video) add(permalinkNear(video), "page");
+    // Both readings are offered rather than one chosen: they agree on an
+    // ordinary post, and where they disagree the app can try each in turn.
+    if (video) {
+      add(permalinkNear(video), "page");
+      add(permalinkOver(video), "page");
+    }
     const canonical = document.querySelector('link[rel="canonical"]');
     if (canonical) add(absolute(canonical.getAttribute("href") || ""), "page");
     const ogUrl = document.querySelector('meta[property="og:url"]');

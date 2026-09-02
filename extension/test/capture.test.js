@@ -15,7 +15,7 @@ const vm = require("vm");
 const assert = require("assert");
 
 const SRC = path.join(__dirname, "..", "src");
-const context = vm.createContext({ console, TextDecoder, URL });
+const context = vm.createContext({ console, TextDecoder, TextEncoder, URL, btoa, atob });
 for (const file of ["util.js", "capture.js"]) {
   vm.runInContext(fs.readFileSync(path.join(SRC, file), "utf8"), context, {
     filename: file,
@@ -30,6 +30,7 @@ const {
   hostMatches,
   headerMap,
   mirrorsOf,
+  decodeDataUrl,
 } = context;
 
 const CFG = {
@@ -451,6 +452,72 @@ check("a flood of mirrors is capped", () => {
 
 check("no Link header means no mirrors, not a crash", () => {
   assert.deepStrictEqual([...mirrorsOf(headerMap([]), ORIGIN)], []);
+});
+
+
+/* ---------------- data: urls ---------------- */
+
+/* The download backstop hands these over as bytes, so what comes out has to be
+ * exactly what the page put in — a payload cut short or re-encoded is a
+ * corrupt file the user only finds out about when they open it. */
+
+const utf8 = (s) => [...new TextEncoder().encode(s)];
+const bytesOf = (b64) => [...Buffer.from(b64, "base64")];
+
+check("a base64 data url passes its payload through untouched", () => {
+  const d = decodeDataUrl("data:image/png;base64,aGVsbG8=");
+  assert.strictEqual(d.mime, "image/png");
+  assert.strictEqual(d.data, "aGVsbG8=");
+  assert.deepStrictEqual(bytesOf(d.data), utf8("hello"));
+  assert.strictEqual(d.size, 5);
+});
+
+check("padding is not counted as payload", () => {
+  // "aGk=" is 2 bytes, not the 3 a naive length*3/4 would report.
+  assert.strictEqual(decodeDataUrl("data:text/plain;base64,aGk=").size, 2);
+  assert.strictEqual(decodeDataUrl("data:text/plain;base64,aGVsbG8h").size, 6);
+});
+
+check("a percent-encoded body becomes the bytes it stands for", () => {
+  const d = decodeDataUrl("data:text/plain,hello%20world");
+  assert.deepStrictEqual(bytesOf(d.data), utf8("hello world"));
+  assert.strictEqual(d.size, 11);
+});
+
+check("a multi-byte character survives the round trip whole", () => {
+  // Encoding the string rather than its bytes would cut this in half.
+  const d = decodeDataUrl("data:text/plain,caf%C3%A9%20%E2%98%95");
+  assert.deepStrictEqual(bytesOf(d.data), utf8("café ☕"));
+  assert.strictEqual(d.size, utf8("café ☕").length);
+});
+
+check("charset and other parameters do not become the mime type", () => {
+  assert.strictEqual(decodeDataUrl("data:text/csv;charset=utf-8,a,b").mime, "text/csv");
+  assert.strictEqual(
+    decodeDataUrl("data:application/pdf;charset=utf-8;base64,AAAA").mime,
+    "application/pdf"
+  );
+});
+
+check("a data url with no mime is still readable", () => {
+  const d = decodeDataUrl("data:,plain");
+  assert.strictEqual(d.mime, "");
+  assert.deepStrictEqual(bytesOf(d.data), utf8("plain"));
+});
+
+check("whitespace inside a base64 payload is not payload", () => {
+  const d = decodeDataUrl("data:text/plain;base64,aGVs\n bG8=");
+  assert.strictEqual(d.data, "aGVsbG8=");
+  assert.strictEqual(d.size, 5);
+});
+
+check("a url with no comma is not a data url", () => {
+  assert.strictEqual(decodeDataUrl("data:text/plain"), null);
+});
+
+check("an undecodable body is refused rather than half-read", () => {
+  // A stray % is not valid percent-encoding; decodeURIComponent throws.
+  assert.strictEqual(decodeDataUrl("data:text/plain,100%"), null);
 });
 
 /* ---------------- report ---------------- */
