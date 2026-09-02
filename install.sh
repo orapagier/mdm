@@ -231,16 +231,25 @@ say "Checking for a pre-rename (ldm) install"
 # Name the process actually found. The one holding the database open is
 # usually the *old* binary, and being told "MDM is running" sends people
 # looking for a name that pgrep will not match.
+#
+# Zombies are skipped. A process in Z has already exited and holds no file
+# descriptors, so it is not keeping the database open — but pgrep still lists
+# it, and mdm-host leaves one behind every time the app it spawned dies. Taking
+# those at face value refuses the migration over a process that is already gone.
 for running in mdm ldm; do
-  pids="$(pgrep -x "$running" 2>/dev/null || true)"
+  pids=""
+  for pid in $(pgrep -x "$running" 2>/dev/null || true); do
+    state="$(ps -o stat= -p "$pid" 2>/dev/null | tr -d ' ')"
+    if [[ -n "$state" && "$state" != Z* ]]; then pids+="$pid "; fi
+  done
+  pids="${pids% }"
   if [[ -n "$pids" ]]; then
-    die "\"$running\" is still running (pid ${pids//$'\n'/, }) — quit it first,
-  then re-run this script. Its database is open, and moving it now would
-  strand everything written since it started.
-  It has no window when it was started in the background; stop it with:
-    pkill -x $running
-  Firefox can start it again through the extension, so close Firefox too if
-  it comes back."
+    die "\"$running\" is still running (pid ${pids// /, }) — quit it first, then
+  re-run this script. Its database is open, and moving it now would strand
+  everything written since it started.
+  It has no window when it was started in the background, and the browser
+  restarts it through the extension. Stop both with:
+    $REPO/stop.sh --quit-browser"
   fi
 done
 
