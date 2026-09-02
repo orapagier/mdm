@@ -82,6 +82,14 @@ async function fitWindow() {
 let info = null;
 let kind = "both";
 let chosen = null;
+/** Other URLs this grab could resolve through, from the extension. */
+let candidates = [];
+/**
+ * A media file to fetch outright, set only when no page would resolve.
+ * It bypasses yt-dlp: there is nothing left to extract, and on a machine
+ * without yt-dlp at all it is the only way the grab can still work.
+ */
+let direct = null;
 /** Bumped on every reset, so a probe that lands late cannot paint over the
  *  page the window has since been pointed at. */
 let probeSeq = 0;
@@ -244,6 +252,7 @@ function reset() {
   probeSeq++;
   info = null;
   chosen = null;
+  direct = null;
   kind = "both";
   say("vid-status", "");
   $("vid-head").hidden = true;
@@ -259,25 +268,63 @@ function reset() {
   thumb.removeAttribute("src");
 }
 
+/**
+ * Everything worth asking yt-dlp about, in order, without repeats.
+ *
+ * The typed URL leads because it is either what the user asked for or the page
+ * the button was pressed on; the rest are the extension's readings of that
+ * page. Capped, because each one that fails costs a full extraction.
+ */
+function sources() {
+  const seen = new Set();
+  return [$("vid-url").value.trim(), ...candidates.map((c) => c.url)]
+    .filter((u) => /^https?:\/\//i.test(u) && !seen.has(u) && seen.add(u))
+    .slice(0, 4);
+}
+
 async function probe(pageTitle) {
-  const url = $("vid-url").value.trim();
-  if (!url) return;
+  if (!$("vid-url").value.trim()) return;
   reset();
   const seq = probeSeq;
-  // Name the page being read: extraction is slow enough that "which video is
-  // this working on?" is a fair question.
-  say("vid-status", pageTitle ? `Reading ${pageTitle}…` : "Reading page…", "hint");
+  const urls = sources();
 
-  let result;
-  try {
-    result = await invoke("probe_media", { url });
-  } catch (e) {
+  let result = null;
+  let failure = null;
+  for (const [i, url] of urls.entries()) {
+    // Name the page being read: extraction is slow enough that "which video is
+    // this working on?" is a fair question. After the first, say which attempt
+    // this is — the page URL was not the video and something else is being
+    // tried, which is worth seeing rather than a status bar that just sits.
+    say(
+      "vid-status",
+      i === 0
+        ? pageTitle
+          ? `Reading ${pageTitle}…`
+          : "Reading page…"
+        : `Nothing there. Trying another source (${i + 1} of ${urls.length})…`,
+      "hint"
+    );
+    try {
+      result = await invoke("probe_media", { url });
+    } catch (e) {
+      if (seq !== probeSeq) return;
+      // The first failure is the one worth reporting: it is about the page the
+      // user was actually on. The rest are guesses failing.
+      failure ??= String(e);
+      continue;
+    }
+    // The window was pointed at another page while this was in flight.
     if (seq !== probeSeq) return;
-    say("vid-status", String(e), "hint bad");
-    return;
+    // Show what actually answered, so a grab from a feed says which post it
+    // resolved to rather than silently downloading something else.
+    $("vid-url").value = url;
+    break;
   }
-  // The window was pointed at another page while this was in flight.
-  if (seq !== probeSeq) return;
+
+  if (!result) {
+    if (seq !== probeSeq) return;
+    return offerDirect(failure || "Nothing on that page could be read.");
+  }
 
   info = result;
   say("vid-status", "");
@@ -302,6 +349,42 @@ async function probe(pageTitle) {
   $("vid-name").value = suggestedName();
   $("vid-save").hidden = false;
   fitWindow();
+}
+
+/**
+ * Last resort: the file the page is using, fetched as a file.
+ *
+ * When no page in the chain resolves — an extractor that does not know the
+ * site, or no yt-dlp on the machine at all — there may still be a plain media
+ * URL among the candidates. There is no quality to choose, so the picker stays
+ * empty and only the name and folder are offered.
+ */
+function offerDirect(reason) {
+  const media = candidates.find(
+    (c) => c.kind === "media" && /^https?:\/\//i.test(c.url)
+  );
+  if (!media) return say("vid-status", reason, "hint bad");
+
+  direct = media.url;
+  $("vid-url").value = direct;
+  $("vid-name").value = nameFromUrl(direct);
+  $("vid-save").hidden = false;
+  say(
+    "vid-status",
+    `${reason} — the media file the page is using can still be downloaded as it is.`,
+    "hint bad"
+  );
+  fitWindow();
+}
+
+/** Last path segment of a URL, for naming a file nothing else named. */
+function nameFromUrl(url) {
+  try {
+    const seg = new URL(url).pathname.split("/").filter(Boolean).pop() || "";
+    return decodeURIComponent(seg).replace(/[\\/]/g, "_") || "video";
+  } catch {
+    return "video";
+  }
 }
 
 /* ------------------------------------------------------------------ *
@@ -342,7 +425,9 @@ async function start(paused) {
   const id = await call("add_download", {
     url,
     directory: $("vid-dir").value.trim() || null,
-    useYtdlp: true,
+    // A direct media URL has nothing to extract; handing it to yt-dlp would
+    // only put an extractor between aria2 and a file it can already fetch.
+    useYtdlp: !direct,
     formatId: chosen ? formatExpression(chosen) : null,
     filename: $("vid-name").value.trim() || null,
     startPaused: paused,
@@ -465,11 +550,17 @@ function render(snapshot) {
  * Wiring
  * ------------------------------------------------------------------ */
 
-$("vid-probe").addEventListener("click", () => probe());
+/** A URL the user typed stands alone; the last page's readings are not it. */
+function probeTyped() {
+  candidates = [];
+  probe();
+}
+
+$("vid-probe").addEventListener("click", probeTyped);
 $("vid-url").addEventListener("keydown", (e) => {
   if (e.key === "Enter") {
     e.preventDefault();
-    probe();
+    probeTyped();
   }
 });
 
@@ -577,6 +668,7 @@ async function handleRequest(request) {
     return;
   }
 
+  candidates = request.candidates || [];
   const url = request.url || (await invoke("read_clipboard_url").catch(() => null)) || "";
   $("vid-url").value = url;
   if (url) await probe(request.title || "");

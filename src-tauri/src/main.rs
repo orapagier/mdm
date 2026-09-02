@@ -243,7 +243,11 @@ fn main() {
                     // raising the library for it would be exactly what the
                     // browser button is meant to avoid.
                     match req {
-                        UiRequest::VideoPage { url, title } => {
+                        UiRequest::VideoPage {
+                            url,
+                            title,
+                            candidates,
+                        } => {
                             // Start resolving the page now rather than when the
                             // window gets round to asking: the extraction is
                             // the slow part, and the webview takes a moment to
@@ -260,7 +264,7 @@ fn main() {
                                 )
                                 .await;
                             });
-                            video::open(&ui_handle, url, title);
+                            video::open(&ui_handle, url, title, candidates);
                             continue;
                         }
                         UiRequest::Started {

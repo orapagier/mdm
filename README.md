@@ -45,7 +45,7 @@ throttling through one RPC surface.
 
 ## Capture rules
 
-Two independent nets, because neither is sufficient alone:
+Three independent nets, because none of them is sufficient alone:
 
 1. `webRequest.onHeadersReceived` (blocking) — decides from
    `Content-Disposition`, `Content-Type`, `Content-Length` and the file
@@ -55,7 +55,53 @@ Two independent nets, because neither is sufficient alone:
    resolve instead of returning 403.
 2. `downloads.onCreated` — the backstop for anything the first net missed
    ("Save Link As", script-initiated downloads), cancelled and erased once the
-   daemon confirms.
+   daemon confirms. Erased *and* removed from disk: a small file can finish
+   inside the hand-off, and a download cancelled a moment too late would leave
+   a second copy under Firefox's own name.
+3. A content script, for downloads that never had a URL to begin with — see
+   **In-memory downloads** below.
+
+### Images
+
+A browser exists to *show* pictures, so an image response is a view until
+something says otherwise, and capturing every one of them would mean opening a
+photo in a tab saved it to disk instead of putting it on screen. Two things
+say otherwise: `Content-Disposition: attachment`, and a URL that spells out a
+download — `?dl=1` and its cousins, which is what chat and gallery sites append
+when the button says Download. Those are captured, and the size floor does not
+apply to them: it exists to keep MDM out of automatic captures, and a photo
+saved on purpose is a real download at 200 KB.
+
+The **Grab images from this page…** context menu reads the live DOM instead,
+offering every picture the page actually put on screen — with the size each one
+turned out to be, which is what tells a photograph from an icon. Sniffing them
+as they load would be useless here: a page has hundreds and the badge would
+drown.
+
+### In-memory downloads
+
+A growing number of sites never link to a file at all. They fetch the bytes
+with script, wrap them in a `Blob` and click an `<a download>` at the handle
+`URL.createObjectURL` returned. What reaches the downloads API is then
+`blob:https://site/<uuid>` — a name for an object inside one document, which
+nothing outside that document can resolve. This is why a photo saved from one
+Facebook chat was captured and the same photo from another was not: the
+difference was never the chat, it was whether the page handed the browser a URL
+or a blob.
+
+So MDM asks the page. A content script reads the blob back where it is
+meaningful and hands the bytes to the app, which writes them out; the browser's
+own copy is cancelled and removed. Two details make it reliable:
+
+* **Revocation is deferred.** The usual shape is `a.click()` followed
+  immediately by `URL.revokeObjectURL`, so the handle is dead before the
+  extension hears about the download. Firefox's own transfer holds a reference
+  and survives that; MDM has none, so the page's revocation is delayed by 45
+  seconds. It still happens, and the memory is still freed.
+* **There is a ceiling.** The bytes travel base64-encoded through native
+  messaging, so blobs over 24 MB are left to Firefox. Blob downloads are
+  photos, exports and generated documents; anything genuinely large came from a
+  server, and a server can be fetched from properly.
 
 ## Streaming video
 
@@ -67,7 +113,22 @@ them directly yields a silent, truncated file.
 
 So instead a content script floats a **Download** button over any sizeable
 `<video>`, and clicking it sends the *page* URL to yt-dlp, which resolves it
-into real formats and offers a quality picker. Since DASH sites serve their
+into real formats and offers a quality picker.
+
+**The page URL is often not the video's own**, though. Click Download on a
+feed and the address bar still says `facebook.com` or `x.com/home`, which no
+extractor can make anything of — and that is why the button used to fail until
+the video had been opened and played, at which point the address bar finally
+named it. So the click now sends what the *page* knows as well: the permalink
+nearest the player (a post always carries one, because that is what its
+timestamp links to), any file the page declares in `og:video` or a schema.org
+`VideoObject`, the `<source>` elements, and whatever the sniffer has watched
+the player fetch. The window works down that list and takes the first that
+resolves, showing which one answered. None of it needs the player to have
+started, which is the point: a video can be grabbed without watching it first.
+If nothing resolves but a plain media URL was among the candidates, that file
+is offered for download as it is — there is nothing to extract, so yt-dlp is
+skipped entirely. Since DASH sites serve their
 best video without sound, a video-only format is listed under **Video + audio**
 and picking it pairs the stream with the best audio (`<id>+bestaudio/<id>`) for
 yt-dlp to mux. The **Video, no sound** tab is for deliberately taking the
@@ -110,7 +171,7 @@ Deliberately **not** captured, because they cannot work out of process:
 
 | Case | Why |
 |---|---|
-| `blob:` / `data:` URLs | Exist only inside the page; no external fetch is possible |
+| `data:` URLs | The bytes are the URL; there is nothing to fetch |
 | POST-initiated downloads | Cannot be replayed as a GET |
 | `206 Partial Content` | A range request — usually a `<video>` element playing |
 | `type: "media"` | In-page playback; cancelling it breaks the player |

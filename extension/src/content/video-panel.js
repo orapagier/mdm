@@ -174,6 +174,120 @@
   }
 
   /* ---------------------------------------------------------------- *
+   * What this video could be fetched from
+   * ---------------------------------------------------------------- */
+
+  /**
+   * Paths that mark a link as one post's own address.
+   *
+   * A video in a feed has no URL of its own in the address bar — the bar says
+   * "facebook.com" or "x.com/home" — but the post around it always carries a
+   * permalink, because that is what its timestamp links to. Finding it is what
+   * lets the button work on a video nobody has opened, let alone played.
+   */
+  const PERMALINK = /\/(?:watch|videos?|reels?|clips?|status|posts?|p|v|embed|shorts)\/|[?&]v=/i;
+
+  /** How far up from the video to look for the post it belongs to. */
+  const ANCESTOR_DEPTH = 10;
+
+  function absolute(url) {
+    try {
+      return new URL(url, location.href).href;
+    } catch {
+      return "";
+    }
+  }
+
+  /**
+   * The post permalink nearest this video.
+   *
+   * Nearest, not first on the page: a feed is a column of posts and the one
+   * being watched is the one the button is sitting on. So the search widens a
+   * level at a time from the player and stops at the first link that names a
+   * single piece of media.
+   */
+  function permalinkNear(video) {
+    let node = video;
+    for (let i = 0; i < ANCESTOR_DEPTH && node; i++) {
+      node = node.parentElement;
+      if (!node) break;
+      for (const a of node.querySelectorAll("a[href]")) {
+        const href = absolute(a.getAttribute("href") || "");
+        if (!/^https?:/i.test(href) || href === location.href) continue;
+        if (PERMALINK.test(new URL(href).pathname + new URL(href).search)) return href;
+      }
+    }
+    return "";
+  }
+
+  /** Media the page declares in its own metadata, played or not. */
+  function declaredMedia() {
+    const out = [];
+    const meta = [
+      'meta[property="og:video:secure_url"]',
+      'meta[property="og:video:url"]',
+      'meta[property="og:video"]',
+      'meta[name="twitter:player:stream"]',
+    ];
+    for (const sel of meta) {
+      for (const el of document.querySelectorAll(sel)) out.push(absolute(el.content || ""));
+    }
+    // schema.org VideoObject: the one place a site is expected to say plainly
+    // where its video lives.
+    for (const el of document.querySelectorAll('script[type="application/ld+json"]')) {
+      let data;
+      try {
+        data = JSON.parse(el.textContent || "");
+      } catch {
+        continue;
+      }
+      const walk = (v) => {
+        if (Array.isArray(v)) return v.forEach(walk);
+        if (!v || typeof v !== "object") return;
+        for (const key of ["contentUrl", "embedUrl"]) {
+          if (typeof v[key] === "string") out.push(absolute(v[key]));
+        }
+        Object.values(v).forEach(walk);
+      };
+      walk(data);
+    }
+    return out;
+  }
+
+  /**
+   * Everything that could resolve to this video, best first.
+   *
+   * Ordered by how specific it is: the file itself, then the page that is only
+   * about this video, then the page we happen to be on.
+   */
+  function targets(video) {
+    const out = [];
+    const seen = new Set();
+    const add = (url, kind) => {
+      if (!/^https?:\/\//i.test(url || "") || seen.has(url)) return;
+      seen.add(url);
+      out.push({ url, kind });
+    };
+
+    if (video) {
+      add(video.currentSrc, "media");
+      add(absolute(video.getAttribute("src") || ""), "media");
+      for (const source of video.querySelectorAll("source")) {
+        add(absolute(source.getAttribute("src") || source.dataset.src || ""), "media");
+      }
+    }
+    for (const url of declaredMedia()) add(url, "media");
+
+    if (video) add(permalinkNear(video), "page");
+    const canonical = document.querySelector('link[rel="canonical"]');
+    if (canonical) add(absolute(canonical.getAttribute("href") || ""), "page");
+    const ogUrl = document.querySelector('meta[property="og:url"]');
+    if (ogUrl) add(absolute(ogUrl.content || ""), "page");
+
+    return out;
+  }
+
+  /* ---------------------------------------------------------------- *
    * Action
    * ---------------------------------------------------------------- */
 
@@ -196,6 +310,9 @@
         pageUrl: location.href,
         title: document.title,
         videoSrc: direct,
+        // Read out of the DOM at the moment of the click, so a video that has
+        // never been played still has somewhere to be fetched from.
+        candidates: targets(tracked),
       });
       if (reply && reply.ok) {
         label.textContent = "Opening MDM…";

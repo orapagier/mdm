@@ -2,7 +2,7 @@
 
 const $ = (id) => document.getElementById(id);
 const LINES = (s) => s.split("\n").map((x) => x.trim()).filter(Boolean);
-const BOOLS = ["enabled", "sniffMedia", "videoButton"];
+const BOOLS = ["enabled", "sniffMedia", "videoButton", "captureImages", "captureBlobs"];
 
 async function load() {
   const { cfg } = await browser.runtime.sendMessage({ type: "getState" });

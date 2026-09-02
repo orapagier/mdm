@@ -9,6 +9,14 @@
 <label class="row"><input type="checkbox" id="enabled"> <span>Capture downloads from Firefox</span></label>
 <label class="row"><input type="checkbox" id="sniffMedia"> <span>Detect video and audio streams on pages</span></label>
 <label class="row"><input type="checkbox" id="videoButton"> <span>Show a download button over videos</span></label>
+<label class="row"><input type="checkbox" id="captureImages"> <span>Capture image downloads</span></label>
+<label class="row"><input type="checkbox" id="captureBlobs"> <span>Capture downloads pages build in memory</span></label>
+<p class="hint">Images are only taken when they are actually being downloaded &mdash; saved, or fetched through a
+  link that asks for a download. One opened in a tab is still shown, not saved, and the size limit below does
+  not apply to them.</p>
+<p class="hint">Chat and gallery sites often assemble a file in the page and hand the browser a
+  <code>blob:</code> link to it, which no downloader can fetch. MDM asks the page for those bytes instead. Turn
+  this off to leave them to Firefox.</p>
 
 <label>Minimum size to capture (MiB)
   <input type="number" id="minSize" min="0" step="0.5">

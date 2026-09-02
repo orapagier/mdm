@@ -9,6 +9,7 @@
 //! progress strip beneath it; a captured file has nothing to choose, so it
 //! gets the strip alone.
 
+use mdm_core::ipc::Candidate;
 use serde::Serialize;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
@@ -92,6 +93,9 @@ pub struct Request {
     pub directory: String,
     /// The row to follow. Set for a file, absent until a video is started.
     pub download_id: Option<i64>,
+    /// Other URLs this grab could resolve through, best first. The window
+    /// works down them when `url` itself yields nothing.
+    pub candidates: Vec<Candidate>,
 }
 
 /// The most recent request, until the window collects it.
@@ -107,7 +111,7 @@ impl Pending {
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Show the format picker for a page.
-pub fn open(app: &AppHandle, url: String, title: String) {
+pub fn open(app: &AppHandle, url: String, title: String, candidates: Vec<Candidate>) {
     deliver(
         app,
         Request {
@@ -117,6 +121,7 @@ pub fn open(app: &AppHandle, url: String, title: String) {
             title,
             directory: String::new(),
             download_id: None,
+            candidates,
         },
     );
 }
@@ -132,6 +137,7 @@ pub fn show_download(app: &AppHandle, id: i64, name: String, directory: String, 
             title: name,
             directory,
             download_id: Some(id),
+            candidates: Vec::new(),
         },
     );
 }

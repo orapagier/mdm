@@ -182,7 +182,7 @@ pub fn install_hint(package: String) -> String {
 /// Open the standalone download window, empty, for the toolbar button.
 #[tauri::command]
 pub fn open_video_window(app: AppHandle) {
-    crate::video::open(&app, String::new(), String::new());
+    crate::video::open(&app, String::new(), String::new(), Vec::new());
 }
 
 /// The request the download window was opened for.

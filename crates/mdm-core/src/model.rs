@@ -59,6 +59,13 @@ pub struct Job {
     /// Queue the download but leave it paused ("Download Later").
     #[serde(default)]
     pub start_paused: bool,
+    /// The file itself, base64, for a download the page assembled in memory.
+    ///
+    /// A `blob:` URL names an object inside one document and nothing else can
+    /// resolve it — so for those the extension reads the bytes in the page and
+    /// sends them, and there is no URL left to fetch.
+    #[serde(default)]
+    pub data: Option<String>,
 }
 
 fn unknown_size() -> i64 {

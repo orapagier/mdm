@@ -12,6 +12,8 @@ const DEFAULTS = {
   askBeforeDownload: false,
   sniffMedia: true,
   videoButton: true,
+  captureImages: true,
+  captureBlobs: true,
   handoffTimeoutMs: 1500,
 };
 
@@ -211,13 +213,15 @@ function buildJob(req, details, headers, reason) {
 
 browser.downloads.onCreated.addListener(async (item) => {
   if (!cfg.enabled) return;
-  if (!/^https?:\/\//i.test(item.url)) return; // blob:/data: cannot be re-fetched
   if (wasRecentlyCaptured(item.url)) return;
   if (state.bypass.has(item.url)) {
     state.bypass.delete(item.url);
     return;
   }
   if (!Native.isAvailable()) return;
+  // A blob has no server to re-fetch it from; the page is the only source.
+  if (/^blob:/i.test(item.url)) return captureBlob(item);
+  if (!/^https?:\/\//i.test(item.url)) return; // data: cannot be re-fetched
 
   const host = hostOf(item.url);
   if (host && cfg.blockedSites.some((s) => hostMatches(host, s))) return;
@@ -227,7 +231,12 @@ browser.downloads.onCreated.addListener(async (item) => {
   );
   const ext = extensionOf(filename);
   if (cfg.blockedExtensions.includes(ext)) return;
-  if (item.fileSize > 0 && item.fileSize < cfg.minSize) return;
+  // The size floor exists to keep MDM out of *automatic* captures. Everything
+  // arriving here is a download the browser already decided on — a photo saved
+  // from a chat is a real download at 200 KB — so pictures are exempt from it.
+  const image = looksLikeImage(item.mime || "", ext);
+  if (image && !cfg.captureImages) return;
+  if (!image && item.fileSize > 0 && item.fileSize < cfg.minSize) return;
 
   const job = {
     url: item.url,
@@ -246,14 +255,197 @@ browser.downloads.onCreated.addListener(async (item) => {
     const reply = await Native.request({ type: "download", job }, 4000);
     if (!reply || !reply.accepted) return;
     markCaptured(item.url);
-    // Cancel first, then erase, so the partial file is released before the
-    // history row disappears.
-    await browser.downloads.cancel(item.id).catch(() => {});
-    await browser.downloads.erase({ id: item.id }).catch(() => {});
+    await takeOverDownload(item.id);
   } catch (e) {
     console.warn("[mdm] backstop handoff failed:", e.message);
   }
 });
+
+/**
+ * Leave Firefox with no trace of a download MDM has taken over.
+ *
+ * Cancel first, so a transfer still running lets go of its partial file. But a
+ * small file — and every blob — can be finished before the hand-off completes,
+ * and a cancelled-too-late download leaves a second copy on disk under
+ * Firefox's own name, which is exactly the duplicate this is here to prevent:
+ * hence removeFile as well, which only bites when it did finish.
+ */
+async function takeOverDownload(id) {
+  await browser.downloads.cancel(id).catch(() => {});
+  await browser.downloads.removeFile(id).catch(() => {});
+  await browser.downloads.erase({ id }).catch(() => {});
+}
+
+/* ------------------------------------------------------------------ *
+ * Net 3 — downloads the page built in memory
+ *
+ * Chat and gallery sites increasingly fetch a file with script, wrap it in a
+ * Blob and click an <a download> at it. What reaches the downloads API is then
+ * `blob:https://site/<uuid>`, a handle that means nothing outside the page
+ * that made it — no downloader can re-fetch it, which is why these were the
+ * one class of download that always fell back to Firefox. So MDM asks the page
+ * itself for the bytes and hands those over instead of a URL.
+ * ------------------------------------------------------------------ */
+
+/**
+ * The most a blob may weigh before it is left to Firefox.
+ *
+ * The bytes travel base64-encoded through native messaging, so this is roughly
+ * a third again in flight. Blob downloads are photos, exports and generated
+ * documents; anything genuinely large is served by a server, and a server can
+ * be fetched from properly.
+ */
+const MAX_BLOB_BYTES = 24 * 1024 * 1024;
+
+async function captureBlob(item) {
+  if (!cfg.captureBlobs) return;
+
+  // "blob:https://site/uuid" — the origin inside is the page that owns it, and
+  // the only context that can read it back.
+  const origin = originOfBlob(item.url);
+  if (!origin) return;
+  const host = hostOf(origin);
+  if (host && cfg.blockedSites.some((s) => hostMatches(host, s))) return;
+
+  let filename = sanitizeFilename((item.filename || "").split("/").pop());
+  const ext = extensionOf(filename);
+  if (ext && cfg.blockedExtensions.includes(ext)) return;
+  if (looksLikeImage(item.mime || "", ext) && !cfg.captureImages) return;
+
+  const blob = await readBlobFromPage(item.url, origin);
+  if (!blob) return;
+
+  // Firefox has not always settled on a target path by the time the download
+  // is announced, and a blob URL has no path to fall back on — so the type the
+  // page put on the blob is the last thing left to name it by.
+  filename = filename || "download" + extensionForMime(blob.mime || item.mime);
+  if (cfg.blockedExtensions.includes(extensionOf(filename))) return;
+
+  // The bytes are in hand, so the browser's copy is now the duplicate.
+  markCaptured(item.url);
+  await takeOverDownload(item.id);
+
+  const job = {
+    url: item.url,
+    filename,
+    size: blob.size,
+    mime: blob.mime || item.mime || "",
+    data: blob.data,
+    headers: [],
+    referrer: origin,
+    cookieStoreId: "",
+    tabId: -1,
+    reason: "blob download",
+    source: "blob",
+  };
+
+  try {
+    // A generous timeout: the app has megabytes to decode and write, and
+    // failing here would throw away bytes nothing can fetch again.
+    const reply = await Native.request({ type: "download", job }, 20000);
+    if (!reply || !reply.accepted) {
+      notifyPlain("MDM could not save " + job.filename);
+    }
+  } catch (e) {
+    console.warn("[mdm] blob handoff failed:", e.message);
+    notifyPlain("MDM could not save " + job.filename + ": " + e.message);
+  }
+}
+
+/** Enough of a mapping to name a file the browser did not name. */
+const MIME_EXTENSION = {
+  "image/jpeg": ".jpg", "image/png": ".png", "image/gif": ".gif",
+  "image/webp": ".webp", "image/avif": ".avif", "image/bmp": ".bmp",
+  "image/tiff": ".tif", "image/heic": ".heic", "image/svg+xml": ".svg",
+  "application/pdf": ".pdf", "application/zip": ".zip", "application/json": ".json",
+  "text/plain": ".txt", "text/csv": ".csv", "text/html": ".html",
+  "video/mp4": ".mp4", "video/webm": ".webm", "video/quicktime": ".mov",
+  "audio/mpeg": ".mp3", "audio/ogg": ".ogg", "audio/wav": ".wav",
+};
+
+function extensionForMime(mime) {
+  return MIME_EXTENSION[(mime || "").split(";", 1)[0].trim().toLowerCase()] || "";
+}
+
+function originOfBlob(url) {
+  try {
+    return new URL(url.replace(/^blob:/i, "")).origin;
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Ask the tabs on that origin to read the blob back for us.
+ *
+ * Only a document of the same origin can resolve the handle, so every open tab
+ * on it is asked in turn, the active one first — the download almost always
+ * came from the tab in front of the user. Frames that do not know the blob
+ * answer nothing, so the reply comes from whichever one does.
+ */
+async function readBlobFromPage(url, origin) {
+  let tabs = [];
+  try {
+    tabs = await browser.tabs.query({ url: origin + "/*" });
+  } catch (e) {
+    console.warn("[mdm] tab lookup failed:", e.message);
+    return null;
+  }
+  tabs.sort((a, b) => Number(b.active) - Number(a.active));
+
+  let refusal = null;
+  let asked = 0;
+  for (const tab of tabs.slice(0, 5)) {
+    for (const frameId of await framesOn(tab.id, origin)) {
+      if (asked++ >= MAX_FRAMES_ASKED) break;
+      try {
+        const reply = await browser.tabs.sendMessage(
+          tab.id,
+          { type: "mdm-read-blob", url, limit: MAX_BLOB_BYTES },
+          { frameId }
+        );
+        if (reply && reply.ok) return reply;
+        // A frame on the right origin that does not hold this blob fails its
+        // fetch, which is not an answer about the blob — keep asking.
+        if (reply && reply.error) refusal = reply.error;
+      } catch {
+        /* no content script in that frame */
+      }
+    }
+  }
+  if (refusal) console.warn("[mdm] blob could not be read:", refusal);
+  return null;
+}
+
+/** A ceiling, because an ad-heavy page can carry dozens of frames. */
+const MAX_FRAMES_ASKED = 12;
+
+/**
+ * Every frame of a tab that shares the blob's origin.
+ *
+ * Asked one at a time rather than broadcast to the whole tab: a page can hold
+ * several same-origin frames, only one of them made the blob, and a broadcast
+ * answers with whichever replies first — which is the frame that failed
+ * fastest, not the one holding the bytes.
+ */
+async function framesOn(tabId, origin) {
+  try {
+    const frames = await browser.webNavigation.getAllFrames({ tabId });
+    return frames
+      .filter((f) => {
+        try {
+          return new URL(f.url).origin === origin;
+        } catch {
+          return false;
+        }
+      })
+      .map((f) => f.frameId);
+  } catch {
+    // Without the frame list the top frame is the best guess, and it is where
+    // all but a handful of these downloads start.
+    return [0];
+  }
+}
 
 /**
  * The downloads API gives no request headers, so rebuild the essentials from
@@ -354,6 +546,7 @@ const MENUS = [
   { id: "mdm-media", title: "Download this media with MDM", contexts: ["video", "audio", "image"] },
   { id: "mdm-page-links", title: "Download all links on this page…", contexts: ["page"] },
   { id: "mdm-page-media", title: "Grab media from this page…", contexts: ["page"] },
+  { id: "mdm-page-images", title: "Grab images from this page…", contexts: ["page", "image"] },
   { id: "mdm-selection", title: "Download selected links…", contexts: ["selection"] },
 ];
 
@@ -378,8 +571,71 @@ browser.contextMenus.onClicked.addListener(async (info, tab) => {
       if (!found.length) return notifyPlain("No media detected on this page yet.");
       return Native.post({ type: "media", items: found, pageUrl: tab.url, title: tab.title });
     }
+    case "mdm-page-images":
+      return grabImages(tab);
   }
 });
+
+/**
+ * Offer every picture on the page.
+ *
+ * Images are read out of the live DOM rather than off the sniffer: a page has
+ * hundreds of them and recording each as it loads would drown the badge, while
+ * the DOM already knows which ones the page actually put on screen — and how
+ * big each turned out to be, which is what tells a photograph from an icon.
+ */
+async function grabImages(tab) {
+  try {
+    const results = await browser.scripting.executeScript({
+      target: { tabId: tab.id, allFrames: true },
+      func: collectImages,
+      args: [MIN_IMAGE_PIXELS],
+    });
+    // One result per frame, and a gallery is as often in an iframe as not.
+    // Two frames can hold the same picture, so dedupe across them.
+    const seen = new Set();
+    const items = results
+      .flatMap((r) => r?.result ?? [])
+      .filter((i) => !seen.has(i.url) && seen.add(i.url));
+    if (!items.length) return notifyPlain("No images found on this page.");
+    Native.post({ type: "media", items, pageUrl: tab.url, title: tab.title });
+  } catch (e) {
+    notifyPlain("Could not read the page: " + e.message);
+  }
+}
+
+/** Below this an image is furniture — an avatar, an icon, a spacer. */
+const MIN_IMAGE_PIXELS = 200 * 200;
+
+/* Runs in the page. Kept dependency-free — it is serialised across. */
+function collectImages(minPixels) {
+  const seen = new Set();
+  const out = [];
+  const add = (url, note) => {
+    if (!/^https?:\/\//i.test(url) || seen.has(url)) return;
+    seen.add(url);
+    out.push({ url, mime: "", size: -1, kind: "image", note: note || "" });
+  };
+
+  for (const img of document.querySelectorAll("img")) {
+    // naturalWidth is the file's own size, not the box it was squeezed into,
+    // so a thumbnail shown small but stored large is still worth offering.
+    const w = img.naturalWidth;
+    const h = img.naturalHeight;
+    if (w && h && w * h < minPixels) continue;
+    // currentSrc is what the browser actually chose out of a srcset.
+    add(img.currentSrc || img.src, w && h ? `${w}×${h}` : "");
+  }
+
+  // Galleries link the full-size copy from the thumbnail; that is the one
+  // worth having, and it is never in the DOM as an <img>.
+  for (const a of document.querySelectorAll("a[href]")) {
+    if (/\.(jpe?g|png|gif|webp|avif|bmp|tiff?|heic|jxl)(\?|#|$)/i.test(a.href))
+      add(a.href, "linked");
+  }
+
+  return out;
+}
 
 async function sendSimple(url, info, tab) {
   if (!url || !/^https?:\/\//i.test(url)) return;
@@ -458,7 +714,7 @@ function notifyPlain(message) {
  * signatures — grabbing the <video> src would yield a silent, truncated file.
  * A page serving a plain file gets that file downloaded directly.
  */
-async function grabVideo(msg) {
+async function grabVideo(msg, tabId) {
   const pageUrl = msg.pageUrl || "";
   const host = hostOf(pageUrl);
   if (host && cfg.blockedSites.some((s) => hostMatches(host, s))) {
@@ -471,8 +727,16 @@ async function grabVideo(msg) {
 
   // A direct file URL only counts when the page is not a known player; on a
   // streaming site a same-origin mp4 is usually an ad or a preview clip.
-  if (msg.videoSrc && !isStreamingSite(host)) {
-    await sendSimple(msg.videoSrc, { pageUrl }, { url: pageUrl });
+  //
+  // `videoSrc` is only there once the player has loaded something, so fall
+  // back to whatever file the page declares — a <source>, an og:video — which
+  // is readable the moment the page is, played or not.
+  const file =
+    msg.videoSrc ||
+    (msg.candidates || []).find((c) => c.kind === "media")?.url ||
+    "";
+  if (file && !isStreamingSite(host)) {
+    await sendSimple(file, { pageUrl }, { url: pageUrl });
     return { ok: true, mode: "direct" };
   }
 
@@ -481,7 +745,15 @@ async function grabVideo(msg) {
   // build, a closed window) would still have been reported as success.
   try {
     const reply = await Native.request(
-      { type: "videoPage", url: pageUrl, title: msg.title || "" },
+      {
+        type: "videoPage",
+        url: pageUrl,
+        title: msg.title || "",
+        // Where else this video might be resolvable from. The page URL is
+        // often not the video's own — a feed, a timeline, an infinite scroll —
+        // and it is the one thing yt-dlp cannot work around.
+        candidates: videoCandidates(msg, tabId),
+      },
       5000
     );
     return reply && reply.accepted
@@ -490,6 +762,44 @@ async function grabVideo(msg) {
   } catch (e) {
     return { ok: false, error: e.message };
   }
+}
+
+/**
+ * Every URL that could stand for the video under the button, best first.
+ *
+ * A page is only sometimes the video: click Download on a feed and the address
+ * bar still says the feed, which yt-dlp can make nothing of. The page itself
+ * knows better — it has the post's own permalink in the DOM and the file in
+ * its metadata — and the sniffer has watched whatever the player fetched. All
+ * of it is offered, and the app takes the first that resolves. This is what
+ * lets a video be grabbed without playing it first: none of it needs the
+ * player to have started.
+ */
+function videoCandidates(msg, tabId) {
+  const out = [];
+  const seen = new Set([msg.pageUrl || ""]);
+  const add = (url, kind) => {
+    if (!/^https?:\/\//i.test(url || "") || seen.has(url)) return;
+    seen.add(url);
+    out.push({ url, kind });
+  };
+
+  const found = msg.candidates || [];
+  // Pages before files, deliberately. A page is what yt-dlp turns into a
+  // choice of qualities; the file a page declares is usually the one it can
+  // spare — a preview, or the lowest rung of a ladder. So a file is what this
+  // falls back to, never what it reaches for first.
+  for (const c of found.filter((c) => c.kind !== "media")) add(c.url, "page");
+  for (const c of found.filter((c) => c.kind === "media")) add(c.url, "media");
+
+  // What the player has actually fetched in this tab. A manifest is the whole
+  // stream and outranks a fragment, which is one slice of it.
+  const sniffed = [...(tabMedia.get(tabId)?.values() ?? [])];
+  for (const m of sniffed.filter((m) => m.kind === "stream")) add(m.url, "media");
+  for (const m of sniffed.filter((m) => m.kind !== "stream")) add(m.url, "media");
+
+  // A ceiling, because each one the app tries costs an extraction.
+  return out.slice(0, 6);
 }
 
 /**
@@ -511,7 +821,7 @@ function isStreamingSite(host) {
  * Popup / options messaging
  * ------------------------------------------------------------------ */
 
-browser.runtime.onMessage.addListener(async (msg) => {
+browser.runtime.onMessage.addListener(async (msg, sender) => {
   switch (msg.type) {
     case "getState":
       return {
@@ -528,7 +838,7 @@ browser.runtime.onMessage.addListener(async (msg) => {
     case "download":
       return sendSimple(msg.url, { pageUrl: msg.referrer }, { id: msg.tabId });
     case "grabVideo":
-      return grabVideo(msg);
+      return grabVideo(msg, sender.tab?.id ?? msg.tabId ?? -1);
     case "openApp":
       Native.post({ type: "focus" });
       return { ok: true };

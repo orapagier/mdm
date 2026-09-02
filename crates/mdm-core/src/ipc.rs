@@ -32,6 +32,24 @@ pub struct MediaItem {
     pub size: i64,
     #[serde(default)]
     pub kind: String,
+    /// Whatever tells one of these apart at a glance — an image's pixel size,
+    /// say. The MIME is no help when a page offers two hundred JPEGs.
+    #[serde(default)]
+    pub note: String,
+}
+
+/// Another URL the same grab might resolve through.
+///
+/// The page a video sits on is often not the video's own — a feed, a timeline —
+/// and yt-dlp can make nothing of it. The extension reads the alternatives out
+/// of the page and the window tries them in turn.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Candidate {
+    pub url: String,
+    /// "media" for a file, "page" for something to extract from.
+    #[serde(default)]
+    pub kind: String,
 }
 
 /// Things the extension asks the *window* to do, as opposed to the engine.
@@ -53,6 +71,8 @@ pub enum UiRequest {
     VideoPage {
         url: String,
         title: String,
+        /// Fallbacks, best first, for when the page itself resolves to nothing.
+        candidates: Vec<Candidate>,
     },
     /// A download the browser handed over. It is recorded but deliberately
     /// not running: the window offers it the way IDM does, with a folder, a
@@ -232,10 +252,14 @@ async fn dispatch(
             if url.is_empty() {
                 return json!({ "accepted": false, "error": "no url" });
             }
+            let candidates: Vec<Candidate> =
+                serde_json::from_value(msg.get("candidates").cloned().unwrap_or(json!([])))
+                    .unwrap_or_default();
             let _ = ui
                 .send(UiRequest::VideoPage {
                     url,
                     title: str_field(msg, "title"),
+                    candidates,
                 })
                 .await;
             json!({ "accepted": true })

@@ -37,6 +37,7 @@ const CFG = {
   minSize: 1024 * 1024,
   blockedSites: [],
   blockedExtensions: [],
+  captureImages: true,
 };
 const fresh = () => ({ bypass: new Set() });
 
@@ -114,6 +115,29 @@ expectCapture("standalone video navigation", {
   headers: { "content-type": "video/mp4", "content-length": "80000000" },
 });
 
+expectCapture("an image asked for as a download", {
+  url: "https://scontent.example.com/photo.jpg?_nc_cat=1&dl=1",
+  headers: { "content-type": "image/jpeg", "content-length": "400000" },
+});
+
+expectCapture("an image download link below the size threshold", {
+  url: "https://example.com/media/photo.jpg?dl=1",
+  headers: { "content-type": "image/jpeg", "content-length": "40000" },
+});
+
+expectCapture("an image served from a /download/ path", {
+  url: "https://example.com/download/holiday.png",
+  headers: { "content-type": "image/png", "content-length": "300000" },
+});
+
+expectCapture("a big image sent as octet-stream, as before", {
+  url: "https://example.com/scan.tif",
+  headers: {
+    "content-type": "application/octet-stream",
+    "content-length": "9000000",
+  },
+});
+
 expectCapture("deb package", {
   url: "https://example.com/pkg.deb",
   headers: {
@@ -129,9 +153,23 @@ expectSkip("HTML pages", {
   headers: { "content-type": "text/html; charset=utf-8", "content-length": "40000" },
 });
 
-expectSkip("images", {
+expectSkip("images the page is showing", {
   url: "https://example.com/photo.png",
   headers: { "content-type": "image/png", "content-length": "9000000" },
+});
+
+expectSkip(
+  "an image download link with image capture off",
+  {
+    url: "https://scontent.example.com/photo.jpg?dl=1",
+    headers: { "content-type": "image/jpeg", "content-length": "400000" },
+  },
+  { ...CFG, captureImages: false }
+);
+
+expectSkip("an image whose URL merely mentions a download parameter", {
+  url: "https://example.com/photo.jpg?download=later",
+  headers: { "content-type": "image/jpeg", "content-length": "400000" },
 });
 
 expectSkip("JSON API responses", {

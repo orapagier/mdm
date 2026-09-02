@@ -124,6 +124,42 @@ const FILE_EXTENSIONS = new Set([
   "csv","tsv","sqlite","db","dmp","bin","iso","vdi","vmdk","qcow2","ova","torrent","patch","diff",
 ]);
 
+/**
+ * Picture formats. Kept apart from `FILE_EXTENSIONS` because an image is the
+ * one kind of file a browser exists to *show*: capturing it has to be asked
+ * for, not assumed.
+ */
+const IMAGE_EXTENSIONS = new Set([
+  "jpg","jpeg","jpe","jfif","png","apng","gif","webp","avif","bmp","ico","cur",
+  "tif","tiff","heic","heif","jxl","psd","xcf","svgz",
+  // camera raw
+  "raw","cr2","cr3","nef","arw","dng","orf","rw2","raf","srw","pef",
+]);
+
+/** Is this response a picture, by what the server said or what it is called? */
+function looksLikeImage(mime, ext) {
+  if (mime && mime.startsWith("image/")) return true;
+  // An extension only speaks for a response the server did not identify: a
+  // real MIME is the better evidence, and "photo.jpg" served as text/html is
+  // an error page.
+  return !mime || GENERIC_MIME.has(mime) ? !!ext && IMAGE_EXTENSIONS.has(ext) : false;
+}
+
+/**
+ * URLs that ask for a file rather than a page.
+ *
+ * `?dl=1` and its cousins are what Facebook, Dropbox, Discord and most chat
+ * sites append when the button says Download — the same URL without it is the
+ * one the page renders inline. It is the only honest download signal an image
+ * response carries when the server neglects `Content-Disposition`.
+ */
+const DOWNLOAD_HINT = new RegExp(
+  "[?&](?:dl|download|attachment|force[_-]?download|is_?download)=(?:1|true|yes)(?:&|$)" +
+    "|[?&]response-content-disposition=attachment" +
+    "|/download(?:/|$|\\?)",
+  "i"
+);
+
 /* ------------------------------------------------------------------ *
  * Decision
  * ------------------------------------------------------------------ */
@@ -187,6 +223,16 @@ function classify(req, res, cfg, state) {
   // /thing.zip URL, which would be worse saved than rendered.
   if (ext && BINARY_EXTENSIONS.has(ext) && GENERIC_MIME.has(mime))
     return bigEnough ? TAKE("binary extension ." + ext) : SKIP("below size threshold");
+
+  // --- Images -------------------------------------------------------
+  // An image response is a *view* until something says otherwise, or every
+  // photo opened in a tab would land on disk instead of on screen. The server
+  // saying "attachment" was one such signal and was honoured above; a URL that
+  // spells out a download is the other, and it is how chat and gallery sites
+  // serve their save links. Everything else falls through to the ordinary
+  // rules, so a big JPEG sent as octet-stream is captured as it always was.
+  if (cfg.captureImages && looksLikeImage(mime, ext) && DOWNLOAD_HINT.test(url))
+    return TAKE("image download link");
 
   // --- Types the browser is meant to render ------------------------
   if (NEVER_MIME.has(mime)) return SKIP("renderable mime " + mime);

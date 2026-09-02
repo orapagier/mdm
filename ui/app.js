@@ -318,10 +318,15 @@ function wireBatchDialog() {
   listen("mdm://media", (event) => {
     links = (event.payload.items || []).map((m) => ({
       url: m.url,
-      text: `${m.kind} · ${m.mime}`,
+      // The note is what tells two hundred JPEGs apart; the MIME only says
+      // they are all JPEGs.
+      text: [m.kind, m.note || m.mime].filter(Boolean).join(" · "),
       selected: true,
     }));
-    $("batch-title").textContent = `Media on ${event.payload.title || "page"}`;
+    const kinds = new Set((event.payload.items || []).map((m) => m.kind));
+    const what = kinds.size === 1 && kinds.has("image") ? "images" : "media";
+    $("batch-title").textContent =
+      `${links.length} ${what} on ${event.payload.title || "page"}`;
     $("batch-filter").value = "";
     draw();
     if (!dlg.open) dlg.showModal();

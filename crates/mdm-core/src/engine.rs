@@ -7,6 +7,7 @@ use crate::store::Store;
 use crate::supervisor::Supervisor;
 use crate::{now, ytdlp};
 use anyhow::{bail, Context, Result};
+use base64::Engine as _;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -173,8 +174,23 @@ impl Engine {
             return Ok(existing.id);
         }
 
+        // Decoded before anything is recorded: a payload that will not decode
+        // must not leave a row behind pointing at bytes that never existed.
+        let blob = match &job.data {
+            Some(encoded) => Some(
+                base64::engine::general_purpose::STANDARD
+                    .decode(encoded)
+                    .context("decoding the bytes the page handed over")?,
+            ),
+            None => None,
+        };
+
         let settings = self.settings();
-        let use_ytdlp = job.use_ytdlp || ytdlp::looks_like_streaming_site(&job.url);
+        // A blob is already the file. Its URL still carries the origin — and a
+        // blob from facebook.com reads as a streaming site — so this has to be
+        // settled by what arrived, not by where it came from.
+        let use_ytdlp = blob.is_none()
+            && (job.use_ytdlp || ytdlp::looks_like_streaming_site(&job.url));
         let (directory, filename, category) =
             self.resolve_destination(&job, &settings, use_ytdlp)?;
         let output_name = match job.output_name.clone() {
@@ -212,9 +228,25 @@ impl Engine {
             format_id: job.format_id.clone(),
             mirrors: job.mirrors.clone(),
         };
+        if let Some(bytes) = &blob {
+            // The only honest size there is: what the page actually handed over.
+            record.total_bytes = bytes.len() as i64;
+        }
 
         let id = self.store.insert(&record)?;
         record.id = id;
+
+        // Park the bytes where the dispatch can find them. They cannot travel
+        // on the job: "Download Later" ends the request there and the file has
+        // to survive until the user presses Start, which may be a restart away.
+        if let Some(bytes) = blob {
+            if let Err(e) = stash_blob(id, &bytes) {
+                // Nothing can be fetched to make good on this row, so it must
+                // not be left behind looking startable.
+                let _ = self.store.delete(id);
+                return Err(e).context("holding the bytes the page handed over");
+            }
+        }
 
         if job.start_paused {
             // "Download Later": recorded and visible, but nothing is fetched
@@ -337,6 +369,23 @@ impl Engine {
 
     /// Hand a download to aria2 (or yt-dlp) and record the resulting handle.
     async fn dispatch(&self, d: &Download, job: &Job) -> Result<()> {
+        // Bytes the extension read out of a page: there is no server to ask,
+        // and nothing to segment. Starting one is moving it into place.
+        //
+        // Keyed off the URL, not off finding a stash file. Row ids are reused
+        // once the rows above them are gone, and a leftover stash must never
+        // be able to answer for an ordinary download that happens to inherit
+        // its number.
+        if d.url.starts_with("blob:") {
+            let stash = blob_stash(d.id);
+            if !stash.is_file() {
+                bail!(
+                    "the page's copy of this file is gone — it was only ever \
+                     held in memory, so ask the browser for it again"
+                );
+            }
+            return self.dispatch_blob(d, &stash).await;
+        }
         if d.use_ytdlp {
             return self.dispatch_ytdlp(d, job).await;
         }
@@ -370,6 +419,32 @@ impl Engine {
         self.store.set_gid(d.id, Some(&gid))?;
         log::info!("#{} -> aria2 {gid} ({})", d.id, d.filename);
         Ok(())
+    }
+
+    /// Finish a capture whose bytes are already here.
+    ///
+    /// A rename when the runtime directory and the download folder share a
+    /// filesystem, which on a normal desktop they do not — `/run/user` is
+    /// tmpfs — so a copy is the usual path and the rename is the free case.
+    async fn dispatch_blob(&self, d: &Download, stash: &Path) -> Result<()> {
+        let target = d.full_path();
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating {}", parent.display()))?;
+        }
+        if std::fs::rename(stash, &target).is_err() {
+            std::fs::copy(stash, &target)
+                .with_context(|| format!("writing {}", target.display()))?;
+            let _ = std::fs::remove_file(stash);
+        }
+
+        let size = std::fs::metadata(&target).map(|m| m.len() as i64).unwrap_or(-1);
+        self.store.update_progress(d.id, size, size, None, None)?;
+        let mut done = d.clone();
+        done.total_bytes = size;
+        done.completed_bytes = size;
+        log::info!("#{} saved from the page: {} ({size} bytes)", d.id, d.filename);
+        self.on_complete(&done).await
     }
 
     async fn dispatch_ytdlp(&self, d: &Download, job: &Job) -> Result<()> {
@@ -912,6 +987,8 @@ impl Engine {
         if let Some(mut state) = self.ytdlp_jobs.lock().unwrap().remove(&id) {
             let _ = state.child.start_kill();
         }
+        // Bytes still waiting on a Start that is never coming.
+        let _ = std::fs::remove_file(blob_stash(id));
         if delete_file {
             let path = d.full_path();
             let _ = std::fs::remove_file(&path);
@@ -1139,7 +1216,30 @@ fn job_from(d: &Download) -> Job {
         format_id: d.format_id.clone(),
         output_name: d.output_name.clone(),
         start_paused: false,
+        // Never re-sent: bytes live in the stash from the moment they arrive,
+        // which is what lets a resume find them after a restart.
+        data: None,
     }
+}
+
+/* ---------------------------------------------------------------------- *
+ * Bytes handed over by the page
+ * ---------------------------------------------------------------------- */
+
+/// Where a captured blob waits between arriving and being started.
+///
+/// Under the runtime directory rather than the download folder: until the user
+/// presses Start nothing has been agreed to, and a half-offered file must not
+/// appear among the ones they chose to keep.
+fn blob_stash(id: i64) -> PathBuf {
+    crate::paths::runtime_dir().join("blobs").join(format!("{id}.bin"))
+}
+
+fn stash_blob(id: i64, bytes: &[u8]) -> Result<()> {
+    let path = blob_stash(id);
+    let dir = path.parent().expect("stash path always has a parent");
+    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    std::fs::write(&path, bytes).with_context(|| format!("writing {}", path.display()))
 }
 
 /// aria2's control file for a given target: `<path>.aria2`.
@@ -1319,5 +1419,6 @@ pub fn job_from_url(url: &str) -> Job {
         format_id: None,
         output_name: None,
         start_paused: false,
+        data: None,
     }
 }
