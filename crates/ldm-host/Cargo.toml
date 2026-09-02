@@ -1,0 +1,11 @@
+[package]
+name = "ldm-host"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Firefox native messaging host bridging the browser to the LDM app"
+
+# Deliberately dependency-free: the browser spawns this on every session, so
+# it should be a few hundred kilobytes and start instantly.
+[dependencies]

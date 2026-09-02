@@ -1,0 +1,16 @@
+[workspace]
+resolver = "2"
+members = ["crates/ldm-core", "crates/ldm-host", "src-tauri"]
+
+[workspace.package]
+version = "1.0.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

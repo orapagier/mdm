@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>My Download Manager</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+
+<header class="toolbar">
+  <button id="btn-add" class="primary">Add URL</button>
+  <button id="btn-video">Add video…</button>
+  <div class="sep"></div>
+  <button id="btn-pause-all">Pause all</button>
+  <button id="btn-resume-all">Resume all</button>
+  <button id="btn-clear">Clear finished</button>
+  <div class="grow"></div>
+  <div class="stat" id="stat-speed">0 B/s</div>
+  <button id="btn-settings" title="Settings" class="icon">⚙</button>
+</header>
+
+<div class="body">
+  <nav class="sidebar">
+    <div class="nav-group">
+      <button class="nav active" data-filter="all">All</button>
+      <button class="nav" data-filter="active">Downloading <span class="count" id="c-active"></span></button>
+      <button class="nav" data-filter="queued">Queued <span class="count" id="c-queued"></span></button>
+      <button class="nav" data-filter="paused">Paused</button>
+      <button class="nav" data-filter="complete">Completed</button>
+      <button class="nav" data-filter="failed">Failed</button>
+    </div>
+    <div class="nav-label">Categories</div>
+    <div class="nav-group" id="nav-categories"></div>
+  </nav>
+
+  <main>
+    <table class="list">
+      <thead>
+        <tr>
+          <th class="col-name">Name</th>
+          <th class="col-size">Size</th>
+          <th class="col-progress">Progress</th>
+          <th class="col-speed">Speed</th>
+          <th class="col-eta">ETA</th>
+          <th class="col-actions"></th>
+        </tr>
+      </thead>
+      <tbody id="rows"></tbody>
+    </table>
+    <p class="empty" id="empty">Nothing here yet. Downloads captured from Firefox appear automatically.</p>
+  </main>
+</div>
+
+<!-- Add URL -->
+<dialog id="dlg-add">
+  <form method="dialog">
+    <h2>Add download</h2>
+    <label>URL<input type="url" id="add-url" placeholder="https://…" required></label>
+    <label>Save to
+      <span class="path-row">
+        <input type="text" id="add-dir" placeholder="Default folder">
+        <button type="button" id="add-browse">Browse…</button>
+      </span>
+    </label>
+    <label class="check"><input type="checkbox" id="add-ytdlp"> Extract with yt-dlp (video pages)</label>
+    <menu>
+      <button value="cancel">Cancel</button>
+      <button value="ok" class="primary" id="add-ok">Download</button>
+    </menu>
+  </form>
+</dialog>
+
+<!-- Batch links from the extension -->
+<dialog id="dlg-batch">
+  <form method="dialog">
+    <h2 id="batch-title">Links on page</h2>
+    <div class="batch-tools">
+      <input type="text" id="batch-filter" placeholder="Filter, e.g. .pdf or .zip">
+      <button type="button" id="batch-all">Select all</button>
+      <button type="button" id="batch-none">Select none</button>
+    </div>
+    <div id="batch-list" class="batch-list"></div>
+    <menu>
+      <button value="cancel">Cancel</button>
+      <button value="ok" class="primary" id="batch-ok">Download selected</button>
+    </menu>
+  </form>
+</dialog>
+
+<!-- Settings -->
+<dialog id="dlg-settings">
+  <form method="dialog">
+    <h2>Settings</h2>
+    <div class="grid">
+      <label>Download folder
+        <span class="path-row">
+          <input type="text" id="s-dir">
+          <button type="button" id="s-browse">Browse…</button>
+        </span>
+      </label>
+      <label class="check"><input type="checkbox" id="s-categorize"> Sort into category folders</label>
+
+      <label>Connections per server (1–16)
+        <input type="number" id="s-connections" min="1" max="16">
+      </label>
+      <label>Segments per download
+        <input type="number" id="s-split" min="1" max="16">
+      </label>
+      <label>Minimum segment size
+        <input type="text" id="s-minsplit" placeholder="1M">
+      </label>
+      <label>Simultaneous downloads
+        <input type="number" id="s-concurrent" min="1" max="20">
+      </label>
+      <label>Global speed limit (KB/s, 0 = unlimited)
+        <input type="number" id="s-maxspeed" min="0">
+      </label>
+      <label>Per-download limit (KB/s, 0 = unlimited)
+        <input type="number" id="s-maxspeed-each" min="0">
+      </label>
+      <label>Retries before giving up
+        <input type="number" id="s-retries" min="0" max="20">
+      </label>
+      <label>Default video format
+        <input type="text" id="s-format">
+      </label>
+      <label>Take cookies from browser
+        <input type="text" id="s-cookies" placeholder="firefox — blank to disable">
+      </label>
+      <label>Extra yt-dlp arguments
+        <input type="text" id="s-ytargs" placeholder="--extractor-args youtube:player_client=web_safari">
+      </label>
+      <label class="check"><input type="checkbox" id="s-checksum"> Compute SHA-256 when finished</label>
+      <label class="check"><input type="checkbox" id="s-notify"> Desktop notifications</label>
+      <label class="check"><input type="checkbox" id="s-clipboard"> Watch clipboard for links</label>
+    </div>
+
+    <h3>Schedule</h3>
+    <p class="hint">Downloads run only inside this window. A window whose end is
+      earlier than its start runs overnight, e.g. 23:00 to 06:00.</p>
+    <div class="grid">
+      <label class="check"><input type="checkbox" id="q-enabled"> Restrict downloads to a time window</label>
+      <label>Start<input type="time" id="q-start"></label>
+      <label>Stop<input type="time" id="q-stop"></label>
+    </div>
+    <div class="days" id="q-days"></div>
+    <menu>
+      <button value="cancel">Cancel</button>
+      <button value="ok" class="primary" id="s-save">Save</button>
+    </menu>
+  </form>
+</dialog>
+
+<div id="toast" class="toast" hidden></div>
+
+<script src="format.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

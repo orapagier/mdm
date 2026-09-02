@@ -1,0 +1,384 @@
+:root {
+  color-scheme: light dark;
+  --bg: #f6f7f9;
+  --panel: #ffffff;
+  --fg: #16181d;
+  --muted: #6b7280;
+  --line: #e2e5ea;
+  --accent: #2f6feb;
+  --accent-fg: #ffffff;
+  --ok: #1a7f37;
+  --warn: #b45309;
+  --bad: #b42318;
+  --bar-bg: #e6e9ee;
+  --hover: #eef1f6;
+  --radius: 7px;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #1b1a20;
+    --panel: #242329;
+    --fg: #f2f2f5;
+    --muted: #9b9ba3;
+    --line: #35343d;
+    --accent: #5c8dff;
+    --ok: #5bd66f;
+    --warn: #f0b429;
+    --bad: #ff8a80;
+    --bar-bg: #33323b;
+    --hover: #2d2c34;
+  }
+}
+
+* { box-sizing: border-box; }
+
+/* `hidden` has to beat the layout rules further down. Several of the elements
+   that get toggled — the media header, the tab strip, the progress strip — are
+   flex containers, and an author `display` outranks the browser's own [hidden]
+   rule, so without this they would only ever be hidden in the markup. */
+[hidden] { display: none !important; }
+html, body { height: 100%; }
+body {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  font: 13px/1.45 system-ui, -apple-system, "Segoe UI", Cantarell, sans-serif;
+  background: var(--bg);
+  color: var(--fg);
+  overflow: hidden;
+  user-select: none;
+}
+
+/* ---------------- toolbar ---------------- */
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+  flex: none;
+}
+.toolbar .sep { width: 1px; height: 20px; background: var(--line); margin: 0 2px; }
+.toolbar .grow { flex: 1; }
+.stat {
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+  padding-right: 6px;
+}
+
+button {
+  font: inherit;
+  padding: 5px 11px;
+  border-radius: var(--radius);
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--fg);
+  cursor: pointer;
+  white-space: nowrap;
+}
+button:hover:not(:disabled) { background: var(--hover); }
+button:disabled { opacity: .45; cursor: default; }
+button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-fg);
+}
+button.primary:hover:not(:disabled) { filter: brightness(1.08); background: var(--accent); }
+button.icon { padding: 5px 9px; font-size: 15px; line-height: 1; }
+
+/* ---------------- layout ---------------- */
+
+.body { display: flex; flex: 1; min-height: 0; }
+
+.sidebar {
+  width: 178px;
+  flex: none;
+  padding: 10px 8px;
+  background: var(--panel);
+  border-right: 1px solid var(--line);
+  overflow-y: auto;
+}
+.nav-group { display: flex; flex-direction: column; gap: 1px; }
+.nav-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: .05em;
+  color: var(--muted);
+  margin: 16px 0 6px 8px;
+}
+.nav {
+  text-align: left;
+  border: none;
+  background: none;
+  padding: 6px 9px;
+  border-radius: var(--radius);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.nav.active { background: var(--accent); color: var(--accent-fg); }
+.nav.active:hover { background: var(--accent); }
+.count {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+  opacity: .8;
+}
+
+main { flex: 1; min-width: 0; overflow-y: auto; position: relative; }
+
+/* ---------------- list ---------------- */
+
+.list { width: 100%; border-collapse: collapse; }
+.list thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--bg);
+  text-align: left;
+  font-weight: 600;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  color: var(--muted);
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--line);
+}
+.col-name { max-width: 0; } /* lets the flexible column actually shrink */
+.col-size, .col-speed, .col-eta { width: 92px; }
+.col-progress { width: 200px; }
+.col-actions { width: 132px; }
+
+.list tbody tr { border-bottom: 1px solid var(--line); }
+.list tbody tr:hover { background: var(--hover); }
+.list td { padding: 7px 10px; vertical-align: middle; }
+
+.name { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.name .file {
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  user-select: text;
+}
+.name .sub {
+  font-size: 11px;
+  color: var(--muted);
+  /* Destination paths and error strings are both arbitrarily long; the row
+     must stay one line tall regardless. Full text is in the title attribute. */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.num { font-variant-numeric: tabular-nums; color: var(--muted); }
+
+.bar { height: 6px; background: var(--bar-bg); border-radius: 3px; overflow: hidden; }
+.bar > i { display: block; height: 100%; background: var(--accent); border-radius: 3px; }
+.bar.done > i { background: var(--ok); }
+.bar.err  > i { background: var(--bad); }
+.bar.idle > i { background: var(--muted); }
+.pct { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+.actions { display: flex; gap: 4px; justify-content: flex-end; }
+.actions button { padding: 3px 7px; font-size: 12px; }
+
+.status-failed { color: var(--bad); }
+.status-complete { color: var(--ok); }
+
+.empty {
+  color: var(--muted);
+  text-align: center;
+  padding: 60px 20px;
+  margin: 0;
+}
+
+/* ---------------- dialogs ---------------- */
+
+dialog {
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  background: var(--panel);
+  color: var(--fg);
+  padding: 0;
+  min-width: 440px;
+  max-width: 92vw;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, .28);
+}
+dialog::backdrop { background: rgba(0, 0, 0, .38); }
+dialog form { padding: 18px 20px 14px; }
+dialog h2, .sheet h2 { margin: 0 0 14px; font-size: 15px; }
+/* `:not()` because the rows inside .formats and .batch-list are labels as
+   well, and this rule would undo the grid that lays their columns out. */
+dialog label:not(.fmt):not(.batch-item) {
+  display: block; margin: 11px 0; color: var(--muted); font-size: 12px;
+}
+dialog label.check, .sheet label.check {
+  display: flex; align-items: center; gap: 7px; color: var(--fg); font-size: 13px;
+}
+dialog input[type="text"], dialog input[type="url"], dialog input[type="number"],
+.sheet input[type="text"], .sheet input[type="url"], .sheet input[type="number"] {
+  display: block;
+  width: 100%;
+  min-width: 0;   /* lets inputs shrink inside flex rows instead of stretching it */
+  margin-top: 4px;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg);
+  color: var(--fg);
+  font: inherit;
+}
+dialog label.check input, .sheet label.check input { width: auto; margin: 0; }
+.path-row { display: flex; gap: 6px; align-items: flex-start; }
+.path-row input { flex: 1 1 auto; min-width: 0; }
+.path-row button { flex: none; }
+.path-row button { margin-top: 4px; }
+dialog menu {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin: 18px 0 0;
+  padding: 12px 0 0;
+  border-top: 1px solid var(--line);
+}
+.grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 16px; }
+.grid label:first-child, .grid label.check { grid-column: 1 / -1; }
+.hint {
+  color: var(--muted);
+  font-size: 12px;
+  min-height: 18px;
+  overflow-wrap: anywhere;
+}
+
+.formats, .batch-list {
+  max-height: 260px;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  margin-top: 6px;
+}
+.formats:empty, .batch-list:empty { display: none; }
+.fmt, .batch-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--line);
+  font-size: 12px;
+}
+.fmt:last-child, .batch-item:last-child { border-bottom: none; }
+.fmt:hover, .batch-item:hover { background: var(--hover); }
+.fmt .res { font-weight: 600; min-width: 84px; }
+.fmt .meta, .batch-item .meta { color: var(--muted); margin-left: auto; }
+.batch-item .url {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; user-select: text;
+}
+.batch-tools { display: flex; gap: 6px; margin-bottom: 4px; }
+.batch-tools input { flex: 1; }
+
+/* ---------------- toast ---------------- */
+
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: 22px;
+  transform: translateX(-50%);
+  background: var(--fg);
+  color: var(--bg);
+  padding: 9px 16px;
+  border-radius: 20px;
+  font-size: 12px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, .3);
+  z-index: 50;
+  max-width: 80vw;
+}
+
+/* ---------------- schedule ---------------- */
+
+dialog h3 {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  color: var(--muted);
+  margin: 22px 0 2px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+dialog input[type="time"] {
+  display: block;
+  margin-top: 4px;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg);
+  color: var(--fg);
+  font: inherit;
+}
+.days { display: flex; gap: 5px; margin: 10px 0 2px; flex-wrap: wrap; }
+.days label {
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 9px;
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  font-size: 12px;
+  color: var(--fg);
+  cursor: pointer;
+}
+.days label:has(input:checked) {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-fg);
+}
+.days input { margin: 0; }
+
+/* ---------------- media picker ---------------- */
+
+.media-head { display: flex; gap: 12px; align-items: flex-start; margin: 12px 0 6px; }
+.media-head img {
+  width: 132px; height: 74px; object-fit: cover; border-radius: 6px;
+  background: var(--bar-bg); flex: none;
+}
+.media-meta { min-width: 0; }
+.media-title {
+  font-weight: 600; font-size: 13px; margin-bottom: 3px;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  overflow: hidden;
+  /* A single unbroken 200-character title must wrap, not widen the dialog. */
+  overflow-wrap: anywhere;
+}
+
+.tabs { display: flex; gap: 4px; margin: 14px 0 0; }
+.tab {
+  border: 1px solid var(--line); background: var(--panel); color: var(--muted);
+  padding: 5px 12px; border-radius: 20px; font-size: 12px;
+}
+.tab.active { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
+.tab:disabled { opacity: .4; }
+
+.formats { max-height: 230px; }
+.fmt {
+  display: grid;
+  grid-template-columns: 18px 92px 1fr auto;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+}
+.fmt input { margin: 0; }
+.fmt .res { font-weight: 600; min-width: 0; }
+.fmt .kind {
+  color: var(--muted);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fmt .meta { color: var(--muted); font-variant-numeric: tabular-nums; }
+.fmt:has(input:checked) { background: color-mix(in srgb, var(--accent) 16%, transparent); }
+
+.save-block { margin-top: 4px; }
+.save-block label { margin: 12px 0 0; }

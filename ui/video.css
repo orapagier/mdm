@@ -1,0 +1,133 @@
+/* ------------------------------------------------------------------ *
+ * The standalone download window.
+ *
+ * Three bands, and the rule that makes the whole thing predictable: the head
+ * and the foot never shrink and never lose their padding, and the body is the
+ * only part that gives way. A 40-format list, a two-line title, or a window an
+ * inch shorter than expected all come out of the body's height, so the buttons
+ * stay where they are with the same gap beneath them.
+ *
+ * Rows are deliberately tighter than the main window's dialogs. This window is
+ * one task on a small canvas, and every millimetre spent on whitespace is a
+ * quality option the user has to scroll for.
+ * ------------------------------------------------------------------ */
+
+body.sheet {
+  background: var(--panel);
+  padding: 0;
+}
+
+.pane {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  /* Without this a flex child refuses to shrink below its content, which is
+     exactly how the footer ends up off-screen. */
+  min-height: 0;
+}
+
+.pane-head { flex: none; padding: 10px 18px 0; }
+.pane-foot { flex: none; padding: 0 18px 12px; background: var(--panel); }
+
+.pane-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 0 18px;
+  display: flex;
+  flex-direction: column;
+  /* The last resort. The format list normally scrolls on its own, but if the
+     window is shorter than even the fixed parts need, this scrolls rather than
+     letting the footer be pushed past the bottom edge. */
+  overflow-y: auto;
+}
+
+/* Matching the `:not()` in app.css: a format row is a label as well, and it
+   lays its own columns out. */
+.sheet label:not(.fmt) {
+  display: block; margin: 8px 0 0; color: var(--muted); font-size: 12px;
+}
+.sheet input[type="text"], .sheet input[type="url"] { margin-top: 3px; }
+.sheet .path-row button { margin-top: 3px; }
+
+/* The URL field carries its own prompt, so it has no caption to sit under and
+   nothing above it but the title bar. */
+#url-row { margin-top: 0; }
+#url-row input, #url-row button { margin-top: 0; }
+
+/* A long name or URL must eat into its own space, never the footer's. */
+#file-head { padding-top: 2px; min-width: 0; }
+#file-head .media-title { margin-bottom: 2px; }
+/* One line, with the whole thing in the tooltip. Wrapping a 200-character URL
+   is how the buttons ended up against the bottom edge. */
+#file-sub {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sheet .media-head { margin: 8px 0 0; flex: none; }
+.sheet .media-head img { width: 112px; height: 63px; }
+.sheet .tabs { margin: 9px 0 0; flex: none; }
+.sheet #vid-status { margin-top: 6px; flex: none; }
+.sheet .save-block { flex: none; padding-bottom: 2px; }
+
+/* The list gives up its height before anything else does. */
+.sheet .formats {
+  flex: 1 1 auto;
+  min-height: 120px;
+  max-height: none;
+  overflow-y: auto;
+  margin: 8px 0 0;
+}
+/* `display: none` on an empty list would collapse the gap before a probe has
+   run, so keep the box but let it give up its space. */
+.sheet .formats:empty {
+  flex: 0 1 auto;
+  min-height: 0;
+  border: none;
+  margin-top: 0;
+}
+
+.pane-foot menu {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 10px 0 0;
+  padding: 10px 0 0;
+  border-top: 1px solid var(--line);
+}
+.pane-foot .grow { flex: 1; }
+
+/* ---------------- the progress strip ---------------- */
+
+.dl-strip {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.dl-strip .bar { height: 8px; border-radius: 4px; }
+.dl-line {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+.dl-line > span { white-space: nowrap; }
+.dl-line .grow { flex: 1; }
+.dl-line #dl-pct { color: var(--fg); font-weight: 600; }
+.dl-line button { padding: 3px 9px; font-size: 12px; }
+.sheet .hint { min-height: 0; }
+/* One line, always, whatever it holds — the full text is in the tooltip. */
+#dl-note {
+  min-height: 16px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sheet .hint.bad { color: var(--bad); }
+.sheet .hint.ok { color: var(--ok); }

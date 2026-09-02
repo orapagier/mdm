@@ -1,0 +1,39 @@
+<meta charset="utf-8">
+<link rel="stylesheet" href="common.css">
+<style>
+  body { width: 300px; padding: 12px; }
+  ul { list-style: none; margin: 0; padding: 0; }
+  li { padding: 7px 0; border-top: 1px solid var(--line); }
+  .name { word-break: break-all; font-size: 12px; }
+  .meta { color: var(--muted); font-size: 11px; }
+  .empty { color: var(--muted); padding: 8px 0; }
+  .switch { margin: 10px 0 4px; }
+</style>
+<div class="row">
+  <span class="dot" id="dot"></span>
+  <h1>My Download Manager</h1>
+</div>
+<p class="hint" id="status">Checking…</p>
+
+<div id="perm-warn" hidden>
+  <p class="hint" style="color:var(--bad)">
+    LDM cannot see page requests: access to websites has been revoked.
+  </p>
+  <button class="primary" id="perm-grant">Grant access to all sites</button>
+</div>
+
+<label class="switch row">
+  <input type="checkbox" id="enabled">
+  <span>Capture downloads</span>
+</label>
+
+<h2>Media on this page</h2>
+<ul id="media"></ul>
+<p class="empty" id="noMedia" hidden>Nothing detected yet.</p>
+
+<div class="row" style="margin-top:14px">
+  <button class="primary" id="open">Open LDM</button>
+  <span class="spacer"></span>
+  <button id="opts">Settings</button>
+</div>
+<script src="popup.js"></script>

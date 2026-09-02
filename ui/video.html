@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>My Download Manager</title>
+<link rel="stylesheet" href="app.css">
+<link rel="stylesheet" href="video.css">
+</head>
+<body class="sheet">
+
+<!--
+  Three bands: a fixed head, a body that gives way, and a fixed foot. The
+  buttons live in the foot and keep their padding at any window height — the
+  body scrolls rather than letting anything be pushed off the bottom edge.
+-->
+<section class="pane">
+  <div class="pane-head">
+    <div class="path-row" id="url-row">
+      <input type="url" id="vid-url" placeholder="Enter video url…">
+      <button type="button" id="vid-probe">Fetch</button>
+    </div>
+
+    <div id="file-head" hidden>
+      <div class="media-title" id="file-name"></div>
+      <div class="hint" id="file-sub"></div>
+    </div>
+  </div>
+
+  <div class="pane-body">
+    <div class="media-head" id="vid-head" hidden>
+      <img id="vid-thumb" alt="">
+      <div class="media-meta">
+        <div class="media-title" id="vid-title"></div>
+        <div class="hint" id="vid-sub"></div>
+      </div>
+    </div>
+    <div id="vid-status" class="hint" hidden></div>
+
+    <div class="tabs" id="vid-tabs" hidden>
+      <button type="button" class="tab active" data-kind="both">Video + audio</button>
+      <button type="button" class="tab" data-kind="video">Video, no sound</button>
+      <button type="button" class="tab" data-kind="audio">Audio only</button>
+    </div>
+
+    <div id="vid-formats" class="formats"></div>
+
+    <div class="save-block" id="vid-save" hidden>
+      <label>Save as
+        <input type="text" id="vid-name" placeholder="File name">
+      </label>
+      <label>Save to
+        <span class="path-row">
+          <input type="text" id="vid-dir" placeholder="Default folder">
+          <button type="button" id="vid-browse">Browse…</button>
+        </span>
+      </label>
+    </div>
+  </div>
+
+  <div class="pane-foot">
+    <menu id="pick-actions">
+      <button type="button" id="vid-close">Cancel</button>
+      <span class="grow"></span>
+      <button type="button" id="vid-later">Download Later</button>
+      <button type="button" id="vid-start" class="primary">Start Download</button>
+    </menu>
+
+    <!-- Sits under the buttons from the moment a download starts. What is
+         above it stays put: this window is the download, not a wizard. -->
+    <div class="dl-strip" id="dl-strip" hidden>
+      <div class="bar" id="dl-bar"><i></i></div>
+      <div class="dl-line">
+        <span id="dl-pct"></span>
+        <span id="dl-bytes"></span>
+        <span id="dl-speed"></span>
+        <span id="dl-conns"></span>
+        <span id="dl-eta"></span>
+        <span class="grow"></span>
+        <button type="button" id="dl-pause">Pause</button>
+        <button type="button" id="dl-cancel">Cancel</button>
+        <button type="button" id="dl-folder" hidden>Folder</button>
+        <button type="button" id="dl-open" hidden>Open</button>
+        <button type="button" id="dl-close" hidden>Close</button>
+      </div>
+      <!-- Always present, empty or not: a line that comes and goes would
+           change the strip's height, and the window with it. -->
+      <div class="hint" id="dl-note"></div>
+    </div>
+  </div>
+</section>
+
+<div id="toast" class="toast" hidden></div>
+
+<script src="format.js"></script>
+<script src="video.js"></script>
+</body>
+</html>

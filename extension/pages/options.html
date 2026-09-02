@@ -1,0 +1,37 @@
+<meta charset="utf-8">
+<title>MDM Settings</title>
+<link rel="stylesheet" href="common.css">
+<style>body { max-width: 620px; margin: 0 auto; padding: 28px 22px 60px; }</style>
+<h1>My Download Manager</h1>
+<p class="hint">Settings apply immediately.</p>
+
+<h2>Capture</h2>
+<label class="row"><input type="checkbox" id="enabled"> <span>Capture downloads from Firefox</span></label>
+<label class="row"><input type="checkbox" id="sniffMedia"> <span>Detect video and audio streams on pages</span></label>
+<label class="row"><input type="checkbox" id="videoButton"> <span>Show a download button over videos</span></label>
+
+<label>Minimum size to capture (MiB)
+  <input type="number" id="minSize" min="0" step="0.5">
+  <p class="hint">Smaller files are left to Firefox — segmenting them gains nothing. Files sent with <code>Content-Disposition: attachment</code> are always captured regardless of size.</p>
+</label>
+
+<label>Hand-off timeout (ms)
+  <input type="number" id="handoffTimeoutMs" min="200" max="10000" step="100">
+  <p class="hint">How long a request is held while the daemon confirms. If it does not answer in time, Firefox downloads the file itself.</p>
+</label>
+
+<h2>Exclusions</h2>
+<label>Sites to ignore
+  <textarea id="blockedSites" placeholder="example.com&#10;mail.google.com"></textarea>
+  <p class="hint">One host per line. Subdomains are included.</p>
+</label>
+<label>File extensions to ignore
+  <textarea id="blockedExtensions" placeholder="pdf&#10;csv"></textarea>
+  <p class="hint">One extension per line, without the dot.</p>
+</label>
+
+<div class="row" style="margin-top:22px">
+  <button class="primary" id="save">Save</button>
+  <span id="saved" class="hint"></span>
+</div>
+<script src="options.js"></script>

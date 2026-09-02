@@ -1,0 +1,73 @@
+{
+  "manifest_version": 3,
+  "name": "My Download Manager",
+  "short_name": "MDM",
+  "version": "1.0.0",
+  "description": "Capture every download \u2014 binaries, archives, documents, media \u2014 and hand it to LDM for accelerated multi-connection downloading.",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "ldm@ramlej.local",
+      "strict_min_version": "140.0",
+      "data_collection_permissions": {
+        "required": [
+          "none"
+        ]
+      }
+    }
+  },
+  "permissions": [
+    "webRequest",
+    "webRequestBlocking",
+    "downloads",
+    "nativeMessaging",
+    "storage",
+    "contextMenus",
+    "cookies",
+    "tabs",
+    "scripting",
+    "notifications"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "scripts": [
+      "src/util.js",
+      "src/capture.js",
+      "src/native.js",
+      "src/background.js"
+    ]
+  },
+  "action": {
+    "default_title": "My Download Manager",
+    "default_popup": "pages/popup.html",
+    "default_icon": {
+      "16": "icons/ldm-16.png",
+      "32": "icons/ldm-32.png",
+      "64": "icons/ldm-64.png"
+    }
+  },
+  "options_ui": {
+    "page": "pages/options.html",
+    "open_in_tab": true
+  },
+  "icons": {
+    "16": "icons/ldm-16.png",
+    "32": "icons/ldm-32.png",
+    "64": "icons/ldm-64.png",
+    "128": "icons/ldm-128.png"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "http://*/*",
+        "https://*/*"
+      ],
+      "js": [
+        "src/content/video-panel.js"
+      ],
+      "run_at": "document_idle",
+      "all_frames": true
+    }
+  ]
+}

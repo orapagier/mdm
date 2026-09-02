@@ -1,0 +1,13 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Permissions for the LDM windows.",
+  "windows": [
+    "main",
+    "video"
+  ],
+  "permissions": [
+    "core:default",
+    "core:window:allow-close"
+  ]
+}
