@@ -851,7 +851,7 @@ async function grabVideo(msg, tabId) {
         // Where else this video might be resolvable from. The page URL is
         // often not the video's own — a feed, a timeline, an infinite scroll —
         // and it is the one thing yt-dlp cannot work around.
-        candidates: videoCandidates(msg, tabId),
+        candidates: await videoCandidates(msg, tabId),
       },
       5000
     );
@@ -874,13 +874,13 @@ async function grabVideo(msg, tabId) {
  * lets a video be grabbed without playing it first: none of it needs the
  * player to have started.
  */
-function videoCandidates(msg, tabId) {
+async function videoCandidates(msg, tabId) {
   const out = [];
   const seen = new Set([msg.pageUrl || ""]);
   const add = (url, kind, mime = "") => {
     if (!/^https?:\/\//i.test(url || "") || seen.has(url)) return;
     seen.add(url);
-    out.push({ url, kind, mime });
+    out.push({ url, kind, mime, headers: [], referrer: "" });
   };
 
   const found = msg.candidates || [];
@@ -898,7 +898,22 @@ function videoCandidates(msg, tabId) {
   for (const m of sniffed.filter((m) => m.kind !== "stream")) add(m.url, "media", m.mime);
 
   // A ceiling, because each one the app tries costs an extraction.
-  return out.slice(0, 6);
+  const kept = out.slice(0, 6);
+
+  // A media candidate may be downloaded straight from the window, by aria2,
+  // outside the browser — so it has to travel with what the browser would have
+  // sent for it. Facebook signs its video links per session and answers a bare
+  // request with 403, which arrived as a download that simply would not start.
+  // Pages need none of this: yt-dlp is given the browser's cookie jar already.
+  await Promise.all(
+    kept
+      .filter((c) => c.kind === "media")
+      .map(async (c) => {
+        c.referrer = msg.pageUrl || "";
+        c.headers = await headersForUrl(c.url, c.referrer, "");
+      })
+  );
+  return kept;
 }
 
 /**

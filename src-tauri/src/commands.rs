@@ -45,6 +45,11 @@ pub async fn add_download(
     filename: Option<String>,
     start_paused: Option<bool>,
     size: Option<i64>,
+    // Only a direct download carries these, and only it needs them: the URL
+    // the window is about to hand aria2 came out of a page, and the server
+    // behind it may only answer a request that looks like it did too.
+    headers: Option<Vec<mdm_core::model::Header>>,
+    referrer: Option<String>,
 ) -> Cmd<i64> {
     let url = url.trim().to_string();
     if url.is_empty() {
@@ -52,6 +57,8 @@ pub async fn add_download(
     }
     let mut job = mdm_core::engine::job_from_url(&url);
     job.directory = directory.filter(|d| !d.is_empty());
+    job.headers = headers.unwrap_or_default();
+    job.referrer = referrer.unwrap_or_default();
     // What the picker weighed the chosen formats at. yt-dlp fetches the video
     // stream and then the audio, so without this the bar is scaled to the first
     // of them and rescales downwards when the second starts.

@@ -5,7 +5,7 @@
 //! reach it — anything that can connect here can queue downloads as them.
 
 use crate::engine::Engine;
-use crate::model::Job;
+use crate::model::{Header, Job};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -55,6 +55,16 @@ pub struct Candidate {
     /// name the file by if nothing on the page resolves.
     #[serde(default)]
     pub mime: String,
+    /// What the browser would send asking for this file.
+    ///
+    /// Only the media candidates carry these, and only they need to: a page
+    /// goes to yt-dlp, which brings its own cookies. A file goes straight to
+    /// aria2, out of the browser entirely — and a CDN that signs its links for
+    /// one session hands back 403 to a request that arrives bare.
+    #[serde(default)]
+    pub headers: Vec<Header>,
+    #[serde(default)]
+    pub referrer: String,
 }
 
 /// Things the extension asks the *window* to do, as opposed to the engine.

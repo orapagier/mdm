@@ -90,6 +90,9 @@ let candidates = [];
  * without yt-dlp at all it is the only way the grab can still work.
  */
 let direct = null;
+/* The candidate `direct` came from, kept whole: a file fetched outside the
+ * browser needs the headers the browser would have sent with it. */
+let directMedia = null;
 /** Bumped on every reset, so a probe that lands late cannot paint over the
  *  page the window has since been pointed at. */
 let probeSeq = 0;
@@ -253,6 +256,7 @@ function reset() {
   info = null;
   chosen = null;
   direct = null;
+  directMedia = null;
   kind = "both";
   say("vid-status", "");
   // The direct-download note parks its reason here; a stale one would explain
@@ -497,6 +501,7 @@ function offerDirect(reason) {
   if (!media) return say("vid-status", reason, "hint bad");
 
   direct = media.url;
+  directMedia = media;
   $("vid-url").value = direct;
   $("vid-name").value = directName(direct, media.mime);
   $("vid-save").hidden = false;
@@ -555,6 +560,10 @@ async function start(paused) {
   const url = $("vid-url").value.trim();
   if (!url) return toast("No URL to download");
 
+  // Only while the box still holds the URL they belong to: the field is
+  // editable, and headers signed for one file say nothing about another.
+  const carrying = directMedia && directMedia.url === url ? directMedia : null;
+
   const id = await call("add_download", {
     url,
     directory: $("vid-dir").value.trim() || null,
@@ -565,6 +574,10 @@ async function start(paused) {
     filename: $("vid-name").value.trim() || null,
     startPaused: paused,
     size: chosen ? expectedSize(chosen) : null,
+    // What the browser would have sent for it. Without these a CDN that signs
+    // its links per session answers 403, and the download never starts.
+    headers: carrying ? carrying.headers || [] : null,
+    referrer: carrying ? carrying.referrer || "" : null,
   });
   if (id === null) return;
 
