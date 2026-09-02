@@ -306,7 +306,7 @@ function wireBatchDialog() {
     );
   }
 
-  listen("ldm://batch", (event) => {
+  listen("mdm://batch", (event) => {
     links = (event.payload.links || []).map((l) => ({ ...l, selected: true }));
     $("batch-title").textContent =
       `${links.length} links on ${event.payload.title || event.payload.pageUrl}`;
@@ -315,7 +315,7 @@ function wireBatchDialog() {
     if (!dlg.open) dlg.showModal();
   });
 
-  listen("ldm://media", (event) => {
+  listen("mdm://media", (event) => {
     links = (event.payload.items || []).map((m) => ({
       url: m.url,
       text: `${m.kind} · ${m.mime}`,
@@ -500,7 +500,7 @@ async function init() {
   wireBatchDialog();
   wireSettingsDialog();
 
-  await listen("ldm://snapshot", (event) => {
+  await listen("mdm://snapshot", (event) => {
     snapshot = event.payload;
     render();
   });

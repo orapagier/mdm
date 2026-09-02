@@ -1,6 +1,6 @@
 //! XDG base directory resolution.
 //!
-//! Everything LDM writes lands in a standard location so the app is trivially
+//! Everything MDM writes lands in a standard location so the app is trivially
 //! removable and survives reinstalls of the browser extension.
 
 use std::path::PathBuf;
@@ -18,37 +18,37 @@ fn xdg(var: &str, fallback: &str) -> PathBuf {
     }
 }
 
-/// `~/.config/ldm` — settings.toml.
+/// `~/.config/mdm` — settings.toml.
 pub fn config_dir() -> PathBuf {
-    xdg("XDG_CONFIG_HOME", ".config").join("ldm")
+    xdg("XDG_CONFIG_HOME", ".config").join("mdm")
 }
 
-/// `~/.local/share/ldm` — the SQLite database and aria2 session file.
+/// `~/.local/share/mdm` — the SQLite database and aria2 session file.
 pub fn data_dir() -> PathBuf {
-    xdg("XDG_DATA_HOME", ".local/share").join("ldm")
+    xdg("XDG_DATA_HOME", ".local/share").join("mdm")
 }
 
-/// `~/.cache/ldm` — logs and scratch space.
+/// `~/.cache/mdm` — logs and scratch space.
 pub fn cache_dir() -> PathBuf {
-    xdg("XDG_CACHE_HOME", ".cache").join("ldm")
+    xdg("XDG_CACHE_HOME", ".cache").join("mdm")
 }
 
 /// Where the IPC socket lives. Falls back to /tmp when the session has no
 /// runtime dir (headless, cron, some containers).
 pub fn runtime_dir() -> PathBuf {
     match std::env::var_os("XDG_RUNTIME_DIR") {
-        Some(v) if !v.is_empty() => PathBuf::from(v).join("ldm"),
-        _ => std::env::temp_dir().join(format!("ldm-{}", unsafe { libc_getuid() })),
+        Some(v) if !v.is_empty() => PathBuf::from(v).join("mdm"),
+        _ => std::env::temp_dir().join(format!("mdm-{}", unsafe { libc_getuid() })),
     }
 }
 
 /// The Unix socket the extension's native host connects to.
 pub fn socket_path() -> PathBuf {
-    runtime_dir().join("ldm.sock")
+    runtime_dir().join("mdm.sock")
 }
 
 pub fn db_path() -> PathBuf {
-    data_dir().join("ldm.db")
+    data_dir().join("mdm.db")
 }
 
 pub fn aria2_session_path() -> PathBuf {
@@ -98,7 +98,7 @@ unsafe fn libc_getuid() -> u32 {
     libc::getuid()
 }
 
-/// Create every directory LDM writes to. Called once at startup.
+/// Create every directory MDM writes to. Called once at startup.
 pub fn ensure_dirs() -> std::io::Result<()> {
     for d in [config_dir(), data_dir(), cache_dir(), runtime_dir()] {
         std::fs::create_dir_all(&d)?;

@@ -1,10 +1,10 @@
 [package]
-name = "ldm-core"
+name = "mdm-core"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Download engine, aria2 supervision and browser IPC for LDM"
+description = "Download engine, aria2 supervision and browser IPC for MDM"
 
 [dependencies]
 anyhow = "1"

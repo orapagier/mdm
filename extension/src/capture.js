@@ -132,7 +132,7 @@ const SKIP = (reason) => ({ capture: false, reason });
 const TAKE = (reason) => ({ capture: true, reason });
 
 /**
- * Decide whether a response should be diverted to LDM.
+ * Decide whether a response should be diverted to MDM.
  *
  * `req`  – recorded request context {method, url, type}
  * `res`  – {statusCode, headers (lowercased map), url}

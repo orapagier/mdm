@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/ldm-core", "crates/ldm-host", "src-tauri"]
+members = ["crates/mdm-core", "crates/mdm-host", "src-tauri"]
 
 [workspace.package]
 version = "1.0.0"

@@ -2,20 +2,20 @@
 //!
 //! Useful for testing the aria2 path in isolation, and for scripting:
 //!
-//!     cargo run --example ldm-cli -- https://example.com/big.iso
+//!     cargo run --example mdm-cli -- https://example.com/big.iso
 //!
 //! Honours the same XDG variables as the app, so pointing XDG_DATA_HOME at a
 //! scratch directory gives a throwaway database and session.
 
-use ldm_core::engine::{job_from_url, Engine};
-use ldm_core::model::Status;
-use ldm_core::{config, human_bytes};
+use mdm_core::engine::{job_from_url, Engine};
+use mdm_core::model::Status;
+use mdm_core::{config, human_bytes};
 use std::time::{Duration, Instant};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     env_logger::Builder::from_env(
-        env_logger::Env::default().default_filter_or("ldm_cli=info,ldm_core=info"),
+        env_logger::Env::default().default_filter_or("mdm_cli=info,mdm_core=info"),
     )
     .init();
 
@@ -26,10 +26,10 @@ async fn main() -> anyhow::Result<()> {
     if args.first().map(String::as_str) == Some("--probe") {
         let url = args.get(1).cloned().unwrap_or_default();
         if url.is_empty() {
-            eprintln!("usage: ldm-cli --probe <page-url>");
+            eprintln!("usage: mdm-cli --probe <page-url>");
             std::process::exit(2);
         }
-        let info = ldm_core::ytdlp::probe(&url, Some("firefox"), &[]).await?;
+        let info = mdm_core::ytdlp::probe(&url, Some("firefox"), &[]).await?;
         println!("title    {}", info.title);
         println!("site     {}", info.extractor);
         if let Some(d) = info.duration {
@@ -55,7 +55,7 @@ async fn main() -> anyhow::Result<()> {
 
     let urls: Vec<String> = args.drain(..).collect();
     if urls.is_empty() {
-        eprintln!("usage: ldm-cli <url> [url...]   |   ldm-cli --probe <page-url>");
+        eprintln!("usage: mdm-cli <url> [url...]   |   mdm-cli --probe <page-url>");
         std::process::exit(2);
     }
 

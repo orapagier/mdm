@@ -87,7 +87,7 @@ def main() -> int:
         sys.stderr.write("give at least two connection counts to compare\n")
         return 1
 
-    directory = tempfile.mkdtemp(prefix="ldm-bench-")
+    directory = tempfile.mkdtemp(prefix="mdm-bench-")
     samples: dict[int, list[float]] = {v: [] for v in variants}
 
     print(f"{len(variants)} variants x {args.rounds} rounds, interleaved\n")

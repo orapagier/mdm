@@ -252,7 +252,7 @@ impl Default for Settings {
             checksum: false,
             notify: true,
             start_minimized: false,
-            // Deliberately not aria2's default 6800: LDM runs its own daemon
+            // Deliberately not aria2's default 6800: MDM runs its own daemon
             // and must not collide with one the user already has.
             rpc_port: 6810,
             aria2_extra_args: Vec::new(),

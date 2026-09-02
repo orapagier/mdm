@@ -5,11 +5,11 @@ captures **every** download the browser makes — binaries, archives, documents,
 media — and fetches it with up to 16 parallel connections through aria2.
 
 ```
-Firefox ──webRequest/downloads──▶ extension ──native messaging──▶ ldm-host
+Firefox ──webRequest/downloads──▶ extension ──native messaging──▶ mdm-host
                                                                       │
                                                               unix socket
                                                                       ▼
-                                              ldm (Tauri app) ──JSON-RPC──▶ aria2c
+                                              mdm (Tauri app) ──JSON-RPC──▶ aria2c
                                                        │
                                                        └──▶ yt-dlp (streams)
 ```
@@ -122,11 +122,49 @@ browser.
 
 ## Install
 
+`install.sh` builds, installs into `~/.local`, registers the native messaging
+host and packages the extension. It reads `/etc/os-release` first, so every
+dependency it finds missing is named as *your* package manager spells it —
+including the Rust version check, which matters on the releases that freeze an
+older toolchain than this needs.
+
+**Debian, Ubuntu, Mint, Pop!\_OS…**
+
 ```bash
-sudo dnf install aria2 yt-dlp ffmpeg nodejs rust cargo \
-                 webkit2gtk4.1-devel openssl-devel librsvg2-devel gcc gcc-c++ make
+sudo apt install aria2 yt-dlp ffmpeg nodejs zip zenity libnotify-bin \
+                 build-essential pkg-config libwebkit2gtk-4.1-dev libdbus-1-dev \
+                 rustc cargo
 ./install.sh
 ```
+
+**Fedora, RHEL, Nobara…**
+
+```bash
+sudo dnf install aria2 yt-dlp ffmpeg nodejs zip zenity libnotify \
+                 gcc gcc-c++ make pkgconf-pkg-config webkit2gtk4.1-devel dbus-devel \
+                 rust cargo
+./install.sh
+```
+
+**Arch, Manjaro, EndeavourOS…**
+
+```bash
+sudo pacman -S aria2 yt-dlp ffmpeg nodejs zip zenity libnotify \
+               base-devel pkgconf webkit2gtk-4.1 dbus rust
+./install.sh
+```
+
+Two things bite on Debian and Ubuntu specifically, because a stable release
+freezes a version for years and both of these move faster than that:
+
+* **Rust.** The workspace needs 1.85 or newer; Debian 12 ships 1.63 and Ubuntu
+  22.04 is not much better. `install.sh` refuses to start a build that would
+  fail three hundred lines in and points at [rustup.rs](https://rustup.rs),
+  which is the right answer on those releases.
+* **yt-dlp.** YouTube breaks extraction on a rhythm no frozen package can
+  follow, and `apt` will happily report an eight-month-old build as up to date.
+  If videos fail while the package is current, `pipx install yt-dlp` tracks
+  upstream.
 
 `nodejs` is there for yt-dlp, not for this app — nothing here is written in
 JavaScript that Node runs. YouTube obfuscates the `n` parameter on every stream
@@ -140,9 +178,16 @@ Then load the extension: `about:debugging#/runtime/this-firefox` →
 "Load Temporary Add-on…" → pick `extension/manifest.json`.
 
 Temporary add-ons vanish on restart. For a permanent install Firefox requires a
-signed package — submit `target/ldm-firefox.xpi` to addons.mozilla.org
+signed package — submit `target/mdm-firefox.xpi` to addons.mozilla.org
 (unlisted self-distribution signing is free), or use Developer Edition with
 `xpinstall.signatures.required=false`.
+
+A packaged Firefox reads native messaging manifests from wherever its own
+package was built to look: `~/.mozilla` for Debian's `firefox-esr` and
+Mozilla's `.deb`, `~/snap/firefox` for the snap Ubuntu installs by default,
+`~/.var/app` for the Flatpak. `install.sh` writes to every tree present, and
+prints the one `flatpak override` a sandboxed Firefox additionally needs before
+it may launch a host binary from `~/.local/bin`.
 
 ## Is it fast?
 
@@ -177,8 +222,8 @@ For an end-to-end check against a server that actually honours `Range`
 
 ```bash
 python3 packaging/range-server.py /some/dir 8732 &
-cargo run --example ldm-cli -- http://127.0.0.1:8732/yourfile.bin
-python3 packaging/test-native-host.py target/debug/ldm-host
+cargo run --example mdm-cli -- http://127.0.0.1:8732/yourfile.bin
+python3 packaging/test-native-host.py target/debug/mdm-host
 ```
 
 ## Layout
@@ -186,8 +231,8 @@ python3 packaging/test-native-host.py target/debug/ldm-host
 | Path | What |
 |---|---|
 | `extension/` | Firefox MV3 extension: capture rules, video button, popup, options |
-| `crates/ldm-core/` | Engine, aria2 client, SQLite store, scheduler, IPC |
-| `crates/ldm-host/` | Native messaging bridge (dependency-free, std only) |
+| `crates/mdm-core/` | Engine, aria2 client, SQLite store, scheduler, IPC |
+| `crates/mdm-host/` | Native messaging bridge (dependency-free, std only) |
 | `src-tauri/` | Desktop app and its commands |
 | `ui/` | Frontend — plain HTML/CSS/JS, no bundler |
 | `packaging/` | Icon generator, Range-capable test server, native-host harness |
@@ -196,7 +241,7 @@ python3 packaging/test-native-host.py target/debug/ldm-host
 
 | Path | What |
 |---|---|
-| `~/.config/ldm/settings.toml` | Settings |
-| `~/.local/share/ldm/ldm.db` | History and queues |
-| `~/.local/share/ldm/aria2.session` | Unfinished transfers, restored on launch |
-| `$XDG_RUNTIME_DIR/ldm/ldm.sock` | IPC socket (0700) |
+| `~/.config/mdm/settings.toml` | Settings |
+| `~/.local/share/mdm/mdm.db` | History and queues |
+| `~/.local/share/mdm/aria2.session` | Unfinished transfers, restored on launch |
+| `$XDG_RUNTIME_DIR/mdm/mdm.sock` | IPC socket (0700) |

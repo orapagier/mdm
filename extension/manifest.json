@@ -3,10 +3,10 @@
   "name": "My Download Manager",
   "short_name": "MDM",
   "version": "1.0.0",
-  "description": "Capture every download \u2014 binaries, archives, documents, media \u2014 and hand it to LDM for accelerated multi-connection downloading.",
+  "description": "Capture every download \u2014 binaries, archives, documents, media \u2014 and hand it to MDM for accelerated multi-connection downloading.",
   "browser_specific_settings": {
     "gecko": {
-      "id": "ldm@ramlej.local",
+      "id": "mdm@ramlej.local",
       "strict_min_version": "140.0",
       "data_collection_permissions": {
         "required": [
@@ -42,9 +42,9 @@
     "default_title": "My Download Manager",
     "default_popup": "pages/popup.html",
     "default_icon": {
-      "16": "icons/ldm-16.png",
-      "32": "icons/ldm-32.png",
-      "64": "icons/ldm-64.png"
+      "16": "icons/mdm-16.png",
+      "32": "icons/mdm-32.png",
+      "64": "icons/mdm-64.png"
     }
   },
   "options_ui": {
@@ -52,10 +52,10 @@
     "open_in_tab": true
   },
   "icons": {
-    "16": "icons/ldm-16.png",
-    "32": "icons/ldm-32.png",
-    "64": "icons/ldm-64.png",
-    "128": "icons/ldm-128.png"
+    "16": "icons/mdm-16.png",
+    "32": "icons/mdm-32.png",
+    "64": "icons/mdm-64.png",
+    "128": "icons/mdm-128.png"
   },
   "content_scripts": [
     {

@@ -1,13 +1,13 @@
 //! Tests for the pure decision logic: category routing, scheduling windows,
 //! filename safety and the options handed to aria2.
 
-use ldm_core::aria2::{AddOptions, MAX_CONNECTIONS};
-use ldm_core::categories::{categorize, extension_of};
-use ldm_core::engine::{
+use mdm_core::aria2::{AddOptions, MAX_CONNECTIONS};
+use mdm_core::categories::{categorize, extension_of};
+use mdm_core::engine::{
     filename_from_url, queue_open_at, sanitize, stem_taken, unique_filename, unique_name,
 };
-use ldm_core::human_bytes;
-use ldm_core::model::{Header, Queue, Status};
+use mdm_core::human_bytes;
+use mdm_core::model::{Header, Queue, Status};
 
 /* ------------------------------- categories ------------------------------ */
 
@@ -335,7 +335,7 @@ fn human_bytes_reads_sensibly() {
 
 #[test]
 fn control_file_appends_rather_than_replacing_the_extension() {
-    use ldm_core::engine::control_file;
+    use mdm_core::engine::control_file;
     use std::path::Path;
 
     assert_eq!(

@@ -1,7 +1,7 @@
 "use strict";
 
 /**
- * Connection to the LDM native messaging host.
+ * Connection to the MDM native messaging host.
  *
  * The port is deliberately long-lived rather than one-shot: under Manifest V3
  * the background context is an event page that Firefox may suspend, and an
@@ -9,7 +9,7 @@
  * page cannot service a *blocking* webRequest listener promptly.
  */
 const Native = (() => {
-  const HOST = "io.ldm.host";
+  const HOST = "io.mdm.host";
   const BACKOFF_MS = [500, 1000, 2000, 5000, 10000, 30000];
 
   let port = null;
@@ -26,7 +26,7 @@ const Native = (() => {
     try {
       port = browser.runtime.connectNative(HOST);
     } catch (e) {
-      console.warn("[ldm] connectNative failed:", e);
+      console.warn("[mdm] connectNative failed:", e);
       port = null;
       scheduleReconnect();
       return null;
@@ -41,7 +41,7 @@ const Native = (() => {
 
   function onDisconnect(p) {
     const err = p.error || (browser.runtime.lastError ?? null);
-    if (err) console.warn("[ldm] native host disconnected:", err.message || err);
+    if (err) console.warn("[mdm] native host disconnected:", err.message || err);
     port = null;
     available = false;
     // Nothing can be answered any more; fail every waiter so blocking
@@ -81,7 +81,7 @@ const Native = (() => {
       try {
         fn(msg);
       } catch (e) {
-        console.error("[ldm] listener error", e);
+        console.error("[mdm] listener error", e);
       }
     }
   }
@@ -93,7 +93,7 @@ const Native = (() => {
       p.postMessage(msg);
       return true;
     } catch (e) {
-      console.warn("[ldm] postMessage failed:", e);
+      console.warn("[mdm] postMessage failed:", e);
       return false;
     }
   }

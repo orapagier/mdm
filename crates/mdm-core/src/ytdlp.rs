@@ -142,23 +142,43 @@ fn js_challenge_advice(line: &str) -> String {
     if no_js_runtime() {
         return format!(
             "YouTube's player challenge could not be solved: yt-dlp needs a \
-             JavaScript runtime and none is installed. Fix it with: \
-             sudo dnf install nodejs   (deno, bun and quickjs also work). \
-             yt-dlp said: {line}"
+             JavaScript runtime and none is installed. Fix it with: {}   \
+             (deno, bun and quickjs also work). yt-dlp said: {line}",
+            crate::distro::install("nodejs")
         );
     }
     if !supports_js_runtimes() {
         return format!(
             "YouTube's player challenge could not be solved: this yt-dlp is too \
              old to use the JavaScript runtime that is installed. Update it \
-             with: sudo dnf upgrade yt-dlp. yt-dlp said: {line}"
+             with: {}. yt-dlp said: {line}",
+            update_advice()
         );
     }
     format!(
         "YouTube refused the extraction. yt-dlp usually runs a step behind \
-         YouTube here, so updating it (sudo dnf upgrade yt-dlp) is the usual \
-         fix. yt-dlp said: {line}"
+         YouTube here, so updating it ({}) is the usual fix. yt-dlp said: {line}",
+        update_advice()
     )
+}
+
+/// How to get a newer yt-dlp on this machine.
+///
+/// The distribution's package is the right answer everywhere except Debian and
+/// its derivatives, which freeze a version for the life of a release: a stable
+/// yt-dlp is routinely months behind YouTube, and "it is already up to date"
+/// is then a true answer to the wrong question. So name the upgrade *and* the
+/// escape hatch there.
+fn update_advice() -> String {
+    let cmd = crate::distro::upgrade("yt-dlp");
+    if crate::distro::package_manager() == crate::distro::PackageManager::Apt {
+        format!(
+            "{cmd} — or, if that reports it is already current, `pipx install \
+             yt-dlp`, which tracks upstream"
+        )
+    } else {
+        cmd
+    }
 }
 
 /// How long a probe's extraction stays good enough to download from.
@@ -260,8 +280,12 @@ fn is_js_challenge_failure(line: &str) -> bool {
 }
 
 fn binary() -> Result<std::path::PathBuf> {
-    which("yt-dlp")
-        .ok_or_else(|| anyhow::anyhow!("yt-dlp not found on PATH — install it with: sudo dnf install yt-dlp"))
+    which("yt-dlp").ok_or_else(|| {
+        anyhow::anyhow!(
+            "yt-dlp not found on PATH — install it with: {}",
+            crate::distro::install("yt-dlp")
+        )
+    })
 }
 
 pub fn available() -> bool {
@@ -417,13 +441,13 @@ fn parse_format(v: &serde_json::Value) -> Option<Format> {
 
 /// Marker prefix on our custom progress lines, so they are trivially
 /// distinguishable from yt-dlp's ordinary chatter on the same stream.
-const TAG: &str = "@LDM@";
+const TAG: &str = "@MDM@";
 
 /// Marker for the final-path line emitted by `--exec after_move`.
-const FILE_TAG: &str = "@LDMFILE@";
+const FILE_TAG: &str = "@MDMFILE@";
 
 /// Marker for the title line emitted by `--exec pre_process`.
-const NAME_TAG: &str = "@LDMNAME@";
+const NAME_TAG: &str = "@MDMNAME@";
 
 pub struct YtDlpHandle {
     pub child: Child,
@@ -833,7 +857,7 @@ mod tests {
             "[download] Destination: video.mp4",
             "FILE: /home/u/Downloads/video.mp4.part",
             "===============================",
-            "@LDM@1|2|3|4",
+            "@MDM@1|2|3|4",
             "[#deadbe",
         ] {
             assert!(parse_aria2_summary(line).is_none(), "parsed {line:?}");

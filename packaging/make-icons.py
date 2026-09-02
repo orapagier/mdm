@@ -215,8 +215,8 @@ def main():
     w, h, pixels = read_png(source)
     for size in SIZES:
         rows = draw(size) if size <= HAND_DRAWN else resize(pixels, w, h, size)
-        write_png(out / f"ldm-{size}.png", size, rows)
-        print(f"  {out}/ldm-{size}.png  {'drawn' if size <= HAND_DRAWN else 'resized'}")
+        write_png(out / f"mdm-{size}.png", size, rows)
+        print(f"  {out}/mdm-{size}.png  {'drawn' if size <= HAND_DRAWN else 'resized'}")
 
 
 if __name__ == "__main__":

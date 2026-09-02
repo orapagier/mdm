@@ -1,7 +1,7 @@
 //! Unix-socket IPC between the app and the browser's native messaging host.
 //!
 //! One line of JSON per message in each direction. The socket lives in
-//! `$XDG_RUNTIME_DIR/ldm/` with 0700 on the directory, so only this user can
+//! `$XDG_RUNTIME_DIR/mdm/` with 0700 on the directory, so only this user can
 //! reach it — anything that can connect here can queue downloads as them.
 
 use crate::engine::Engine;

@@ -1,6 +1,6 @@
 //! Lifecycle management for the bundled aria2c daemon.
 //!
-//! LDM runs its *own* aria2 instance on a private port with a random secret
+//! MDM runs its *own* aria2 instance on a private port with a random secret
 //! rather than attaching to whatever the user might already have running. That
 //! keeps our global options (speed caps, concurrency) from stomping on theirs.
 
@@ -36,7 +36,10 @@ impl Supervisor {
     /// Start aria2c and block until its RPC endpoint answers.
     pub async fn start(settings: &Settings) -> Result<Self> {
         if which("aria2c").is_none() {
-            bail!("aria2c was not found on PATH — install it with: sudo dnf install aria2");
+            bail!(
+                "aria2c was not found on PATH — install it with: {}",
+                crate::distro::install("aria2")
+            );
         }
 
         // aria2 fails with a bare exit code and nothing on stderr when it

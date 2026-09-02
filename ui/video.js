@@ -521,7 +521,7 @@ $("dl-open").addEventListener("click", (e) =>
 $("dl-folder").addEventListener("click", (e) =>
   call("open_path", { path: e.currentTarget.dataset.path, reveal: true }));
 
-listen("ldm://snapshot", (event) => render(event.payload));
+listen("mdm://snapshot", (event) => render(event.payload));
 
 /* ------------------------------------------------------------------ *
  * Startup
@@ -586,12 +586,15 @@ async function handleRequest(request) {
 (async () => {
   settings = await invoke("get_settings").catch(() => null);
   if (!(await invoke("ytdlp_available").catch(() => false))) {
-    say("vid-status", "yt-dlp is not installed — run: sudo dnf install yt-dlp",
-        "hint bad");
+    // The install command is asked for rather than assumed: apt, dnf and
+    // pacman machines all end up here and only one of the three lines works.
+    const how = await invoke("install_hint", { package: "yt-dlp" })
+      .catch(() => "your package manager (the package is called yt-dlp)");
+    say("vid-status", `yt-dlp is not installed — run: ${how}`, "hint bad");
   }
   // The window is usually opened *for* a request, which was set before the
   // page existed and so could not have been delivered as an event.
   await handleRequest(await invoke("take_pending_video").catch(() => null));
 })();
 
-listen("ldm://videoPage", (event) => handleRequest(event.payload));
+listen("mdm://videoPage", (event) => handleRequest(event.payload));

@@ -40,8 +40,8 @@ async function init() {
 
   $("dot").classList.toggle("on", state.connected);
   $("status").textContent = state.connected
-    ? "Connected to the LDM daemon."
-    : "LDM is not running — downloads stay in Firefox.";
+    ? "Connected to the MDM daemon."
+    : "MDM is not running — downloads stay in Firefox.";
   $("enabled").checked = state.cfg.enabled;
 
   const list = $("media");

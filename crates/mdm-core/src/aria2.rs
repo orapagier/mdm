@@ -20,7 +20,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// `max-connection-per-server`, in both `addUri` and `changeGlobalOption`,
 /// answering "We encountered a problem while processing the option". Its
 /// *command line* happily accepts 128 and `--help` advertises `1-*`, which
-/// makes this easy to get wrong — but LDM drives aria2 entirely over RPC, so
+/// makes this easy to get wrong — but MDM drives aria2 entirely over RPC, so
 /// 16 is the real limit. `split` has no such cap.
 pub const MAX_CONNECTIONS: u8 = 16;
 

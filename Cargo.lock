@@ -1813,44 +1813,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ldm"
-version = "1.0.0"
-dependencies = [
- "env_logger",
- "ldm-core",
- "log",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tokio",
-]
-
-[[package]]
-name = "ldm-core"
-version = "1.0.0"
-dependencies = [
- "anyhow",
- "chrono",
- "env_logger",
- "libc",
- "log",
- "percent-encoding",
- "reqwest 0.12.28",
- "rusqlite",
- "serde",
- "serde_json",
- "sha2",
- "tokio",
- "toml 0.8.23",
- "url",
-]
-
-[[package]]
-name = "ldm-host"
-version = "1.0.0"
-
-[[package]]
 name = "libappindicator"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1950,6 +1912,44 @@ dependencies = [
  "tendril",
  "web_atoms",
 ]
+
+[[package]]
+name = "mdm"
+version = "1.0.0"
+dependencies = [
+ "env_logger",
+ "log",
+ "mdm-core",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tokio",
+]
+
+[[package]]
+name = "mdm-core"
+version = "1.0.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "env_logger",
+ "libc",
+ "log",
+ "percent-encoding",
+ "reqwest 0.12.28",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "toml 0.8.23",
+ "url",
+]
+
+[[package]]
+name = "mdm-host"
+version = "1.0.0"
 
 [[package]]
 name = "memchr"

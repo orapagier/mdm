@@ -6,6 +6,7 @@ pub mod categories;
 pub mod checksum;
 pub mod clipboard;
 pub mod config;
+pub mod distro;
 pub mod engine;
 pub mod ipc;
 pub mod model;

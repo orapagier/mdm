@@ -4,17 +4,17 @@
 mod commands;
 mod video;
 
-use ldm_core::engine::Engine;
-use ldm_core::ipc::{self, UiRequest};
-use ldm_core::{config, paths};
+use mdm_core::engine::Engine;
+use mdm_core::ipc::{self, UiRequest};
+use mdm_core::{config, paths};
 use tauri::{Emitter, Manager};
 use tokio::sync::mpsc;
 
 /// Tell the desktop which application these windows belong to.
 ///
 /// GTK3's Wayland backend takes a toplevel's `app_id` from the *program name*,
-/// not from the GTK application id — so a binary called `ldm` announces itself
-/// as "ldm", nothing matches `io.ldm.app.desktop`, and the panel, having no
+/// not from the GTK application id — so a binary called `mdm` announces itself
+/// as "mdm", nothing matches `io.mdm.app.desktop`, and the panel, having no
 /// entry to take an icon from, draws a generic placeholder. Naming ourselves
 /// after the desktop entry is what makes the two agree.
 ///
@@ -32,21 +32,58 @@ fn claim_desktop_identity() {
 
 /// The application id: `tauri.conf.json`'s `identifier`, and the base name of
 /// the desktop entry `install.sh` writes. All three have to say the same thing.
-const IDENTIFIER: &str = "io.ldm.app";
+const IDENTIFIER: &str = "io.mdm.app";
+
+/// Put a fatal startup error in front of whoever launched from a menu, where
+/// stderr goes nowhere.
+///
+/// Two helpers rather than one: zenity is a GNOME assumption, and a KDE
+/// desktop — Kubuntu and Debian KDE included — commonly ships kdialog and no
+/// zenity at all, which would make this failure entirely silent.
+fn show_startup_failure(detail: &str) {
+    let text = format!("Could not start the download engine:\n\n{detail}");
+    let attempts: Vec<(&str, Vec<String>)> = vec![
+        (
+            "zenity",
+            vec![
+                "--error".into(),
+                "--title=My Download Manager".into(),
+                format!("--text={text}"),
+            ],
+        ),
+        (
+            "kdialog",
+            vec![
+                "--title".into(),
+                "My Download Manager".into(),
+                "--error".into(),
+                text.clone(),
+            ],
+        ),
+    ];
+    for (bin, args) in attempts {
+        if mdm_core::supervisor::which(bin).is_none() {
+            continue;
+        }
+        if std::process::Command::new(bin).args(&args).status().is_ok() {
+            return;
+        }
+    }
+}
 
 fn main() {
     #[cfg(target_os = "linux")]
     claim_desktop_identity();
 
     env_logger::Builder::from_env(
-        env_logger::Env::default().default_filter_or("ldm=info,ldm_core=info"),
+        env_logger::Env::default().default_filter_or("mdm=info,mdm_core=info"),
     )
     .init();
 
     // Launched by the native messaging host: come up without stealing focus.
     let background = std::env::args().any(|a| a == "--background");
 
-    // URLs may arrive from the desktop entry (Exec=ldm %u) or an ldm: handler.
+    // URLs may arrive from the desktop entry (Exec=mdm %u) or an mdm: handler.
     let urls: Vec<String> = std::env::args().skip(1).filter_map(normalise_url).collect();
 
     if let Err(e) = paths::ensure_dirs() {
@@ -87,19 +124,13 @@ fn main() {
             // Without aria2 there is no download manager, so fail loudly and
             // point at the fix rather than starting a useless window.
             eprintln!("MDM could not start its download engine:\n  {e:#}");
-            let _ = std::process::Command::new("zenity")
-                .args([
-                    "--error",
-                    "--title=My Download Manager",
-                    &format!("--text=Could not start the download engine:\n\n{e:#}"),
-                ])
-                .status();
+            show_startup_failure(&format!("{e:#}"));
             std::process::exit(1);
         }
     };
 
     for url in &urls {
-        let mut job = ldm_core::engine::job_from_url(url);
+        let mut job = mdm_core::engine::job_from_url(url);
         job.source = "cli".into();
         match runtime.block_on(engine.submit(job)) {
             Ok(id) => log::info!("queued #{id} from the command line"),
@@ -112,7 +143,7 @@ fn main() {
     // runs outside the Tokio runtime the watcher needs.
     let clip_rx = if engine.settings().clipboard_watch {
         let (clip_tx, clip_rx) = mpsc::channel::<String>(8);
-        ldm_core::clipboard::watch(runtime.handle(), clip_tx).then_some(clip_rx)
+        mdm_core::clipboard::watch(runtime.handle(), clip_tx).then_some(clip_rx)
     } else {
         None
     };
@@ -155,6 +186,7 @@ fn main() {
             commands::delete_queue,
             commands::probe_media,
             commands::ytdlp_available,
+            commands::install_hint,
             commands::open_path,
             commands::pick_directory,
             commands::read_clipboard_url,
@@ -180,7 +212,7 @@ fn main() {
                 loop {
                     match rx.recv().await {
                         Ok(snapshot) => {
-                            let _ = emit_handle.emit("ldm://snapshot", snapshot);
+                            let _ = emit_handle.emit("mdm://snapshot", snapshot);
                         }
                         // Lagged means the UI fell behind; the next snapshot is
                         // a full state anyway, so simply carry on.
@@ -196,7 +228,7 @@ fn main() {
                 let clip_handle = handle.clone();
                 tauri::async_runtime::spawn(async move {
                     while let Some(url) = clip_rx.recv().await {
-                        let _ = clip_handle.emit("ldm://clipboard", url);
+                        let _ = clip_handle.emit("mdm://clipboard", url);
                     }
                 });
             }
@@ -221,7 +253,7 @@ fn main() {
                             let page = url.clone();
                             tauri::async_runtime::spawn(async move {
                                 let settings = engine.settings();
-                                let _ = ldm_core::ytdlp::probe(
+                                let _ = mdm_core::ytdlp::probe(
                                     &page,
                                     Some(settings.ytdlp_cookies_from.as_str()),
                                     &settings.ytdlp_extra_args,
@@ -260,7 +292,7 @@ fn main() {
                             title,
                         } => {
                             let _ = window.emit(
-                                "ldm://batch",
+                                "mdm://batch",
                                 serde_json::json!({
                                     "links": links, "pageUrl": page_url, "title": title
                                 }),
@@ -272,7 +304,7 @@ fn main() {
                             title,
                         } => {
                             let _ = window.emit(
-                                "ldm://media",
+                                "mdm://media",
                                 serde_json::json!({
                                     "items": items, "pageUrl": page_url, "title": title
                                 }),
@@ -298,7 +330,7 @@ fn main() {
             }
         })
         .build(tauri::generate_context!())
-        .expect("building the LDM window")
+        .expect("building the MDM window")
         .run(move |_app, event| {
             if let tauri::RunEvent::ExitRequested { .. } = event {
                 let engine = engine.clone();
@@ -323,14 +355,14 @@ fn send_to_running(line: String) -> std::io::Result<()> {
     sock.flush()
 }
 
-/// Accept a bare http(s) URL, or one wrapped in our own `ldm:` scheme so the
+/// Accept a bare http(s) URL, or one wrapped in our own `mdm:` scheme so the
 /// desktop entry can be registered as a protocol handler.
 fn normalise_url(arg: String) -> Option<String> {
     if arg.starts_with("--") {
         return None;
     }
-    let candidate = match arg.strip_prefix("ldm:") {
-        // Both ldm:https://... and ldm://https://... appear in the wild
+    let candidate = match arg.strip_prefix("mdm:") {
+        // Both mdm:https://... and mdm://https://... appear in the wild
         // depending on which app builds the link.
         Some(rest) => rest.trim_start_matches("//").to_string(),
         None => arg,

@@ -374,7 +374,10 @@ impl Engine {
 
     async fn dispatch_ytdlp(&self, d: &Download, job: &Job) -> Result<()> {
         if !ytdlp::available() {
-            bail!("yt-dlp is not installed");
+            bail!(
+                "yt-dlp is not installed — install it with: {}",
+                crate::distro::install("yt-dlp")
+            );
         }
         let settings = self.settings();
         let format = job
@@ -1153,7 +1156,7 @@ fn notify(title: &str, body: &str) {
     }
     let _ = std::process::Command::new("notify-send")
         .arg("--app-name=My Download Manager")
-        .arg("--icon=ldm")
+        .arg("--icon=mdm")
         .arg(title)
         .arg(body)
         .spawn();

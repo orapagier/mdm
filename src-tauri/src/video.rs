@@ -167,7 +167,7 @@ fn deliver(app: &AppHandle, request: Request) {
             {
                 let _ = window.set_size(LogicalSize::new(w, h));
             }
-            let _ = window.emit("ldm://videoPage", &request);
+            let _ = window.emit("mdm://videoPage", &request);
             let _ = window.show();
             let _ = window.unminimize();
             let _ = window.set_focus();

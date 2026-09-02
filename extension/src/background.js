@@ -168,7 +168,7 @@ browser.webRequest.onHeadersReceived.addListener(
         return {};
       })
       .catch((e) => {
-        console.warn("[ldm] handoff failed, leaving to Firefox:", e.message);
+        console.warn("[mdm] handoff failed, leaving to Firefox:", e.message);
         return {};
       });
   },
@@ -251,7 +251,7 @@ browser.downloads.onCreated.addListener(async (item) => {
     await browser.downloads.cancel(item.id).catch(() => {});
     await browser.downloads.erase({ id: item.id }).catch(() => {});
   } catch (e) {
-    console.warn("[ldm] backstop handoff failed:", e.message);
+    console.warn("[mdm] backstop handoff failed:", e.message);
   }
 });
 
@@ -272,7 +272,7 @@ async function headersForUrl(url, referrer, storeId) {
       });
     }
   } catch (e) {
-    console.warn("[ldm] cookie lookup failed:", e.message);
+    console.warn("[mdm] cookie lookup failed:", e.message);
   }
   if (referrer) headers.push({ name: "Referer", value: referrer });
   headers.push({ name: "User-Agent", value: navigator.userAgent });
@@ -326,7 +326,7 @@ browser.tabs.onUpdated.addListener((tabId, change) => {
 /* ------------------------------------------------------------------ *
  * Badge & notifications
  *
- * A handed-over download is announced by LDM's own window, which shows where
+ * A handed-over download is announced by MDM's own window, which shows where
  * it is going and how it is getting on. A toast saying only that it left the
  * browser added nothing, and answered to a second setting the app's own
  * "Desktop notifications" switch had no say over.
@@ -350,11 +350,11 @@ browser.tabs.onActivated.addListener(updateBadge);
  * ------------------------------------------------------------------ */
 
 const MENUS = [
-  { id: "ldm-link", title: "Download with MDM", contexts: ["link"] },
-  { id: "ldm-media", title: "Download this media with MDM", contexts: ["video", "audio", "image"] },
-  { id: "ldm-page-links", title: "Download all links on this page…", contexts: ["page"] },
-  { id: "ldm-page-media", title: "Grab media from this page…", contexts: ["page"] },
-  { id: "ldm-selection", title: "Download selected links…", contexts: ["selection"] },
+  { id: "mdm-link", title: "Download with MDM", contexts: ["link"] },
+  { id: "mdm-media", title: "Download this media with MDM", contexts: ["video", "audio", "image"] },
+  { id: "mdm-page-links", title: "Download all links on this page…", contexts: ["page"] },
+  { id: "mdm-page-media", title: "Grab media from this page…", contexts: ["page"] },
+  { id: "mdm-selection", title: "Download selected links…", contexts: ["selection"] },
 ];
 
 browser.runtime.onInstalled.addListener(() => {
@@ -365,15 +365,15 @@ browser.runtime.onInstalled.addListener(() => {
 
 browser.contextMenus.onClicked.addListener(async (info, tab) => {
   switch (info.menuItemId) {
-    case "ldm-link":
+    case "mdm-link":
       return sendSimple(info.linkUrl, info, tab);
-    case "ldm-media":
+    case "mdm-media":
       return sendSimple(info.srcUrl || info.linkUrl, info, tab);
-    case "ldm-page-links":
+    case "mdm-page-links":
       return grabFromPage(tab, "links");
-    case "ldm-selection":
+    case "mdm-selection":
       return grabFromPage(tab, "selection");
-    case "ldm-page-media": {
+    case "mdm-page-media": {
       const found = [...(tabMedia.get(tab.id)?.values() ?? [])];
       if (!found.length) return notifyPlain("No media detected on this page yet.");
       return Native.post({ type: "media", items: found, pageUrl: tab.url, title: tab.title });
@@ -397,7 +397,7 @@ async function sendSimple(url, info, tab) {
   };
   markCaptured(url);
   const ok = Native.post({ type: "download", job });
-  if (!ok) notifyPlain("LDM is not running.");
+  if (!ok) notifyPlain("MDM is not running.");
 }
 
 /** Ask the page for its links; the picker itself lives in the app. */
@@ -443,7 +443,7 @@ function notifyPlain(message) {
   browser.notifications
     .create({
       type: "basic",
-      iconUrl: browser.runtime.getURL("icons/ldm-64.png"),
+      iconUrl: browser.runtime.getURL("icons/mdm-64.png"),
       title: "My Download Manager",
       message,
     })
@@ -466,7 +466,7 @@ async function grabVideo(msg) {
   }
   if (!Native.isAvailable()) {
     Native.connect();
-    return { ok: false, error: "LDM is not running" };
+    return { ok: false, error: "MDM is not running" };
   }
 
   // A direct file URL only counts when the page is not a known player; on a
@@ -486,7 +486,7 @@ async function grabVideo(msg) {
     );
     return reply && reply.accepted
       ? { ok: true, mode: "ytdlp" }
-      : { ok: false, error: (reply && reply.error) || "LDM rejected the request" };
+      : { ok: false, error: (reply && reply.error) || "MDM rejected the request" };
   } catch (e) {
     return { ok: false, error: e.message };
   }

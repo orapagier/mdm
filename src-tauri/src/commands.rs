@@ -1,8 +1,8 @@
 //! Commands exposed to the web frontend.
 
-use ldm_core::engine::{Engine, Snapshot};
-use ldm_core::model::{Job, Queue, Settings};
-use ldm_core::ytdlp::{self, MediaInfo};
+use mdm_core::engine::{Engine, Snapshot};
+use mdm_core::model::{Job, Queue, Settings};
+use mdm_core::ytdlp::{self, MediaInfo};
 use std::sync::Arc;
 use tauri::{AppHandle, State};
 
@@ -50,7 +50,7 @@ pub async fn add_download(
     if url.is_empty() {
         return Err("no URL given".into());
     }
-    let mut job = ldm_core::engine::job_from_url(&url);
+    let mut job = mdm_core::engine::job_from_url(&url);
     job.directory = directory.filter(|d| !d.is_empty());
     // What the picker weighed the chosen formats at. yt-dlp fetches the video
     // stream and then the audio, so without this the bar is scaled to the first
@@ -85,7 +85,7 @@ pub async fn add_many(
         if url.is_empty() {
             continue;
         }
-        let mut job: Job = ldm_core::engine::job_from_url(&url);
+        let mut job: Job = mdm_core::engine::job_from_url(&url);
         job.directory = directory.clone().filter(|d| !d.is_empty());
         if let Err(e) = engine.submit(job).await {
             failures.push(format!("{url}: {e:#}"));
@@ -167,6 +167,16 @@ pub async fn probe_media(engine: State<'_, Arc<Engine>>, url: String) -> Cmd<Med
 #[tauri::command]
 pub fn ytdlp_available() -> bool {
     ytdlp::available()
+}
+
+/// The command that installs `package` on this machine.
+///
+/// The frontend cannot read `/etc/os-release`, and a hint that says `dnf` on a
+/// Debian desktop is a wrong turn rather than an instruction, so the advice is
+/// resolved here and handed over as text.
+#[tauri::command]
+pub fn install_hint(package: String) -> String {
+    mdm_core::distro::install(&package)
 }
 
 /// Open the standalone download window, empty, for the toolbar button.
@@ -261,7 +271,7 @@ pub fn pick_directory(start: Option<String>) -> Cmd<Option<String>> {
     ];
 
     for (bin, args) in attempts {
-        if ldm_core::supervisor::which(bin).is_none() {
+        if mdm_core::supervisor::which(bin).is_none() {
             continue;
         }
         let out = std::process::Command::new(bin).args(&args).output();
@@ -285,7 +295,7 @@ pub fn read_clipboard_url() -> Option<String> {
         ("xclip", vec!["-selection", "clipboard", "-o"]),
         ("xsel", vec!["--clipboard", "--output"]),
     ] {
-        if ldm_core::supervisor::which(bin).is_none() {
+        if mdm_core::supervisor::which(bin).is_none() {
             continue;
         }
         if let Ok(o) = std::process::Command::new(bin).args(&args).output() {

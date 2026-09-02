@@ -5,7 +5,7 @@ Firefox speaks a 4-byte native-endian length prefix followed by UTF-8 JSON, on
 stdin/stdout. Anything else on stdout desynchronises the stream permanently, so
 this also asserts that the host emits nothing but well-formed frames.
 
-    python3 test-native-host.py <path-to-ldm-host> [--expect-app]
+    python3 test-native-host.py <path-to-mdm-host> [--expect-app]
 """
 
 import json

@@ -19,7 +19,7 @@ const MAX_MESSAGE: u32 = 64 * 1024 * 1024;
 
 fn main() {
     // stderr goes to the browser's console; stdout is protocol-only.
-    eprintln!("[ldm-host] started");
+    eprintln!("[mdm-host] started");
 
     let stdin = io::stdin();
     let mut input = stdin.lock();
@@ -32,17 +32,17 @@ fn main() {
         let msg = match read_message(&mut input) {
             Ok(Some(m)) => m,
             Ok(None) => {
-                eprintln!("[ldm-host] browser closed the port");
+                eprintln!("[mdm-host] browser closed the port");
                 return;
             }
             Err(e) => {
-                eprintln!("[ldm-host] read error: {e}");
+                eprintln!("[mdm-host] read error: {e}");
                 return;
             }
         };
 
         let reply = app.round_trip(&msg).unwrap_or_else(|e| {
-            eprintln!("[ldm-host] {e}");
+            eprintln!("[mdm-host] {e}");
             // The extension treats a non-accepting reply as "fail open", so a
             // dead app leaves the download with Firefox rather than losing it.
             let id = extract_id(&msg);
@@ -54,7 +54,7 @@ fn main() {
         });
 
         if let Err(e) = write_message(&mut output, reply.as_bytes()) {
-            eprintln!("[ldm-host] write error: {e}");
+            eprintln!("[mdm-host] write error: {e}");
             return;
         }
     }
@@ -147,12 +147,12 @@ impl AppLink {
             Err(Failure::Silent(e)) => {
                 // The app took the message and did not answer. Re-sending
                 // would run whatever it was a second time, so report it.
-                eprintln!("[ldm-host] no reply: {e}");
+                eprintln!("[mdm-host] no reply: {e}");
                 self.stream = None;
                 Err(e)
             }
             Err(Failure::Broken(e)) if reused => {
-                eprintln!("[ldm-host] connection lost ({e}); reconnecting");
+                eprintln!("[mdm-host] connection lost ({e}); reconnecting");
                 self.stream = None;
                 // No launch here: if the app really is gone the next message
                 // starts it, and a 15s wait inside a blocking webRequest
@@ -226,10 +226,10 @@ fn configure(sock: &UnixStream) {
 
 fn socket_path() -> PathBuf {
     match std::env::var_os("XDG_RUNTIME_DIR") {
-        Some(v) if !v.is_empty() => PathBuf::from(v).join("ldm").join("ldm.sock"),
+        Some(v) if !v.is_empty() => PathBuf::from(v).join("mdm").join("mdm.sock"),
         _ => std::env::temp_dir()
-            .join(format!("ldm-{}", uid()))
-            .join("ldm.sock"),
+            .join(format!("mdm-{}", uid()))
+            .join("mdm.sock"),
     }
 }
 
@@ -248,8 +248,8 @@ fn uid() -> u32 {
 
 /// Start the app detached, so it outlives this host process.
 fn launch_app() -> Result<(), String> {
-    let exe = find_app().ok_or("the ldm binary could not be located")?;
-    eprintln!("[ldm-host] launching {}", exe.display());
+    let exe = find_app().ok_or("the mdm binary could not be located")?;
+    eprintln!("[mdm-host] launching {}", exe.display());
     Command::new(&exe)
         .arg("--background")
         .stdin(Stdio::null())
@@ -261,7 +261,7 @@ fn launch_app() -> Result<(), String> {
 }
 
 fn find_app() -> Option<PathBuf> {
-    if let Some(p) = std::env::var_os("LDM_APP_PATH") {
+    if let Some(p) = std::env::var_os("MDM_APP_PATH") {
         let p = PathBuf::from(p);
         if p.is_file() {
             return Some(p);
@@ -270,7 +270,7 @@ fn find_app() -> Option<PathBuf> {
     // Installed layout puts the host next to the app.
     if let Ok(me) = std::env::current_exe() {
         if let Some(dir) = me.parent() {
-            let sibling = dir.join("ldm");
+            let sibling = dir.join("mdm");
             if sibling.is_file() {
                 return Some(sibling);
             }
@@ -278,7 +278,7 @@ fn find_app() -> Option<PathBuf> {
     }
     std::env::var_os("PATH").and_then(|path| {
         std::env::split_paths(&path)
-            .map(|d| d.join("ldm"))
+            .map(|d| d.join("mdm"))
             .find(|p| p.is_file())
     })
 }

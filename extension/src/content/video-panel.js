@@ -24,7 +24,7 @@
    * only thing every injection can see, so the previous panel is found there
    * and taken down before this one goes up.
    */
-  const HOST_ID = "ldm-video-panel";
+  const HOST_ID = "mdm-video-panel";
   document.getElementById(HOST_ID)?.remove();
 
   /** Ignore decorative loops, ad bumpers and tracking pixels. */
@@ -83,7 +83,7 @@
 
     button = document.createElement("button");
     button.className = "btn";
-    button.setAttribute("part", "ldm-download");
+    button.setAttribute("part", "mdm-download");
     const arrow = document.createElement("span");
     arrow.className = "arrow";
     arrow.textContent = "⤓"; // ⤓

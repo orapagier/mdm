@@ -1,5 +1,5 @@
 [package]
-name = "ldm"
+name = "mdm"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -7,14 +7,14 @@ license.workspace = true
 description = "Accelerated download manager for Linux"
 
 [[bin]]
-name = "ldm"
+name = "mdm"
 path = "src/main.rs"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-ldm-core = { path = "../crates/ldm-core" }
+mdm-core = { path = "../crates/mdm-core" }
 tauri = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
