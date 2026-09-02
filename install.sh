@@ -228,11 +228,21 @@ say "Checking for a pre-rename (ldm) install"
 # Never move a database out from under a process that has it open: renames do
 # not disturb an open descriptor, so the running app would go on writing to
 # files nothing can find again after it exits.
-if pgrep -x ldm >/dev/null 2>&1 || pgrep -x mdm >/dev/null 2>&1; then
-  die "MDM is running — quit it first, then re-run this script.
-  Its database is open, and moving it now would strand everything written
-  since the app started."
-fi
+# Name the process actually found. The one holding the database open is
+# usually the *old* binary, and being told "MDM is running" sends people
+# looking for a name that pgrep will not match.
+for running in mdm ldm; do
+  pids="$(pgrep -x "$running" 2>/dev/null || true)"
+  if [[ -n "$pids" ]]; then
+    die "\"$running\" is still running (pid ${pids//$'\n'/, }) — quit it first,
+  then re-run this script. Its database is open, and moving it now would
+  strand everything written since it started.
+  It has no window when it was started in the background; stop it with:
+    pkill -x $running
+  Firefox can start it again through the extension, so close Firefox too if
+  it comes back."
+  fi
+done
 
 migrated=
 for base in "${XDG_CONFIG_HOME:-$HOME/.config}" \
