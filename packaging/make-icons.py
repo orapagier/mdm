@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
-"""Draw and resize MDM's icon into every size the app and the extension need.
+"""Resize MDM's icon into every size the app and the extension need.
 
-The artwork of record is `icon-source.png` beside this script — a 512px "m" in
-the Rye face, from the favicon set the app is branded with. Everything else is
-derived from it here so the sizes can never drift apart.
+The artwork of record is `icon-source.png` beside this script — a 512px globe
+laced with network arcs, a download arrow over it, cut out of its black
+background on a circle. Everything else is derived from it here so the sizes
+can never drift apart.
 
-Two variants, because one drawing cannot serve every size. Above `HAND_DRAWN`
-the blackletter is simply resized: there are pixels enough for its flourishes.
-At panel and toolbar sizes those same flourishes fall below the pixel grid and
-average into a smudge, so the small icons are drawn instead — the same letter
-reduced to what survives: three stems under a bar, laid out on whole pixels so
-every edge is sharp. Same disc, same blue, no blur.
+One drawing serves every size: the globe is a disc first and a map second, so
+what survives the reduction to 16px — blue sphere, green arrow — is the icon
+itself rather than a detail of it. No second, hand-drawn variant to keep in
+step with the artwork.
 
 No image library: PNG in, box-filtered down, PNG out. Alpha is premultiplied
-before averaging, which is what keeps the edges of the disc clean instead of
+before averaging, which is what keeps the edge of the disc clean instead of
 bleeding the transparent corners into the blue.
 """
 import struct
@@ -22,15 +21,6 @@ import zlib
 from pathlib import Path
 
 SIZES = (16, 24, 32, 48, 64, 128, 256, 512)
-
-# The largest size still drawn rather than resized. At 48 the blackletter
-# survives the reduction; at 32 it does not.
-HAND_DRAWN = 32
-
-# Sampled from the artwork, so the two variants are the same blue.
-DISC = (32, 156, 238)
-GLYPH = (255, 255, 255)
-SS = 4  # supersampling, for the disc's edge only
 
 
 def read_png(path):
@@ -125,47 +115,6 @@ def read_png(path):
     return w, h, bytes(out)
 
 
-def draw(size):
-    """The letter reduced to three stems under a bar, on exact pixel edges.
-
-    Everything is a whole number of pixels: a stem that lands on half a pixel
-    is a grey stem, and grey stems at 16px are the smudge this exists to avoid.
-    """
-    unit = max(1, round(size / 8))     # stem width, gap width, bar height
-    width = 5 * unit                   # three stems, two gaps
-    height = 4 * unit                  # the bar, then the stems
-    left = (size - width) // 2
-    top = (size - height) // 2
-    stems = [(left + i * 2 * unit, left + i * 2 * unit + unit) for i in range(3)]
-
-    def is_glyph(px, py):
-        if not (top <= py < top + height):
-            return False
-        if py < top + unit:            # the bar joins all three
-            return left <= px < left + width
-        return any(x0 <= px < x1 for x0, x1 in stems)
-
-    radius = size / 2
-    rows = []
-    for py in range(size):
-        row = bytearray()
-        for px in range(size):
-            if is_glyph(px, py):
-                row += bytes(GLYPH) + b"\xff"
-                continue
-            # Only the disc's edge needs softening, and only it gets it.
-            covered = 0
-            for sy in range(SS):
-                for sx in range(SS):
-                    dx = px + (sx + 0.5) / SS - radius
-                    dy = py + (sy + 0.5) / SS - radius
-                    if dx * dx + dy * dy <= radius * radius:
-                        covered += 1
-            row += bytes(DISC) + bytes([covered * 255 // (SS * SS)])
-        rows.append(bytes(row))
-    return rows
-
-
 def resize(src, sw, sh, size):
     """Average each destination pixel over the source pixels it covers."""
     rows = []
@@ -192,8 +141,51 @@ def resize(src, sw, sh, size):
     return rows
 
 
+def filtered(rows):
+    """Filter each line the way it compresses best (PNG spec §9.2, §12.8).
+
+    Photographic artwork stores about a quarter smaller for it: unfiltered
+    lines hand zlib the pixels themselves, filtered ones hand it the small
+    differences between neighbours, which is what it has repeats to find in.
+    The heuristic is the spec's own — keep the line whose bytes sum smallest
+    read as signed, since bytes near zero are the ones that compress.
+    """
+    bpp = 4  # RGBA: the byte a pixel to the left
+    out = bytearray()
+    prev = bytes(len(rows[0]))
+    for line in rows:
+        n = len(line)
+
+        def left(i):
+            return line[i - bpp] if i >= bpp else 0
+
+        def corner(i):
+            return prev[i - bpp] if i >= bpp else 0
+
+        def paeth(i):
+            a, b, c = left(i), prev[i], corner(i)
+            guess = a + b - c
+            pa, pb, pc = abs(guess - a), abs(guess - b), abs(guess - c)
+            return a if pa <= pb and pa <= pc else (b if pb <= pc else c)
+
+        def cost(filtered_line):
+            return sum(b if b < 128 else 256 - b for b in filtered_line)
+
+        candidates = (
+            line,
+            bytes((line[i] - left(i)) & 255 for i in range(n)),
+            bytes((line[i] - prev[i]) & 255 for i in range(n)),
+            bytes((line[i] - ((left(i) + prev[i]) >> 1)) & 255 for i in range(n)),
+            bytes((line[i] - paeth(i)) & 255 for i in range(n)),
+        )
+        kind = min(range(len(candidates)), key=lambda k: cost(candidates[k]))
+        out += bytes([kind]) + candidates[kind]
+        prev = line
+    return bytes(out)
+
+
 def write_png(path, size, rows):
-    raw = b"".join(b"\x00" + r for r in rows)
+    raw = filtered(rows)
 
     def chunk(tag, data):
         c = struct.pack(">I", len(data)) + tag + data
@@ -214,9 +206,8 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
     w, h, pixels = read_png(source)
     for size in SIZES:
-        rows = draw(size) if size <= HAND_DRAWN else resize(pixels, w, h, size)
-        write_png(out / f"mdm-{size}.png", size, rows)
-        print(f"  {out}/mdm-{size}.png  {'drawn' if size <= HAND_DRAWN else 'resized'}")
+        write_png(out / f"mdm-{size}.png", size, resize(pixels, w, h, size))
+        print(f"  {out}/mdm-{size}.png")
 
 
 if __name__ == "__main__":
