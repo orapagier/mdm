@@ -189,8 +189,7 @@ impl Engine {
         // A blob is already the file. Its URL still carries the origin — and a
         // blob from facebook.com reads as a streaming site — so this has to be
         // settled by what arrived, not by where it came from.
-        let use_ytdlp = blob.is_none()
-            && (job.use_ytdlp || ytdlp::looks_like_streaming_site(&job.url));
+        let use_ytdlp = blob.is_none() && wants_ytdlp(&job);
         let (directory, filename, category) =
             self.resolve_destination(&job, &settings, use_ytdlp)?;
         let output_name = match job.output_name.clone() {
@@ -1210,7 +1209,9 @@ fn job_from(d: &Download) -> Job {
         reason: "resume".into(),
         source: "engine".into(),
         directory: Some(d.directory.clone()),
-        use_ytdlp: d.use_ytdlp,
+        // Settled when the row was created, so a resume re-runs the decision
+        // that was made rather than guessing at it again from the URL.
+        use_ytdlp: Some(d.use_ytdlp),
         // Recorded on the row precisely so a resume, a retry or a scheduled
         // dispatch fetches the quality that was chosen rather than the default.
         format_id: d.format_id.clone(),
@@ -1401,6 +1402,27 @@ pub async fn global_stat(aria2: &Aria2) -> Result<GlobalStat> {
     aria2.global_stat().await
 }
 
+/// Whether yt-dlp belongs between this job and aria2.
+///
+/// The host is consulted only when nobody has looked. A caller that has
+/// already tried to read a page out of this URL holds the better answer, and
+/// overruling it is how a working download became a broken one: the format
+/// picker exhausts every page it can find, gives up, offers the file the
+/// player is using — and that file comes off the site's own CDN, so
+/// `v16-webapp.tiktok.com` read as "a TikTok page" and an extractor was put in
+/// front of an mp4 aria2 could simply have fetched.
+///
+/// Where nobody has an opinion the type still settles it before the host does:
+/// a response the browser has already called video or audio is the file, and
+/// bytes are not a page. A manifest is not caught by that — `.m3u8` arrives as
+/// `application/vnd.apple.mpegurl`, and turning one of those into a file is
+/// precisely yt-dlp's job.
+pub fn wants_ytdlp(job: &Job) -> bool {
+    job.use_ytdlp.unwrap_or_else(|| {
+        !ytdlp::is_media_response(&job.mime) && ytdlp::looks_like_streaming_site(&job.url)
+    })
+}
+
 /// Convenience for the UI's "add URL" box.
 pub fn job_from_url(url: &str) -> Job {
     Job {
@@ -1415,7 +1437,8 @@ pub fn job_from_url(url: &str) -> Job {
         reason: "manual".into(),
         source: "ui".into(),
         directory: None,
-        use_ytdlp: false,
+        // Nothing has looked at this URL yet; the engine decides.
+        use_ytdlp: None,
         format_id: None,
         output_name: None,
         start_paused: false,

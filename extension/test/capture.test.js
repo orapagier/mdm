@@ -31,6 +31,7 @@ const {
   headerMap,
   mirrorsOf,
   decodeDataUrl,
+  withoutByteRange,
 } = context;
 
 const CFG = {
@@ -518,6 +519,44 @@ check("a url with no comma is not a data url", () => {
 check("an undecodable body is refused rather than half-read", () => {
   // A stray % is not valid percent-encoding; decodeURIComponent throws.
   assert.strictEqual(decodeDataUrl("data:text/plain,100%"), null);
+});
+
+/* ---------------- byte ranges ---------------- */
+
+check("a byte range written into the URL is taken off it", () => {
+  // The real shape, from a Facebook video that saved as an unplayable 2.8 MB
+  // slice — exactly byteend - bytestart + 1 bytes of the middle of a stream.
+  const ranged =
+    "https://scontent.example.com/o1/v/t2/f2/m366/AQM9jAmJ.mp4" +
+    "?_nc_cat=101&oh=00_AQIX&oe=6A9EA4FA&bytestart=642858&byteend=3477824";
+  const whole = withoutByteRange(ranged);
+  assert.ok(!whole.includes("bytestart"), "bytestart survived");
+  assert.ok(!whole.includes("byteend"), "byteend survived");
+  // Everything that signs the URL has to come through untouched, or the
+  // server answers the tidied-up request with 403.
+  assert.ok(whole.includes("oh=00_AQIX"), "the signature was lost");
+  assert.ok(whole.includes("oe=6A9EA4FA"), "the expiry was lost");
+  assert.ok(whole.includes("_nc_cat=101"), "an ordinary parameter was lost");
+});
+
+check("googlevideo's range parameter goes the same way", () => {
+  assert.strictEqual(
+    withoutByteRange("https://rr3.googlevideo.com/videoplayback?id=abc&range=0-12345"),
+    "https://rr3.googlevideo.com/videoplayback?id=abc"
+  );
+});
+
+check("a URL naming no range is returned exactly as it stands", () => {
+  // Not merely equivalent: re-serialising through URL would re-encode, and a
+  // CDN signature covers the query as it was written.
+  const url =
+    "https://v16-webapp.tiktok.com/x/video/tos/alisg/y/?a=1988&rc=Mzt1eW85%3D%3D&l=2026";
+  assert.strictEqual(withoutByteRange(url), url);
+});
+
+check("something that is not a URL at all is left alone", () => {
+  assert.strictEqual(withoutByteRange("blob:nonsense"), "blob:nonsense");
+  assert.strictEqual(withoutByteRange(""), "");
 });
 
 /* ---------------- report ---------------- */

@@ -47,9 +47,15 @@ pub struct Job {
     /// Set by the UI when the user picks a directory explicitly.
     #[serde(default)]
     pub directory: Option<String>,
-    /// Streaming sites go to yt-dlp instead of straight to aria2.
+    /// Whether yt-dlp belongs between this URL and aria2.
+    ///
+    /// Three answers rather than two. `None` is "no opinion", and only then
+    /// does the engine guess from the host. A caller that has already looked
+    /// says so outright: the format picker asks yt-dlp about every page it can
+    /// find before it gives up and offers the file the player is using, and
+    /// its `Some(false)` is a finding rather than an unset default.
     #[serde(default)]
-    pub use_ytdlp: bool,
+    pub use_ytdlp: Option<bool>,
     #[serde(default)]
     pub format_id: Option<String>,
     /// Name the user picked in the format dialog, without extension.
@@ -263,7 +269,20 @@ impl Default for Settings {
             // and must not collide with one the user already has.
             rpc_port: 6810,
             aria2_extra_args: Vec::new(),
-            ytdlp_format: "bestvideo*+bestaudio/best".into(),
+            // Best picture, with one exception: a codec the desktop cannot
+            // decode. TikTok offers the same video twice, 1080p in HEVC and
+            // 720p in H.264, and prefers the HEVC — which is patent-encumbered
+            // and so ships with no decoder on Fedora and most other distros.
+            // The download succeeded, weighed the right seven megabytes and
+            // played as a black screen with sound, which is indistinguishable
+            // from "it only downloaded the audio". Fewer pixels that play beat
+            // more that do not. Sites offering nothing else are unaffected:
+            // the last branch is the old expression, so HEVC is still taken
+            // where it is the only thing on offer.
+            ytdlp_format: "bestvideo*[vcodec!*=hev][vcodec!*=h265]+bestaudio/\
+                           best[vcodec!*=hev][vcodec!*=h265]/\
+                           bestvideo*+bestaudio/best"
+                .into(),
             // YouTube now refuses anonymous extraction on many videos with
             // "Sign in to confirm you're not a bot". The user is already
             // signed in in Firefox, which is where the request came from.

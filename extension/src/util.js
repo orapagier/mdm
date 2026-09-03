@@ -96,6 +96,149 @@ function splitLinkHeader(value) {
 }
 
 /* ------------------------------------------------------------------ *
+ * Byte ranges
+ * ------------------------------------------------------------------ */
+
+/**
+ * Query parameters by which a player pins one slice of a stream.
+ *
+ * A DASH player asks for a file a piece at a time, and some sites write the
+ * piece into the URL rather than into a `Range` header: Facebook appends
+ * `bytestart`/`byteend`, YouTube uses `range`.
+ */
+const RANGE_PARAMS = ["bytestart", "byteend", "range"];
+
+/**
+ * The same URL with any byte range taken off it.
+ *
+ * Saved as it stands, a ranged URL yields exactly what it asks for — a slice
+ * out of the middle of a file, with no header on the front. Three of these
+ * were saved from Facebook and every one of them reported complete: 1 KB,
+ * 16 KB and 2.8 MB, the last being precisely `byteend - bytestart + 1` bytes,
+ * and all three rejected by ffprobe as "no tfhd was found". Nothing will play
+ * them. Asking without the range asks for the whole stream, which is what the
+ * user pressed the button for.
+ */
+function withoutByteRange(url) {
+  try {
+    const u = new URL(url);
+    let ranged = false;
+    for (const p of RANGE_PARAMS) {
+      if (!u.searchParams.has(p)) continue;
+      u.searchParams.delete(p);
+      ranged = true;
+    }
+    return ranged ? u.href : url;
+  } catch {
+    return url;
+  }
+}
+
+/* ------------------------------------------------------------------ *
+ * What a media URL says about itself
+ * ------------------------------------------------------------------ */
+
+/**
+ * Sites that write a stream's own description into its address, and how to
+ * read it.
+ *
+ * Facebook signs every file it serves with an `efg` parameter carrying
+ * base64 JSON — `{"vencode_tag":"dash_..._audio","video_id":10155529876…}` —
+ * and that payload answers the two questions nothing else on the wire can.
+ * The response certainly cannot: a Facebook video, its 1080p DASH stream and
+ * the *audio track on its own* all come back as `Content-Type: video/mp4`,
+ * with the audio weighing a couple of hundred kilobytes and looking in every
+ * other respect like a small video.
+ *
+ * Instagram is the same CDN and the same parameter.
+ */
+const URL_FACTS = [
+  {
+    host: /(^|\.)(?:fbcdn\.net|cdninstagram\.com)$/i,
+    param: "efg",
+    read: (text) => ({
+      // Which post the stream belongs to. A feed has several playing or
+      // preloading at once, and this is the only thing that tells their files
+      // apart — they are otherwise the same shape from the same host.
+      //
+      // Read out of the text rather than off the parsed object, because a
+      // Facebook video id does not survive being a JavaScript number:
+      // 10155529876156509 is past 2^53 and `JSON.parse` quietly returns
+      // ...508, an id belonging to nothing, which matches no post and would
+      // have made this whole reading a no-op that looked like it worked.
+      videoId: (/"video_id"\s*:\s*"?(\d+)/.exec(text) || [])[1] || "",
+      // `dash_v3_426_crf_23_main_3.0_frag_2_audio` — the sound with no
+      // picture, which is a whole download that plays as a black screen.
+      audioOnly: /(?:^|_)audio(?:_|$)/i.test(String(JSON.parse(text).vencode_tag ?? "")),
+      // One half of a DASH pair — picture with no sound, or sound with no
+      // picture. Saving either as "the video" produces a file that downloads
+      // perfectly and is not the thing anyone asked for. Only Facebook's
+      // `xpv_progressive` encodes carry both in one file.
+      partial: /^dash_/i.test(String(JSON.parse(text).vencode_tag ?? "")),
+    }),
+    // The post this stream belongs to, as an address anything can resolve.
+    page: (id) => `https://www.facebook.com/watch/?v=${id}`,
+  },
+];
+
+/**
+ * The page that would resolve a media URL, where the URL names its own post.
+ *
+ * The one route out of a feed that rests on a fact rather than a reading of
+ * the DOM. When no permalink can be found — Facebook's feed publishes none for
+ * a reel, and the player's src is a `blob:` nobody outside the page can fetch
+ * — what is left is the file the player pulled, and that file's address says
+ * which post it belongs to. Handing back `facebook.com/watch/?v=<id>` turns
+ * that into a page yt-dlp extracts properly, with sound, at every quality,
+ * instead of the half a video the raw stream would have been.
+ */
+function pageForStream(url) {
+  const { videoId } = urlFacts(url);
+  if (!videoId) return "";
+  let host;
+  try {
+    host = new URL(url).hostname;
+  } catch {
+    return "";
+  }
+  const site = URL_FACTS.find((s) => s.host.test(host));
+  return site && site.page ? site.page(videoId) : "";
+}
+
+/** Base64url, with the padding a URL leaves off, as text. */
+function decodeTag(raw) {
+  const padded = raw.replace(/-/g, "+").replace(/_/g, "/");
+  return atob(padded + "=".repeat((4 - (padded.length % 4)) % 4));
+}
+
+/**
+ * What the site itself says this file is, where it says anything at all.
+ *
+ * Deliberately incurious everywhere else: an unknown host, a missing
+ * parameter or a payload that will not decode all answer "nothing known",
+ * which leaves every judgement exactly where it was.
+ */
+function urlFacts(url) {
+  const unknown = { videoId: "", audioOnly: false, partial: false };
+  let u;
+  try {
+    u = new URL(url);
+  } catch {
+    return unknown;
+  }
+  const site = URL_FACTS.find((s) => s.host.test(u.hostname));
+  const raw = site && u.searchParams.get(site.param);
+  if (!raw) return unknown;
+  try {
+    return { ...unknown, ...site.read(decodeTag(raw)) };
+  } catch {
+    // Their format, not ours: it may change without notice, and when it does
+    // the grab must go on working the way it did before this was read at all.
+    return unknown;
+  }
+}
+
+/* ------------------------------------------------------------------ *
  * Content-Disposition (RFC 6266 + RFC 5987 ext-value)
  * ------------------------------------------------------------------ */
 

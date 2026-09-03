@@ -273,7 +273,10 @@ function wireAddDialog() {
     await call("add_download", {
       url,
       directory: $("add-dir").value.trim() || null,
-      useYtdlp: $("add-ytdlp").checked,
+      // Only ever a yes. Leaving the box alone is not a refusal — a pasted
+      // YouTube link should still be extracted without anyone having to ask —
+      // so an unticked box says nothing and the engine decides.
+      useYtdlp: $("add-ytdlp").checked || null,
       formatId: null,
       filename: null,
     });

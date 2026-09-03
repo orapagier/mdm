@@ -37,6 +37,20 @@
     </div>
     <div id="vid-status" class="hint" hidden></div>
 
+    <!--
+      Shown only when nothing could be tied to the video on screen. There may
+      still be a file to be had, but it is a guess, and a guess does not get to
+      arrive pre-filled under a Start button: a feed loads the posts below the
+      one being watched, so the wrong video downloads perfectly and looks in
+      every respect like the right one. Trying again is offered first because
+      the usual cause is a site refusing a share of requests, and a second ask
+      usually lands.
+    -->
+    <menu id="vid-anyway" class="anyway" hidden>
+      <button type="button" id="vid-retry" class="primary">Try again</button>
+      <button type="button" id="vid-force">Download it anyway</button>
+    </menu>
+
     <div class="tabs" id="vid-tabs" hidden>
       <button type="button" class="tab active" data-kind="both">Video + audio</button>
       <button type="button" class="tab" data-kind="video">Video, no sound</button>

@@ -55,6 +55,43 @@ pub struct Candidate {
     /// name the file by if nothing on the page resolves.
     #[serde(default)]
     pub mime: String,
+    /// Sound with no picture, as far as the extension could tell.
+    ///
+    /// Worth carrying because the response does not say: Facebook serves the
+    /// audio track of a DASH video as `video/mp4` like everything else, and
+    /// saving it produces a download that completes, weighs a couple of
+    /// hundred kilobytes and plays as a black screen. It only matters when no
+    /// page resolves and a file is all that is left to offer.
+    #[serde(default)]
+    pub audio_only: bool,
+    /// Half of a DASH pair: a picture track or a sound track, never both.
+    ///
+    /// A site that serves video this way has no single file to hand over —
+    /// the player fetches two and plays them together — so either one saved on
+    /// its own downloads to 100% and is not the video. It matters only when no
+    /// page resolved and a file is the last thing left to offer, and then it
+    /// is the difference between a download and a disappointment.
+    #[serde(default)]
+    pub partial: bool,
+    /// Which post this file belongs to, as far as the extension could tell.
+    ///
+    /// "this" is the post the button was pressed on, "other" a neighbour in
+    /// the feed, and empty means nothing known — which is not the same as
+    /// "other". A feed preloads the posts below the one on screen, so the tab
+    /// is full of whole, playable files belonging to videos nobody asked for,
+    /// and this is what keeps one of them from being offered as the answer
+    /// when no page resolves.
+    #[serde(default)]
+    pub post: String,
+    /// Where this came from, and so how much it is worth believing.
+    ///
+    /// "player" is the file the `<video>` under the button has open — not a
+    /// reading of the page but the element's own state, and the only evidence
+    /// here that a feed cannot mislead. "page" is what the markup said, "tab"
+    /// what the sniffer saw fetched anywhere in the tab, "stream" an address
+    /// worked back out of a media URL. Empty when nobody said.
+    #[serde(default)]
+    pub origin: String,
     /// What the browser would send asking for this file.
     ///
     /// Only the media candidates carry these, and only they need to: a page
@@ -86,6 +123,16 @@ pub enum UiRequest {
     VideoPage {
         url: String,
         title: String,
+        /// How long the `<video>` element under the button says its video is,
+        /// or 0 when it had not loaded enough to say.
+        ///
+        /// The one fact about the video on screen that does not depend on
+        /// reading the page correctly, and it survives a player running on
+        /// MediaSource, where the element's src is a `blob:` and names
+        /// nothing. The window checks what it resolved against it: every post
+        /// in a feed extracts just as cleanly as the right one, and almost
+        /// none of them is the same length.
+        seconds: f64,
         /// Fallbacks, best first, for when the page itself resolves to nothing.
         candidates: Vec<Candidate>,
     },
@@ -274,6 +321,7 @@ async fn dispatch(
                 .send(UiRequest::VideoPage {
                     url,
                     title: str_field(msg, "title"),
+                    seconds: msg.get("seconds").and_then(Value::as_f64).unwrap_or(0.0),
                     candidates,
                 })
                 .await;

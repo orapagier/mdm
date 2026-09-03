@@ -41,12 +41,87 @@ pub struct Format {
 #[serde(rename_all = "camelCase")]
 pub struct MediaInfo {
     pub title: String,
+    /// The site's own id for this video, and who posted it. Both are only for
+    /// naming the file: a site that gives every video the same title — every
+    /// Facebook reel is called "Video" — leaves nothing else to tell two
+    /// downloads apart.
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub uploader: String,
+    /// What the poster wrote under it, where the site keeps that separately.
+    ///
+    /// Carried for naming, and only because of what a signed-in Facebook does
+    /// to a title: every video on it is called "Video" — the post's own text
+    /// lands in `description` instead, and is the only thing that tells one
+    /// download from the next. Signed *out* the same page titles itself
+    /// "61K views · 516 reactions | Sunog sa bukirang…", which is that text
+    /// with a view count stapled to the front, so the description is the
+    /// better half of the pair either way.
+    #[serde(default)]
+    pub description: String,
     pub duration: Option<f64>,
     pub thumbnail: Option<String>,
     pub extractor: String,
     pub formats: Vec<Format>,
     pub is_playlist: bool,
     pub entry_count: usize,
+    /// Is this extraction the video the player is actually playing?
+    ///
+    /// `Some(true)` means one of these formats is, byte for byte, a file the
+    /// browser was seen fetching in that tab — the strongest answer there is
+    /// to "which video did the button mean?", and the only one that does not
+    /// rest on a guess about the page. `Some(false)` means there were files
+    /// to compare against and none of them was this. `None` means there was
+    /// nothing to compare with, which is not evidence either way.
+    #[serde(default)]
+    pub matches_stream: Option<bool>,
+}
+
+/// Long enough that only an opaque token reaches this length.
+///
+/// A name has to identify one file among all files to be worth comparing, and
+/// short ones do not: TikTok lists a format whose whole path ends `/main.mp4`,
+/// and treating that as an identity would have declared every video on the
+/// site to be every other one. Every real token clears this easily — TikTok's
+/// are 38 characters, Facebook's over a hundred.
+const MIN_KEY: usize = 16;
+
+/// The part of a media URL that names the file, ignoring how it was signed.
+///
+/// A CDN hands the same file out under many addresses: a different edge host,
+/// a fresh signature, a byte range, a different query altogether. What does
+/// not move is the last path segment — TikTok's
+/// `/video/tos/alisg/…/oE5EAjYIieDYQVqPfvYTRngIYYea4hAfGQFRCU/` and
+/// Facebook's `/o1/v/t2/f2/m366/AQNCN9aky-….mp4` — so that is what identifies
+/// one stream as another.
+fn stream_key(url: &str) -> Option<String> {
+    let path = url::Url::parse(url).ok()?.path().trim_end_matches('/').to_owned();
+    let name = path.rsplit('/').next()?;
+    (name.len() >= MIN_KEY).then(|| name.to_ascii_lowercase())
+}
+
+/// Does this extraction describe a video the browser was seen fetching?
+///
+/// The one check that cannot be fooled by a page that resolves cleanly to the
+/// wrong post — which is what a feed does, since every post in it is a real
+/// video with a real address. Matching the *file* leaves nothing to interpret:
+/// either an extraction offers the exact stream the player pulled, or it is
+/// about some other video.
+fn matches_stream(v: &serde_json::Value, streams: &[String]) -> Option<bool> {
+    let seen: std::collections::HashSet<String> =
+        streams.iter().filter_map(|s| stream_key(s)).collect();
+    if seen.is_empty() {
+        return None;
+    }
+    let offered = v
+        .get("formats")
+        .and_then(|f| f.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|f| f.get("url").and_then(|u| u.as_str()))
+        .chain(v.get("url").and_then(|u| u.as_str()));
+    Some(offered.filter_map(stream_key).any(|k| seen.contains(&k)))
 }
 
 /// Progress emitted while a yt-dlp download runs.
@@ -240,9 +315,16 @@ fn fresh_info_json(url: &str) -> Option<std::path::PathBuf> {
 }
 
 /// The answer to a probe we have already run, without running it again.
-fn cached_media_info(url: &str) -> Option<MediaInfo> {
+///
+/// The stream check is redone rather than cached with the answer: the same
+/// page is asked about by the window and by the request that opened it, and
+/// what the player had fetched by then differs between the two.
+fn cached_media_info(url: &str, streams: &[String]) -> Option<MediaInfo> {
     let raw = std::fs::read(fresh_info_json(url)?).ok()?;
-    media_info(&serde_json::from_slice(&raw).ok()?).ok()
+    let v: serde_json::Value = serde_json::from_slice(&raw).ok()?;
+    let mut info = media_info(&v).ok()?;
+    info.matches_stream = matches_stream(&v, streams);
+    Some(info)
 }
 
 /// One extraction per page at a time.
@@ -292,22 +374,27 @@ pub fn available() -> bool {
     which("yt-dlp").is_some()
 }
 
-/// Ask yt-dlp what a page offers, without downloading anything.
-pub async fn probe(
+/// How many times a probe is worth repeating before the refusal is believed.
+const PROBE_ATTEMPTS: u8 = 3;
+
+/// yt-dlp's complaint, out of everything it printed while failing.
+fn error_line(stderr: &[u8]) -> String {
+    String::from_utf8_lossy(stderr)
+        .lines()
+        .find(|l| l.contains("ERROR"))
+        .unwrap_or("unknown error")
+        .trim()
+        .to_owned()
+}
+
+/// One `yt-dlp -J` run. Fails only when the process could not be run at all;
+/// a yt-dlp that ran and refused comes back as an unsuccessful status.
+async fn run_probe(
+    bin: &std::path::Path,
     url: &str,
     cookies_from: Option<&str>,
     extra: &[String],
-) -> Result<MediaInfo> {
-    if let Some(info) = cached_media_info(url) {
-        return Ok(info);
-    }
-    let _flight = single_flight(url).await;
-    // Whoever we were queued behind has just cached the answer.
-    if let Some(info) = cached_media_info(url) {
-        return Ok(info);
-    }
-
-    let bin = binary()?;
+) -> Result<std::process::Output> {
     let mut cmd = Command::new(bin);
     cmd.args([
         "-J",
@@ -322,20 +409,62 @@ pub async fn probe(
     for arg in extra {
         cmd.arg(arg);
     }
-    let out = cmd
-        .arg(url)
+    cmd.arg(url)
         .stdin(Stdio::null())
         .output()
         .await
-        .context("running yt-dlp -J")?;
+        .context("running yt-dlp -J")
+}
+
+/// Ask yt-dlp what a page offers, without downloading anything.
+///
+/// `insist` says whether this URL is worth asking about more than once. A
+/// candidate the caller believes in — the address of one video — earns the
+/// repeat that gets past a bot wall. A guess does not: working down a list of
+/// four guesses, three attempts each, is how resolving a feed video came to
+/// take minutes instead of seconds.
+pub async fn probe(
+    url: &str,
+    cookies_from: Option<&str>,
+    extra: &[String],
+    insist: bool,
+    streams: &[String],
+) -> Result<MediaInfo> {
+    if let Some(info) = cached_media_info(url, streams) {
+        return Ok(info);
+    }
+    let _flight = single_flight(url).await;
+    // Whoever we were queued behind has just cached the answer.
+    if let Some(info) = cached_media_info(url, streams) {
+        return Ok(info);
+    }
+
+    let bin = binary()?;
+    // Asked more than once, because a first refusal is often not an answer
+    // about the page. A site behind a bot wall serves a challenge instead of
+    // the page to a share of the requests that reach it, and yt-dlp reports
+    // that as "unable to extract" — indistinguishable, from here, from a page
+    // it cannot read. Measured against one TikTok video, six attempts in eight
+    // succeeded and two were challenged; giving up on the first meant a
+    // quarter of grabs failed on a page that was perfectly readable. Only
+    // failures that are not settled facts are repeated, so a private video
+    // still fails once.
+    let mut out = run_probe(&bin, url, cookies_from, extra).await?;
+    let attempts = if insist { PROBE_ATTEMPTS } else { 1 };
+    for attempt in 2..=attempts {
+        if out.status.success() || is_permanent_error(&error_line(&out.stderr)) {
+            break;
+        }
+        // Backing off rather than hammering: what refused is a bot wall, and
+        // an immediate repeat is the shape it is watching for.
+        tokio::time::sleep(std::time::Duration::from_millis(600 * u64::from(attempt - 1))).await;
+        log::info!("{url}: no usable answer, asking again ({attempt} of {attempts})");
+        out = run_probe(&bin, url, cookies_from, extra).await?;
+    }
 
     if !out.status.success() {
-        let err = String::from_utf8_lossy(&out.stderr);
-        let line = err
-            .lines()
-            .find(|l| l.contains("ERROR"))
-            .unwrap_or("unknown error")
-            .trim();
+        let line = error_line(&out.stderr);
+        let line = line.as_str();
         // Translate yt-dlp's wall of links into the one action that fixes it.
         if line.contains("not a bot") || line.contains("Sign in to confirm") {
             bail!(
@@ -353,7 +482,8 @@ pub async fn probe(
 
     let v: serde_json::Value =
         serde_json::from_slice(&out.stdout).context("parsing yt-dlp JSON")?;
-    let info = media_info(&v)?;
+    let mut info = media_info(&v)?;
+    info.matches_stream = matches_stream(&v, streams);
 
     // Only a single video is worth keeping: a flat playlist carries no formats
     // to download from, so reusing it would strip the download of its choices.
@@ -396,6 +526,19 @@ fn media_info(v: &serde_json::Value) -> Result<MediaInfo> {
             .and_then(|t| t.as_str())
             .unwrap_or("Untitled")
             .to_owned(),
+        id: v.get("id").and_then(|t| t.as_str()).unwrap_or("").to_owned(),
+        uploader: v
+            .get("uploader")
+            .or_else(|| v.get("channel"))
+            .or_else(|| v.get("uploader_id"))
+            .and_then(|t| t.as_str())
+            .unwrap_or("")
+            .to_owned(),
+        description: v
+            .get("description")
+            .and_then(|t| t.as_str())
+            .unwrap_or("")
+            .to_owned(),
         duration: v.get("duration").and_then(serde_json::Value::as_f64),
         thumbnail: v
             .get("thumbnail")
@@ -409,14 +552,30 @@ fn media_info(v: &serde_json::Value) -> Result<MediaInfo> {
         formats,
         is_playlist: entries.is_some(),
         entry_count: entries.map(|e| e.len()).unwrap_or(0),
+        // Filled in by the caller, which is the only one holding the list of
+        // files the browser was seen fetching.
+        matches_stream: None,
     })
 }
 
 fn parse_format(v: &serde_json::Value) -> Option<Format> {
     let id = v.get("format_id")?.as_str()?.to_owned();
-    // Storyboards are not playable media; they only clutter the picker.
-    let vcodec = v.get("vcodec").and_then(|c| c.as_str()).unwrap_or("none");
-    let acodec = v.get("acodec").and_then(|c| c.as_str()).unwrap_or("none");
+    // "none" is yt-dlp saying a stream is absent. A missing or null field is
+    // yt-dlp saying it does not know, which is a different thing entirely and
+    // must not be read as absence: Facebook describes its two combined
+    // formats, `sd` and `hd`, with both codecs null — the very formats that
+    // carry picture and sound in one file. Read as "no video and no audio"
+    // they were discarded as storyboards, leaving a Facebook video with
+    // nothing in the picker but separate DASH streams, and a format whose
+    // sound was merely unstated was filed under Audio.
+    let codec = |key| match v.get(key) {
+        Some(serde_json::Value::String(c)) => c.clone(),
+        _ => String::new(),
+    };
+    let vcodec = codec("vcodec");
+    let acodec = codec("acodec");
+    // Storyboards are not playable media; they only clutter the picker. They
+    // are the one case where both are stated absent.
     if vcodec == "none" && acodec == "none" {
         return None;
     }
@@ -430,15 +589,20 @@ fn parse_format(v: &serde_json::Value) -> Option<Format> {
             .unwrap_or_else(|| {
                 match (v.get("width").and_then(|w| w.as_i64()), v.get("height").and_then(|h| h.as_i64())) {
                     (Some(w), Some(h)) => format!("{w}x{h}"),
-                    _ => "audio only".into(),
+                    // Unstated dimensions are not evidence of silence. TikTok
+                    // reports none for its `download` format, which is the
+                    // whole watermarked video — and the picker duly offered it
+                    // under "Video + audio" labelled "audio only".
+                    _ if vcodec == "none" => "audio only".into(),
+                    _ => String::new(),
                 }
             }),
         filesize: v
             .get("filesize")
             .and_then(serde_json::Value::as_i64)
             .or_else(|| v.get("filesize_approx").and_then(serde_json::Value::as_i64)),
-        vcodec: vcodec.to_owned(),
-        acodec: acodec.to_owned(),
+        vcodec,
+        acodec,
         tbr: v.get("tbr").and_then(serde_json::Value::as_f64),
         note: v
             .get("format_note")
@@ -465,6 +629,16 @@ pub struct YtDlpHandle {
     pub last_error: Arc<Mutex<Option<String>>>,
 }
 
+/// A name, spelled so an output template reads it as itself.
+///
+/// `-o` is a template, and `%` opens a field in one. A user who names a
+/// download "50% off" is not asking for a field, but yt-dlp has no way to know
+/// that and refuses the whole template as an invalid conversion — a download
+/// that never starts, over a character the name was always allowed to contain.
+fn literal(name: &str) -> String {
+    name.replace('%', "%%")
+}
+
 /// Start a yt-dlp download, streaming progress over `tx`.
 ///
 /// `connections` is passed through to aria2 so streamed fragments get the same
@@ -486,7 +660,18 @@ pub async fn download(
         .arg("--no-warnings")
         .arg("--newline")
         .arg("--no-playlist")
-        .arg("--restrict-filenames")
+        // A long title is trimmed rather than transliterated. `--restrict-
+        // filenames`, which used to stand here, is a Windows-and-shell
+        // measure: it flattens a title to bare ASCII, drops every emoji and
+        // punctuation mark, and replaces each space with an underscore — so a
+        // video plainly called "Songs of the summer" landed as
+        // `Songs_of_the_summer`, which is not its name. Linux filenames are
+        // bytes with two rules, no `/` and no NUL, and yt-dlp already honours
+        // both; what it does not bound is length, and a full-sentence title
+        // in a script that costs three bytes a character will exceed the 255
+        // a filesystem allows.
+        .arg("--trim-filenames")
+        .arg("180")
         .arg("-f")
         .arg(format)
         // No forced container: yt-dlp picks one that fits the codecs (mp4 for
@@ -496,7 +681,7 @@ pub async fn download(
         // Only the stem is ours: the container is settled by muxing, so the
         // extension must stay a template or the name would contradict the file.
         .arg(match out_name {
-            Some(name) if !name.is_empty() => format!("{name}.%(ext)s"),
+            Some(name) if !name.is_empty() => format!("{}.%(ext)s", literal(name)),
             _ => "%(title)s [%(id)s].%(ext)s".to_string(),
         })
         // aria2 only handles plain http/ftp, so a fragmented stream (HLS, and
@@ -790,6 +975,9 @@ pub fn is_permanent_error(message: &str) -> bool {
         "is not a valid url",
         "unsupported url",
         "no video formats found",
+        // Named for one post and settled server-side: asking again asks the
+        // same server the same question.
+        "ip address is blocked",
         "sign in to confirm",
         "this video is available to this channel's members",
         "removed by the uploader",
@@ -828,6 +1016,22 @@ pub fn looks_like_streaming_site(url: &str) -> bool {
         .any(|h| host == *h || host.ends_with(&format!(".{h}")))
 }
 
+/// Is this response the media itself rather than a page about it?
+///
+/// `looks_like_streaming_site` answers "are this site's pages players?"; this
+/// answers the prior question, "is this a page at all?". A site serves its
+/// files from its own name — a TikTok video comes off `v16-webapp.tiktok.com`
+/// — so the host guess claims the file along with the page, and yt-dlp is then
+/// handed bytes it can only fail to read a page out of.
+///
+/// A manifest is deliberately not media here. An `.m3u8` arrives as
+/// `application/vnd.apple.mpegurl`: it is a *description* of a stream, and
+/// turning one into a file is exactly what yt-dlp is for.
+pub fn is_media_response(mime: &str) -> bool {
+    let mime = mime.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
+    mime.starts_with("video/") || mime.starts_with("audio/")
+}
+
 /* ---------------------------------------------------------------------- *
  * Unit tests
  *
@@ -838,6 +1042,137 @@ pub fn looks_like_streaming_site(url: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn fmt(json: &str) -> Option<Format> {
+        parse_format(&serde_json::from_str(json).unwrap())
+    }
+
+    #[test]
+    fn an_unstated_codec_is_not_a_missing_one() {
+        // Facebook's two combined formats, verbatim: both codecs null. Read as
+        // "no video and no audio" they were thrown away as storyboards, which
+        // left a Facebook video offering nothing but separate DASH streams.
+        let hd = fmt(r#"{"format_id":"hd","vcodec":null,"acodec":null}"#)
+            .expect("a format with unstated codecs is still a format");
+        assert_eq!(hd.vcodec, "", "unknown must not read as absent");
+        assert_eq!(hd.acodec, "");
+
+        // The one case where both really are absent.
+        assert!(
+            fmt(r#"{"format_id":"sb0","vcodec":"none","acodec":"none"}"#).is_none(),
+            "a storyboard is not playable media"
+        );
+    }
+
+    #[test]
+    fn unstated_dimensions_do_not_make_a_video_into_audio() {
+        // TikTok's `download` format: the whole watermarked video, with no
+        // width or height given. The picker offered it under "Video + audio"
+        // labelled "audio only".
+        let d = fmt(r#"{"format_id":"download","vcodec":"h264","acodec":"aac"}"#).unwrap();
+        assert_eq!(d.resolution, "", "a video was described as audio only");
+
+        // A format that really is audio still says so.
+        let a = fmt(r#"{"format_id":"audio","vcodec":"none","acodec":"mp3"}"#).unwrap();
+        assert_eq!(a.resolution, "audio only");
+
+        // Dimensions, where given, still win.
+        let v = fmt(r#"{"format_id":"v","vcodec":"h265","acodec":"none","width":720,"height":1194}"#)
+            .unwrap();
+        assert_eq!(v.resolution, "720x1194");
+    }
+
+    #[test]
+    fn a_bot_wall_is_worth_asking_again_but_a_settled_refusal_is_not() {
+        // The one that matters: a site behind a bot wall answers a share of
+        // requests with a challenge page, and yt-dlp reports that as an
+        // extraction failure. Six of eight attempts at one TikTok video
+        // succeeded, so believing the first refusal failed a quarter of them.
+        assert!(!is_permanent_error(
+            "ERROR: [TikTok] 7678211224177282322: Unable to extract universal data for rehydration"
+        ));
+        assert!(!is_permanent_error("ERROR: unable to download webpage: timed out"));
+
+        // These will answer identically however many times they are asked.
+        assert!(is_permanent_error(
+            "ERROR: [TikTok] 7089074849308151082: Your IP address is blocked from accessing this post"
+        ));
+        assert!(is_permanent_error("ERROR: Unsupported URL: https://example.com/"));
+        assert!(is_permanent_error("ERROR: [youtube] abc: Private video"));
+    }
+
+    #[test]
+    fn an_extraction_is_tied_to_the_file_the_player_fetched() {
+        // Verbatim from a grab that went wrong: MDM saved the raw stream on the
+        // left, and the page recovered from it offered the format on the right.
+        // They are the same file, reached by two different signed addresses
+        // from two different edge hosts — which is exactly the case the check
+        // has to see through.
+        let played = "https://scontent.fdvo1-1.fna.fbcdn.net/o1/v/t2/f2/m366/\
+                      AQNCN9aky-rt1JUxr1gcauLhXlDBNA2mQaaKB5N55Hkw.mp4?_nc_cat=104&oh=00_AQIA";
+        let offered = serde_json::json!({
+            "formats": [
+                { "url": "https://video.xx.fbcdn.net/o1/v/t2/f2/m412/AQOb4WS4_TJ0GpiFJPMm6P.mp4?oh=x" },
+                { "url": "https://video-lax3-1.xx.fbcdn.net/o1/v/t2/f2/m366/\
+                          AQNCN9aky-rt1JUxr1gcauLhXlDBNA2mQaaKB5N55Hkw.mp4?_nc_cat=109&oh=00_AQKW" },
+            ]
+        });
+        assert_eq!(
+            matches_stream(&offered, &[played.to_string()]),
+            Some(true),
+            "the video being watched was not recognised in its own extraction"
+        );
+
+        // A page about some other post offers none of what the player pulled.
+        let elsewhere = serde_json::json!({
+            "formats": [{ "url": "https://video.xx.fbcdn.net/o1/v/t2/f2/m366/AQPZoRFr7Gcg_uZCATKOdye.mp4" }]
+        });
+        assert_eq!(matches_stream(&elsewhere, &[played.to_string()]), Some(false));
+
+        // Nothing fetched yet is not evidence that the page is wrong.
+        assert_eq!(matches_stream(&elsewhere, &[]), None);
+    }
+
+    #[test]
+    fn a_shared_filename_is_not_a_shared_identity() {
+        // TikTok lists a format whose path ends `/main.mp4`. Taken as an
+        // identity it would have declared every video on the site to be the
+        // same one, and every extraction "verified" against every stream.
+        assert_eq!(stream_key("https://v16.tiktok.com/a/b/main.mp4"), None);
+        assert_eq!(stream_key("https://cdn.test/x/video.mp4"), None);
+        // A real token is long and survives a different bucket and query.
+        assert_eq!(
+            stream_key("https://v16-webapp-prime.tiktok.com/video/tos/alisg/\
+                        tos-alisg-pve-0037c001/osCfA6CgmLS1AIOaQUIGepe6IsbcAoEXD4A5Gj/?a=1988"),
+            Some("oscfa6cgmls1aioaquigepe6isbcaoexd4a5gj".into())
+        );
+    }
+
+    #[test]
+    fn a_name_is_spelled_so_a_template_reads_it_as_itself() {
+        // `-o` is a template and `%` opens a field in one. Left alone,
+        // "100%(title)s deal" resolved to the video's title spliced into the
+        // middle of the name; and a name is not a template, whatever it holds.
+        assert_eq!(literal("100%(title)s deal"), "100%%(title)s deal");
+        assert_eq!(literal("50% off"), "50%% off");
+        // Everything else a title may contain is left exactly as it stands.
+        assert_eq!(
+            literal("You made this the summer of K-Pop 🫰 #Songs"),
+            "You made this the summer of K-Pop 🫰 #Songs"
+        );
+    }
+
+    #[test]
+    fn the_default_format_prefers_a_codec_the_desktop_can_decode() {
+        let f = crate::model::Settings::default().ytdlp_format;
+        // Written across several source lines; it has to reach yt-dlp as one
+        // expression, with no whitespace smuggled into the middle of it.
+        assert!(!f.contains(char::is_whitespace), "the selector was broken up: {f}");
+        assert!(f.contains("[vcodec!*=hev]"), "HEVC is not ruled out: {f}");
+        // And it must still end in the plain expression, so a page offering
+        // nothing but HEVC — which is TikTok on some videos — still resolves.
+        assert!(f.ends_with("/bestvideo*+bestaudio/best"), "no fallback left: {f}");
+    }
 
     #[test]
     fn reads_a_summary_line() {

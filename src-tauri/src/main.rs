@@ -246,25 +246,54 @@ fn main() {
                         UiRequest::VideoPage {
                             url,
                             title,
+                            seconds,
                             candidates,
                         } => {
-                            // Start resolving the page now rather than when the
-                            // window gets round to asking: the extraction is
-                            // the slow part, and the webview takes a moment to
-                            // come up. The answer is cached, so the window's
-                            // own request finds it already waiting.
-                            let engine = probe_engine.clone();
-                            let page = url.clone();
-                            tauri::async_runtime::spawn(async move {
-                                let settings = engine.settings();
-                                let _ = mdm_core::ytdlp::probe(
-                                    &page,
-                                    Some(settings.ytdlp_cookies_from.as_str()),
-                                    &settings.ytdlp_extra_args,
-                                )
-                                .await;
-                            });
-                            video::open(&ui_handle, url, title, candidates);
+                            // Start resolving now rather than when the window
+                            // gets round to asking: the extraction is the slow
+                            // part, and the webview takes a moment to come up.
+                            // The answer is cached, so the window's own request
+                            // finds it already waiting.
+                            //
+                            // Both the page and the best candidate, because
+                            // which of them the window asks about first depends
+                            // on which of them names a video. On a post's own
+                            // page that is the page; on a feed the page is the
+                            // feed, resolves to nothing, and the answer is in
+                            // the candidate the extension put first. Warming
+                            // whichever turns out to be wrong costs only
+                            // background time — a feed's address fails in about
+                            // a second — while warming the right one is the
+                            // difference between the window opening onto an
+                            // answer and opening onto a spinner.
+                            let best = candidates.iter().find(|c| c.kind != "media");
+                            for page in [Some(url.clone()), best.map(|c| c.url.clone())]
+                                .into_iter()
+                                .flatten()
+                                .collect::<std::collections::BTreeSet<_>>()
+                            {
+                                let engine = probe_engine.clone();
+                                tauri::async_runtime::spawn(async move {
+                                    let settings = engine.settings();
+                                    let _ = mdm_core::ytdlp::probe(
+                                        &page,
+                                        Some(settings.ytdlp_cookies_from.as_str()),
+                                        &settings.ytdlp_extra_args,
+                                        // Worth insisting on here whatever it
+                                        // is: nobody is waiting on this yet, so
+                                        // a retry costs no time anyone can see.
+                                        true,
+                                        // This is the warm-up, run to fill the
+                                        // cache before the window asks. The
+                                        // window does the matching, with the
+                                        // files it has; caching an answer here
+                                        // would only cache it against nothing.
+                                        &[],
+                                    )
+                                    .await;
+                                });
+                            }
+                            video::open(&ui_handle, url, title, seconds, candidates);
                             continue;
                         }
                         UiRequest::Started {

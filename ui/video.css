@@ -131,3 +131,13 @@ body.sheet {
 }
 .sheet .hint.bad { color: var(--bad); }
 .sheet .hint.ok { color: var(--ok); }
+
+/* The choice offered when nothing could be tied to the video on screen:
+   ask again, or take the guess deliberately. In the body rather than the
+   foot, because it belongs to the message above it. */
+.anyway {
+  display: flex;
+  gap: 8px;
+  margin: 10px 0 0;
+  padding: 0;
+}

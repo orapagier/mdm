@@ -59,7 +59,15 @@ async function init() {
       const btn = document.createElement("button");
       btn.textContent = "Download";
       btn.addEventListener("click", () => {
-        browser.runtime.sendMessage({ type: "download", url: m.url, referrer: tab?.url, tabId: tab?.id });
+        browser.runtime.sendMessage({
+          type: "download",
+          url: m.url,
+          // What the sniffer saw the server call it. The app will not put an
+          // extractor in front of something already typed as video or audio.
+          mime: m.mime,
+          referrer: tab?.url,
+          tabId: tab?.id,
+        });
         btn.textContent = "Sent";
         btn.disabled = true;
       });

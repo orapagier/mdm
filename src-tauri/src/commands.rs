@@ -63,13 +63,20 @@ pub async fn add_download(
     // stream and then the audio, so without this the bar is scaled to the first
     // of them and rescales downwards when the second starts.
     job.size = size.filter(|s| *s > 0).unwrap_or(-1);
-    job.use_ytdlp = use_ytdlp.unwrap_or(false);
+    // Passed through as it came: `None` leaves the engine to decide, and only
+    // an answer someone actually gave overrides it.
+    job.use_ytdlp = use_ytdlp;
     job.format_id = format_id;
     job.start_paused = start_paused.unwrap_or(false);
     if let Some(name) = filename.filter(|n| !n.is_empty()) {
         // For yt-dlp the name is a stem it will extend with the real
-        // container; for a direct download it is the filename outright.
-        if job.use_ytdlp {
+        // container; for a direct download it is the filename outright. Which
+        // of the two it becomes rests on a decision the engine makes later, so
+        // the engine is asked rather than second-guessed. Reading the caller's
+        // own flag instead is what dropped the name whenever the engine went
+        // the other way: yt-dlp fell back to `%(title)s [%(id)s]` over a CDN
+        // path, which is a filename far past what any filesystem will take.
+        if mdm_core::engine::wants_ytdlp(&job) {
             job.output_name = Some(name);
         } else {
             job.filename = name;
@@ -160,12 +167,26 @@ pub fn delete_queue(engine: State<'_, Arc<Engine>>, name: String) -> Cmd<()> {
 
 /// Ask yt-dlp what formats a page offers, for the quality picker.
 #[tauri::command]
-pub async fn probe_media(engine: State<'_, Arc<Engine>>, url: String) -> Cmd<MediaInfo> {
+pub async fn probe_media(
+    engine: State<'_, Arc<Engine>>,
+    url: String,
+    // Whether this URL is one the window believes names a video, and so is
+    // worth a second and third try against a site that answers a share of
+    // requests with a challenge page. Absent, it is treated as a guess.
+    insist: Option<bool>,
+    // Files the browser was seen fetching in that tab. An extraction offering
+    // one of them is, beyond argument, the video being watched — which is the
+    // only way to tell a page that resolved from a page that resolved to the
+    // post above the one under the button.
+    streams: Option<Vec<String>>,
+) -> Cmd<MediaInfo> {
     let settings = engine.settings();
     ytdlp::probe(
         &url,
         Some(settings.ytdlp_cookies_from.as_str()),
         &settings.ytdlp_extra_args,
+        insist.unwrap_or(false),
+        &streams.unwrap_or_default(),
     )
     .await
     .map_err(|e| format!("{e:#}"))
@@ -189,7 +210,7 @@ pub fn install_hint(package: String) -> String {
 /// Open the standalone download window, empty, for the toolbar button.
 #[tauri::command]
 pub fn open_video_window(app: AppHandle) {
-    crate::video::open(&app, String::new(), String::new(), Vec::new());
+    crate::video::open(&app, String::new(), String::new(), 0.0, Vec::new());
 }
 
 /// The request the download window was opened for.

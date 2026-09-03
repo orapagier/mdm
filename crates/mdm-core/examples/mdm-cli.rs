@@ -29,7 +29,7 @@ async fn main() -> anyhow::Result<()> {
             eprintln!("usage: mdm-cli --probe <page-url>");
             std::process::exit(2);
         }
-        let info = mdm_core::ytdlp::probe(&url, Some("firefox"), &[]).await?;
+        let info = mdm_core::ytdlp::probe(&url, Some("firefox"), &[], true, &[]).await?;
         println!("title    {}", info.title);
         println!("site     {}", info.extractor);
         if let Some(d) = info.duration {

@@ -4,7 +4,8 @@
 use mdm_core::aria2::{AddOptions, MAX_CONNECTIONS};
 use mdm_core::categories::{categorize, extension_of};
 use mdm_core::engine::{
-    filename_from_url, queue_open_at, sanitize, stem_taken, unique_filename, unique_name,
+    filename_from_url, job_from_url, queue_open_at, sanitize, stem_taken, unique_filename,
+    unique_name, wants_ytdlp,
 };
 use mdm_core::human_bytes;
 use mdm_core::model::{Header, Queue, Status};
@@ -213,6 +214,56 @@ fn day_restrictions_apply() {
     assert!(!queue_open_at(&q, 12 * 60, 0));
     assert!(queue_open_at(&q, 12 * 60, 5));
     assert!(queue_open_at(&q, 12 * 60, 6));
+}
+
+/* ------------------------------ yt-dlp or not ---------------------------- */
+
+/// A media URL as the format picker hands one over: it has already asked
+/// yt-dlp about every page it could find and been told no.
+fn settled_media(url: &str) -> mdm_core::model::Job {
+    let mut job = job_from_url(url);
+    job.use_ytdlp = Some(false);
+    job
+}
+
+#[test]
+fn a_streaming_page_nobody_has_looked_at_goes_to_ytdlp() {
+    assert!(wants_ytdlp(&job_from_url("https://www.tiktok.com/@someone/video/7123456789012345678")));
+    assert!(wants_ytdlp(&job_from_url("https://youtu.be/dQw4w9WgXcQ")));
+    assert!(!wants_ytdlp(&job_from_url("https://example.org/debian.iso")));
+}
+
+#[test]
+fn a_caller_that_has_already_looked_is_not_overruled() {
+    // The failure this is here for: the picker resolved nothing on TikTok and
+    // offered the file the player was using, which lives on TikTok's own CDN.
+    // Guessing from the host put yt-dlp in front of an mp4, and the download
+    // died as "aria2c exited with code 16".
+    let cdn = "https://v16-webapp.tiktok.com/ad2adb4e/6a9b818c/video/tos/alisg/tos-alisg-pv-0037/02ea";
+    assert!(wants_ytdlp(&job_from_url(cdn)), "the host alone still reads as TikTok");
+    assert!(!wants_ytdlp(&settled_media(cdn)), "an answer given outright must stand");
+}
+
+#[test]
+fn a_page_asked_for_explicitly_goes_to_ytdlp_wherever_it_lives() {
+    let mut job = job_from_url("https://example.org/watch/12345");
+    job.use_ytdlp = Some(true);
+    assert!(wants_ytdlp(&job));
+}
+
+#[test]
+fn a_response_already_typed_as_media_is_not_a_page() {
+    // The sniffer's route, where nobody states a preference but the server
+    // has already said what the bytes are.
+    let mut job = job_from_url("https://v16-webapp.tiktok.com/x/video/tos/alisg/y");
+    job.mime = "video/mp4".into();
+    assert!(!wants_ytdlp(&job));
+
+    // A manifest is a description of a stream, not the stream: yt-dlp is
+    // exactly what turns one into a file, so it must not be caught by this.
+    let mut manifest = job_from_url("https://www.tiktok.com/x/playlist.m3u8");
+    manifest.mime = "application/vnd.apple.mpegurl".into();
+    assert!(wants_ytdlp(&manifest));
 }
 
 /* ------------------------------ aria2 options ---------------------------- */

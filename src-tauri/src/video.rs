@@ -96,6 +96,9 @@ pub struct Request {
     /// Other URLs this grab could resolve through, best first. The window
     /// works down them when `url` itself yields nothing.
     pub candidates: Vec<Candidate>,
+    /// How long the player under the button said its video is, or 0 when it
+    /// had not loaded enough to say. What a resolved page is checked against.
+    pub seconds: f64,
 }
 
 /// The most recent request, until the window collects it.
@@ -111,7 +114,13 @@ impl Pending {
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Show the format picker for a page.
-pub fn open(app: &AppHandle, url: String, title: String, candidates: Vec<Candidate>) {
+pub fn open(
+    app: &AppHandle,
+    url: String,
+    title: String,
+    seconds: f64,
+    candidates: Vec<Candidate>,
+) {
     deliver(
         app,
         Request {
@@ -122,6 +131,7 @@ pub fn open(app: &AppHandle, url: String, title: String, candidates: Vec<Candida
             directory: String::new(),
             download_id: None,
             candidates,
+            seconds,
         },
     );
 }
@@ -138,6 +148,7 @@ pub fn show_download(app: &AppHandle, id: i64, name: String, directory: String, 
             directory,
             download_id: Some(id),
             candidates: Vec::new(),
+            seconds: 0.0,
         },
     );
 }

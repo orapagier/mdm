@@ -576,6 +576,9 @@ async function headersForUrl(url, referrer, storeId) {
 
 const STREAM_HINT = /\.(m3u8|mpd)(\?|$)/i;
 
+/** How many media responses to remember per tab, newest kept. */
+const MAX_SNIFFED = 50;
+
 browser.webRequest.onHeadersReceived.addListener(
   (details) => {
     if (!cfg.sniffMedia || details.tabId < 0) return;
@@ -592,7 +595,12 @@ browser.webRequest.onHeadersReceived.addListener(
     let m = tabMedia.get(details.tabId);
     if (!m) tabMedia.set(details.tabId, (m = new Map()));
     if (m.has(details.url)) return;
-    if (m.size > 50) return; // fragmented streams emit endlessly
+    // Fragmented streams emit endlessly, so there has to be a ceiling — but it
+    // drops the *oldest* rather than refusing the newest. Refusing went deaf:
+    // scroll far enough down a feed and the fifty slots are full of videos
+    // already gone by, the one on screen is never recorded, and the button has
+    // nothing to offer for it.
+    while (m.size >= MAX_SNIFFED) m.delete(m.keys().next().value);
     m.set(details.url, {
       url: details.url,
       mime,
@@ -607,11 +615,24 @@ browser.webRequest.onHeadersReceived.addListener(
 );
 
 browser.tabs.onRemoved.addListener((tabId) => tabMedia.delete(tabId));
-browser.tabs.onUpdated.addListener((tabId, change) => {
-  if (change.url) {
-    tabMedia.delete(tabId);
-    updateBadge();
-  }
+
+/**
+ * Forget a tab's media when the tab actually goes somewhere else.
+ *
+ * A real navigation replaces the document, and everything the old page was
+ * playing is gone with it. A *rewritten address* is not that: an infinite feed
+ * pushes the current post's URL into the address bar as you scroll, without
+ * loading anything. Clearing on `tabs.onUpdated` could not tell the two apart,
+ * so every scroll of TikTok's home feed wiped what the player had just
+ * fetched, and pressing Download found nothing to offer — while /explore,
+ * which does not rewrite the address, worked perfectly. `onCommitted` fires
+ * only for a genuinely new document; the SPA case is `onHistoryStateUpdated`,
+ * which is deliberately not listened for.
+ */
+browser.webNavigation.onCommitted.addListener(({ tabId, frameId }) => {
+  if (frameId !== 0) return;
+  tabMedia.delete(tabId);
+  updateBadge();
 });
 
 /* ------------------------------------------------------------------ *
@@ -742,7 +763,8 @@ async function sendSimple(url, info, tab) {
     url,
     filename: filenameFromUrl(url) || "download",
     size: -1,
-    mime: "",
+    // Only the sniffer knows this; a context menu click carries no type.
+    mime: info.mime || "",
     headers: await headersForUrl(url, info.pageUrl || tab?.url, tab?.cookieStoreId),
     referrer: info.pageUrl || tab?.url || "",
     cookieStoreId: tab?.cookieStoreId || "",
@@ -848,6 +870,10 @@ async function grabVideo(msg, tabId) {
         type: "videoPage",
         url: pageUrl,
         title: msg.title || "",
+        // What the player element says it has loaded. The window compares a
+        // resolved page against it, which is how a page that reads cleanly and
+        // is about the post next door gets caught.
+        seconds: Number(msg.seconds) || 0,
         // Where else this video might be resolvable from. The page URL is
         // often not the video's own — a feed, a timeline, an infinite scroll —
         // and it is the one thing yt-dlp cannot work around.
@@ -877,10 +903,58 @@ async function grabVideo(msg, tabId) {
 async function videoCandidates(msg, tabId) {
   const out = [];
   const seen = new Set([msg.pageUrl || ""]);
-  const add = (url, kind, mime = "") => {
+  // What the markup around the player said this post is. The content script
+  // already reads it to find the post's permalink and its record in the page
+  // state; here it is what tells one post's streams from the next one's.
+  const ids = (msg.ids || []).map(String);
+  /**
+   * Which post a file belongs to, as far as anything here can tell.
+   *
+   * "this" is the post the button was pressed on, "other" is some neighbour
+   * in the feed, and "" is nothing known — which is not the same as "other",
+   * and is the answer on most sites and every file the site does not describe.
+   * Carried on the candidate as well as used here: the window is where a file
+   * is fallen back to when no page resolves, and it needs to know whether the
+   * one it is about to offer is the video the user was looking at.
+   *
+   * Only facts about the file answer this — the element that has it open, or
+   * the post the file's own address names. What the page *said* is a reading
+   * of the page, which is the thing a feed misleads, so a file the markup
+   * turned up stays unclaimed however well it reads.
+   */
+  const postOf = (videoId, origin) =>
+    origin === "player"
+      ? "this"
+      : videoId && ids.length
+        ? ids.includes(videoId)
+          ? "this"
+          : "other"
+        : "";
+  const add = (rawUrl, kind, mime = "", stream = false, origin = "") => {
+    // A slice of a stream is not the video, however complete the download of
+    // it looks afterwards; ask for the file the slice was cut from.
+    const url = kind === "media" ? withoutByteRange(rawUrl || "") : rawUrl;
     if (!/^https?:\/\//i.test(url || "") || seen.has(url)) return;
     seen.add(url);
-    out.push({ url, kind, mime, headers: [], referrer: "" });
+    const facts = kind === "media" ? urlFacts(url) : { videoId: "", audioOnly: false };
+    out.push({
+      url,
+      kind,
+      mime,
+      stream,
+      origin,
+      videoId: facts.videoId,
+      post: postOf(facts.videoId, origin),
+      // The site's own word for it first; failing that, what the server
+      // called the response. Only one site in the pair is honest at a time —
+      // Facebook labels its audio track `video/mp4` and says `_audio` in the
+      // URL, and an ordinary site does the reverse.
+      audioOnly: facts.audioOnly || /^audio\//i.test(mime || ""),
+      // Half of a DASH pair. Complete as a download and useless as a video.
+      partial: facts.partial || facts.audioOnly,
+      headers: [],
+      referrer: "",
+    });
   };
 
   const found = msg.candidates || [];
@@ -889,16 +963,85 @@ async function videoCandidates(msg, tabId) {
   // spare — a preview, or the lowest rung of a ladder. So a file is what this
   // falls back to, never what it reaches for first.
   for (const c of found.filter((c) => c.kind !== "media")) add(c.url, "page");
-  for (const c of found.filter((c) => c.kind === "media")) add(c.url, "media");
+  for (const c of found.filter((c) => c.kind === "media")) {
+    add(c.url, "media", "", false, c.origin || "page");
+  }
 
   // What the player has actually fetched in this tab. A manifest is the whole
   // stream and outranks a fragment, which is one slice of it.
+  //
+  // Newest first among the plain files, because arrival order is not
+  // importance: what a video site fetches *first* is its own furniture. TikTok
+  // opens a page by playing a two-second clip in a hidden element to find out
+  // whether the browser can decode HEVC — oldest in the tab, so first in this
+  // list, and duly downloaded twice in place of the video being watched. The
+  // one being watched is the one fetched most recently, whatever the site.
   const sniffed = [...(tabMedia.get(tabId)?.values() ?? [])];
-  for (const m of sniffed.filter((m) => m.kind === "stream")) add(m.url, "media", m.mime);
-  for (const m of sniffed.filter((m) => m.kind !== "stream")) add(m.url, "media", m.mime);
+  for (const m of sniffed.filter((m) => m.kind === "stream")) {
+    add(m.url, "media", m.mime, true, "tab");
+  }
+  for (const m of [...sniffed.filter((m) => m.kind !== "stream")].sort((a, b) => b.at - a.at)) {
+    add(m.url, "media", m.mime, false, "tab");
+  }
 
-  // A ceiling, because each one the app tries costs an extraction.
-  const kept = out.slice(0, 6);
+  // Files re-ranked by what each turns out to *be*, now that every one of them
+  // has been looked at. Arrival order settles nothing on a DASH feed, where
+  // several posts are playing or preloading at once and every stream is an
+  // mp4 from the same host: the two files that were downloaded in place of the
+  // video are the audio track of the right post, which plays as a black
+  // screen, and a whole file belonging to the post above it.
+  //
+  // Ordered rather than filtered. A file the site has not described stays
+  // exactly where it was, and when nothing here is knowable — no `efg`, no id
+  // on the markup — every candidate scores alike and the list is untouched.
+  // Which post it belongs to, where both the file and the markup said. With
+  // nothing to compare against this is silent rather than negative: an id on
+  // the file and none on the page is not evidence of disagreement.
+  const belongs = (c) => (c.post === "this" ? 1 : c.post === "other" ? -1 : 0);
+  // Identity first, completeness second — in that order, because they conflict
+  // and the order settles which mistake gets made. A whole file of the post
+  // above the one on screen downloads perfectly and is the wrong video, which
+  // is the failure nothing can excuse; half of the right one is at least the
+  // right video, and is now also the thing an address can be recovered from.
+  const worth = (c) =>
+    (c.stream ? 16 : 0) + 8 * belongs(c) + (c.partial ? 0 : 2) + (c.audioOnly ? 0 : 1);
+  const files = out.filter((c) => c.kind === "media").sort((a, b) => worth(b) - worth(a));
+
+  // The post's own address, recovered from the file the player pulled.
+  //
+  // This is the way out of a feed that does not depend on reading the DOM
+  // correctly. Where a site writes the post id into the address of its media —
+  // Facebook does, on every stream it serves — the file identifies its post
+  // outright, and the page built from it extracts properly: every quality, and
+  // the sound. Without it the grab fell through to saving the raw stream, and
+  // a DASH stream is half a video however completely it downloads.
+  //
+  // Last among the pages, not first: the permalink the markup gives up is tied
+  // to the element the button appeared on, while this is tied to a file the
+  // tab fetched, and only the first of those knows what was clicked.
+  const derived = [];
+  for (const file of files) {
+    const page = pageForStream(file.url);
+    if (!page || seen.has(page)) continue;
+    seen.add(page);
+    derived.push({ url: page, kind: "page", mime: "", stream: false, origin: "stream",
+                   videoId: file.videoId, post: file.post, audioOnly: false,
+                   partial: false, headers: [], referrer: "" });
+  }
+  const ranked = [...out.filter((c) => c.kind !== "media"), ...derived, ...files];
+
+  // A ceiling, because each one the app tries costs an extraction — but never
+  // one that drops the two candidates that can still work when the readings of
+  // the page have all failed. Those are the address recovered from the stream
+  // and, failing even that, the file itself; a seventh permalink nobody will
+  // reach is worth less than either.
+  const kept = ranked.slice(0, 6);
+  // Each takes a slot of its own, counting back from the end, so the second
+  // does not land on top of the first.
+  let slot = kept.length - 1;
+  for (const must of [derived[0], files[0]]) {
+    if (must && !kept.includes(must) && slot >= 0) kept[slot--] = must;
+  }
 
   // A media candidate may be downloaded straight from the window, by aria2,
   // outside the browser — so it has to travel with what the browser would have
@@ -950,7 +1093,7 @@ browser.runtime.onMessage.addListener(async (msg, sender) => {
       state.bypass.add(msg.url);
       return { ok: true };
     case "download":
-      return sendSimple(msg.url, { pageUrl: msg.referrer }, { id: msg.tabId });
+      return sendSimple(msg.url, { pageUrl: msg.referrer, mime: msg.mime }, { id: msg.tabId });
     case "grabVideo":
       return grabVideo(msg, sender.tab?.id ?? msg.tabId ?? -1);
     case "openApp":
