@@ -15,6 +15,17 @@ say()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m warning:\033[0m %s\n' "$*"; }
 die()  { printf '\033[1;31m error:\033[0m %s\n' "$*" >&2; exit 1; }
 
+# Yes unless a terminal says otherwise. Asked of nothing else on purpose: a
+# scripted install, or one piped in through curl, has no one there to answer
+# and must not stop to wait for it.
+ask() { # ask <question>
+  local reply
+  [[ -t 0 ]] || return 1
+  printf '\033[1;34m==>\033[0m %s [Y/n] ' "$*"
+  read -r reply || reply=n
+  [[ ! "$reply" =~ ^[Nn] ]]
+}
+
 # ------------------------------------------------------------ distribution
 
 # Which family this is, so every "install it with" line below names a command
@@ -404,30 +415,87 @@ XPI="$REPO/target/mdm-firefox.xpi"
 # front of AMO reviewers and bloat the package.
 ( cd "$REPO/extension" && rm -f "$XPI" && zip -qr "$XPI" . -x '*.DS_Store' 'test/*' )
 
+# Firefox installs nothing Mozilla has not signed, and signing happens at AMO
+# rather than here. So the package built above is the one to submit, and the
+# one that comes back signed is the one to install: leave it at SIGNED_XPI (or
+# point MDM_XPI at it) and every install from then on offers the one-click
+# install below instead of an add-on that vanishes at the next restart.
+#
+# The signature is also what tells the two apart. A signed .xpi carries
+# META-INF/mozilla.rsa, and a zip keeps its member names uncompressed, so the
+# name can be found in the file without unpacking it — no unzip to require.
+SIGNED_XPI="${MDM_XPI:-$REPO/packaging/mdm-firefox-signed.xpi}"
+signed=no
+if LC_ALL=C grep -qsa 'META-INF/mozilla\.rsa' "$SIGNED_XPI"; then
+  signed=yes
+elif [[ -n "${MDM_XPI:-}" ]]; then
+  warn "MDM_XPI=$SIGNED_XPI is missing or carries no signature. Firefox would
+  refuse it, so the temporary add-on is what gets offered below instead."
+fi
+
+if [[ "$signed" == yes ]]; then
+  # Kept out of the checkout on purpose. Firefox copies the package into the
+  # profile as it installs it, but this file is what a re-install or a repaired
+  # profile goes back to months later, and it outlives any one clone.
+  INSTALLED_XPI="${XDG_DATA_HOME:-$HOME/.local/share}/mdm/mdm-firefox.xpi"
+  mkdir -p "$(dirname "$INSTALLED_XPI")"
+  install -m644 "$SIGNED_XPI" "$INSTALLED_XPI"
+  ext_line="  Extension     $INSTALLED_XPI"
+  ext_help="Install the extension in Firefox — open this and click \"Add\":
+
+  file://$INSTALLED_XPI
+
+  It stays installed across restarts, and it keeps the id the host manifest
+  above allows, so the app and the browser find each other straight away."
+else
+  ext_line="  Extension     $XPI"
+  ext_help="Load the extension in Firefox:
+
+  1. Open  about:debugging#/runtime/this-firefox
+  2. Click \"Load Temporary Add-on…\"
+  3. Select  $REPO/extension/manifest.json
+
+  Temporary add-ons are removed when Firefox restarts. For one that stays,
+  Firefox wants a signed package: submit $XPI to addons.mozilla.org
+  (self-distribution signing is free and unlisted), save what comes back as
+  packaging/mdm-firefox-signed.xpi, and re-run this script — it installs that
+  in one click. Firefox Developer Edition with
+  xpinstall.signatures.required=false takes the unsigned package as it is."
+fi
+
 cat <<DONE
 
 $(say "Installed")
 
   App           $BIN_DIR/mdm
   Native host   $BIN_DIR/mdm-host
-${manifest_lines}  Extension     $XPI
+${manifest_lines}${ext_line}
 
 ${migrated:+If you had the older "ldm" build, its binaries, launcher entry and host
 manifest have been removed and your settings and history moved across. The
 extension id changed too, so remove the old temporary add-on before loading
 this one.
 
-}Load the extension in Firefox:
-
-  1. Open  about:debugging#/runtime/this-firefox
-  2. Click "Load Temporary Add-on…"
-  3. Select  $REPO/extension/manifest.json
-
-  Temporary add-ons are removed when Firefox restarts. To install it
-  permanently, Firefox requires a signed package: submit $XPI to
-  addons.mozilla.org (self-distribution signing is free and unlisted),
-  or use Firefox Developer Edition with xpinstall.signatures.required=false.
+}${ext_help}
 
 Then start the app:  mdm
 The extension launches it automatically on the first captured download.
 DONE
+
+# The click that finishes the install is Firefox's own "Add"; all this does is
+# put the package in front of it. Backgrounded, because a Firefox that was not
+# already running holds the terminal until it is closed and the installer has
+# nothing left to say by then — and under nohup, so that a browser still
+# starting up when this script exits is not hung up on along with it.
+if [[ "$signed" == yes ]]; then
+  FF_CMD=()
+  if command -v firefox >/dev/null; then
+    FF_CMD=(firefox)
+  elif [[ "$flatpak_firefox" == yes ]]; then
+    FF_CMD=(flatpak run org.mozilla.firefox)
+  fi
+  if (( ${#FF_CMD[@]} )) && ask "Open Firefox now to install the extension?"; then
+    nohup "${FF_CMD[@]}" "file://$INSTALLED_XPI" >/dev/null 2>&1 &
+    say "Firefox is opening the package — click \"Add\" there to finish."
+  fi
+fi

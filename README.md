@@ -485,10 +485,20 @@ deno, node, quickjs or bun it finds installed. Any one of them is enough.
 Then load the extension: `about:debugging#/runtime/this-firefox` →
 "Load Temporary Add-on…" → pick `extension/manifest.json`.
 
-Temporary add-ons vanish on restart. For a permanent install Firefox requires a
-signed package — submit `target/mdm-firefox.xpi` to addons.mozilla.org
-(unlisted self-distribution signing is free), or use Developer Edition with
-`xpinstall.signatures.required=false`.
+Temporary add-ons vanish on restart, and Firefox installs nothing permanently
+that Mozilla has not signed. No installer gets around that — dropping an `.xpi`
+into `~/.mozilla/extensions` stopped installing anything in Firefox 74 — so
+this one does not pretend to. Signing is free and costs one submission: send
+`target/mdm-firefox.xpi` to addons.mozilla.org as an unlisted, self-distributed
+add-on, and save what comes back as `packaging/mdm-firefox-signed.xpi`.
+
+From then on `install.sh` copies that to `~/.local/share/mdm/mdm-firefox.xpi`
+and offers to open Firefox on it, which is a one-click permanent install: the
+click is "Add" in Firefox's own prompt. `MDM_XPI=/path/to.xpi` points the
+installer at a signed package kept somewhere else, and an install with no
+terminal to answer it — piped through `curl`, or run from a script — prints the
+`file://` line instead of asking. Firefox Developer Edition, Nightly and ESR
+take the unsigned package as it is, with `xpinstall.signatures.required=false`.
 
 A packaged Firefox reads native messaging manifests from wherever its own
 package was built to look: `~/.mozilla` for Debian's `firefox-esr` and
