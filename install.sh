@@ -30,6 +30,38 @@ ask() { # ask <question>
   [[ ! "$reply" =~ ^[Nn] ]]
 }
 
+# ------------------------------------------------------------- arguments
+
+# Off by default. The packages are for handing to somebody else rather than for
+# installing here, they need the Tauri CLI, and building them takes longer than
+# the install they are built alongside. `install.ps1 -Installer` is the same
+# switch on Windows.
+BUNDLE=no
+while (( $# )); do
+  case "$1" in
+    --bundle) BUNDLE=yes ;;
+    -h|--help)
+      cat <<'USAGE'
+Usage: install.sh [--bundle]
+
+Builds MDM and installs it for the current user. Needs no root.
+
+  --bundle   also build the redistributable packages for other machines:
+
+               target/release/bundle/rpm/*.rpm   Fedora, RHEL, openSUSE
+               target/release/bundle/deb/*.deb   Debian, Ubuntu, Mint
+
+             Each is one self-contained file carrying the app, the native
+             host and the extension, and registers itself with Firefox and
+             the Chromium browsers as it installs. Needs the Tauri CLI:
+             cargo install tauri-cli --locked
+USAGE
+      exit 0 ;;
+    *) die "unknown option: $1 (try --help)" ;;
+  esac
+  shift
+done
+
 # ------------------------------------------------------------ distribution
 
 # Which family this is, so every "install it with" line below names a command
@@ -550,6 +582,63 @@ this one.
 Then start the app:  mdm
 The extension launches it automatically on the first captured download.
 DONE
+
+# ---------------------------------------------------------------- bundle
+
+if [[ "$BUNDLE" == yes ]]; then
+  say "Building the redistributable packages"
+
+  command -v cargo-tauri >/dev/null \
+    || die "the Tauri CLI was not found. Install it with: cargo install tauri-cli --locked"
+
+  # Tauri copies a sidecar by looking for `<name>-<target triple>` and installs
+  # it beside the app as `<name>`. The triple comes from the toolchain rather
+  # than being assumed: a machine building for aarch64 would otherwise ship an
+  # x86 host binary that silently never starts.
+  triple="$(rustc -vV | sed -n 's/^host: //p')"
+  [[ -n "$triple" ]] || die "could not read the host triple from rustc"
+  mkdir -p "$REPO/src-tauri/binaries"
+  install -m755 "$HOST_BIN" "$REPO/src-tauri/binaries/mdm-host-$triple"
+
+  # The packages carry the *signed* extension. Without it they would ship an
+  # add-on Firefox refuses, which is worse than shipping none.
+  [[ "$signed" == yes ]] || warn "packaging/mdm-firefox-signed.xpi is missing or unsigned, so the
+  packages will carry an add-on Firefox refuses. Sign the package at
+  addons.mozilla.org and save it there, then build again."
+
+  # The overlay carries the sidecar, the extension and the registration
+  # scripts. They are deliberately not in tauri.conf.json: `externalBin` is
+  # checked on *every* build, and the binary it names is produced by that same
+  # build, so putting it in the base config makes a plain `cargo build` fail on
+  # any tree where it has not been staged — which is every clean checkout.
+  ( cd "$REPO" && cargo tauri build --bundles deb,rpm \
+      --config src-tauri/tauri.linux.conf.json ) || die "cargo tauri build failed"
+
+  echo
+  built=no
+  for pkg in "$TARGET_DIR"/release/bundle/rpm/*.rpm "$TARGET_DIR"/release/bundle/deb/*.deb; do
+    [[ -f "$pkg" ]] || continue
+    built=yes
+    printf '  %s\n  %s\n' "$pkg" "$(du -h "$pkg" | cut -f1)"
+  done
+  [[ "$built" == yes ]] || die "the bundler reported success but produced no packages"
+
+  cat <<'PACKAGES'
+
+Each is one file and needs nothing beside it. Installing one puts the app, the
+native host and the extension on the machine and registers the host with
+Firefox and with the Chromium browsers — Chrome, Brave, Chromium, Edge and
+Vivaldi — for every account on it:
+
+  sudo dnf install ./My*.rpm     (Fedora, RHEL, openSUSE)
+  sudo apt install ./My*.deb     (Debian, Ubuntu, Mint)
+
+A Firefox or Chrome installed from Flatpak or Snap reads its manifests from
+inside its own sandbox and will not see the system ones, so those two need
+install.sh rather than a package. yt-dlp is not carried either: the app fetches
+it on first run and keeps it current.
+PACKAGES
+fi
 
 # The click that finishes the install is Firefox's own "Add"; all this does is
 # put the package in front of it. Backgrounded, because a Firefox that was not

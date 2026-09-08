@@ -577,6 +577,49 @@ Mozilla's `.deb`, `~/snap/firefox` for the snap Ubuntu installs by default,
 prints the one `flatpak override` a sandboxed Firefox additionally needs before
 it may launch a host binary from `~/.local/bin`.
 
+### Linux, and a redistributable package
+
+`install.sh` builds from source and installs for one user. For a machine that
+is not this one, `./install.sh --bundle` additionally produces two packages:
+
+    target/release/bundle/rpm/My Download Manager-1.0.0-1.x86_64.rpm
+    target/release/bundle/deb/My Download Manager_1.0.0_amd64.deb
+
+Each is one self-contained file, in the same sense the Windows `setup.exe` is:
+it carries the app, the native host and the signed extension, and nothing has
+to be shipped beside it.
+
+    sudo dnf install ./My*.rpm     # Fedora, RHEL, openSUSE
+    sudo apt install ./My*.deb     # Debian, Ubuntu, Mint
+
+What makes them work rather than merely install is `src-tauri/linux/`. A
+package's post-install script is the counterpart of `installer.nsh`: it writes
+the native messaging manifests that let the extension reach `mdm-host`, which
+is the difference between an app that captures downloads and an app that sits
+there waiting to be told about one.
+
+Two things differ from Windows, and both follow from where the package
+installs. It runs as root and installs for the machine, so the manifests go to
+the *system* directories rather than one user's home — `/usr/lib/mozilla` and
+`/usr/lib64/mozilla` for Firefox, `/etc/opt/chrome` and `/etc/chromium` for the
+Chromium family. Brave has no directory of its own; it reads those last two,
+which is what registers it. And because the manifests are written at install
+time rather than shipped as package files, the post-*remove* script takes them
+away again — carefully, since both package managers reuse that script for an
+upgrade, where deleting them would leave the newly installed app unregistered.
+
+`mdm.db` is deliberately kept on uninstall, the same choice the Windows
+uninstaller makes.
+
+What the packages cannot register is a **Flatpak or Snap browser**. Those read
+their manifests from inside their own sandbox, where a system directory is not
+visible, so a machine whose Firefox came from Flatpak or Snap still wants
+`install.sh` — which writes to every tree that exists, sandboxes included.
+
+yt-dlp is not carried either, for the same reason as on Windows: it is only
+reached for sites that hide their video behind a page, and the app fetches and
+updates its own copy.
+
 ### Windows, and a redistributable installer
 
 `install.ps1` is the Windows counterpart: it installs per-user into
@@ -743,6 +786,7 @@ python3 packaging/test-native-host.py target/debug/mdm-host
 | `crates/mdm-host/` | Native messaging bridge (dependency-free, std only) |
 | `src-tauri/` | Desktop app and its commands |
 | `ui/` | Frontend — plain HTML/CSS/JS, no bundler |
+| `src-tauri/linux/` | Post-install and post-remove scripts for the .deb and .rpm |
 | `packaging/` | Icon generator, Range-capable test server, native-host harness |
 
 ## Data

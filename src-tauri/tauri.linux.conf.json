@@ -1,0 +1,21 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "createUpdaterArtifacts": false,
+    "externalBin": ["binaries/mdm-host"],
+    "resources": {
+      "../packaging/mdm-firefox-signed.xpi": "mdm-firefox.xpi",
+      "../target/mdm-chrome/": "mdm-chrome/"
+    },
+    "linux": {
+      "deb": {
+        "postInstallScript": "linux/postinstall.sh",
+        "postRemoveScript": "linux/postremove.sh"
+      },
+      "rpm": {
+        "postInstallScript": "linux/postinstall.sh",
+        "postRemoveScript": "linux/postremove.sh"
+      }
+    }
+  }
+}
