@@ -16,6 +16,10 @@ pub mod resolve;
 pub mod store;
 /// HLS and DASH, fetched and remuxed without an external tool.
 pub mod stream;
+/// TLS whose chain-building does not give up where a server sends half a
+/// chain. Unix only: Windows uses SChannel, which handles this itself.
+#[cfg(unix)]
+pub mod tls;
 pub mod tools;
 pub mod which;
 pub mod ytdlp;

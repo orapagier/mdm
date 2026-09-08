@@ -860,6 +860,16 @@ pub fn request_headers(spec: &Spec) -> reqwest::header::HeaderMap {
 async fn client(spec: &Spec) -> Result<reqwest::Client> {
     let mut builder = reqwest::Client::builder().default_headers(request_headers(spec));
 
+    // Ordinary web PKI verification, with one repair reqwest's own setup does
+    // not make: a server that sends its leaf certificate and forgets the
+    // intermediate above it has its chain completed from the address the leaf
+    // names, rather than failing a download the browser completes. See `tls`.
+    // Where the configuration cannot be built, reqwest's default stands.
+    #[cfg(unix)]
+    if let Some(config) = crate::tls::client_config() {
+        builder = builder.use_preconfigured_tls(config);
+    }
+
     // Left alone, reqwest already follows this machine's proxy settings, which
     // is what the browser the download was captured from does — so the default
     // needs no setting at all, and an office network that configures one

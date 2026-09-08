@@ -2507,12 +2507,14 @@ dependencies = [
  "quick-xml",
  "reqwest 0.12.28",
  "rusqlite",
+ "rustls",
  "serde",
  "serde_json",
  "sha2",
  "tokio",
  "toml 0.8.23",
  "url",
+ "webpki-roots",
  "windows-sys 0.59.0",
 ]
 

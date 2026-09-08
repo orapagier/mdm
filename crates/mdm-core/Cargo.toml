@@ -47,6 +47,20 @@ libc = "0.2"
 # rustls here: it needs no system OpenSSL, so the build stays self-contained on
 # every distribution.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+# The same rustls reqwest is using, so `fetch` can hand it a configuration
+# built in `tls`. That configuration is the ordinary web PKI one with a single
+# addition: where a server sends an incomplete chain — trustviewer.com offers
+# its leaf certificate and no intermediate — the missing certificate is fetched
+# from the address the leaf names, the way every browser already does, instead
+# of the download failing on "UnknownIssuer". Windows needs none of it: SChannel
+# repairs the gap itself, which is why this is a Unix dependency.
+#
+# Versions and features match reqwest's own so cargo unifies them into one
+# rustls; a second copy would make the configuration an unrecognised type.
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "ring"] }
+# The root store rustls-tls uses, named here so the custom configuration is
+# trusting exactly what reqwest's own would have trusted.
+webpki-roots = "1"
 
 [target.'cfg(windows)'.dependencies]
 # SChannel here, through native-tls, rather than the rustls used on Linux.
@@ -60,7 +74,8 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 # Information Access URL, and it trusts the roots this machine has actually
 # been given — the ones a corporate or antivirus TLS proxy installs included.
 # Behaving like the rest of the system is the whole point on Windows; on Linux
-# there is no equivalent store to borrow, so rustls stays.
+# there is no equivalent store to borrow, so rustls stays — and `tls` fetches
+# the missing intermediate there instead.
 #
 # SChannel is part of the OS, so this costs no OpenSSL and no bundled root list.
 reqwest = { version = "0.12", default-features = false, features = ["native-tls"] }
