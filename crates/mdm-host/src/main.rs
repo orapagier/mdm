@@ -8,10 +8,32 @@
 //! starting the app if it is not already running.
 
 use std::io::{self, BufRead, BufReader, Read, Write};
-use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
+
+/// The transport to the app: a Unix socket on Linux, a named pipe on Windows.
+/// Both are opened with a single handle that supports both read and write, so
+/// everything below this line is written against `Sock` and does not care
+/// which one it is.
+#[cfg(unix)]
+type Sock = std::os::unix::net::UnixStream;
+#[cfg(windows)]
+type Sock = std::fs::File;
+
+#[cfg(unix)]
+fn connect_sock(path: &std::path::Path) -> io::Result<Sock> {
+    Sock::connect(path)
+}
+
+/// Opening a named pipe path is a plain `CreateFileW` under the hood, so
+/// `std::fs::File` handles it exactly like any other path — no extra crate
+/// needed. `ERROR_PIPE_BUSY` (every instance in use) surfaces as a normal
+/// `io::Error` here, which the caller's own retry loop already handles.
+#[cfg(windows)]
+fn connect_sock(path: &std::path::Path) -> io::Result<Sock> {
+    std::fs::OpenOptions::new().read(true).write(true).open(path)
+}
 
 /// Firefox will not send us anything larger than this, and refusing to
 /// allocate on a bogus length header keeps a corrupt stream from OOMing us.
@@ -96,7 +118,7 @@ fn write_message(output: &mut impl Write, payload: &[u8]) -> io::Result<()> {
  * ---------------------------------------------------------------------- */
 
 struct AppLink {
-    stream: Option<BufReader<UnixStream>>,
+    stream: Option<BufReader<Sock>>,
 }
 
 /// Why an exchange failed, which decides whether re-sending is safe.
@@ -192,7 +214,7 @@ impl AppLink {
 
     fn connect(&mut self, launch_if_absent: bool) -> Result<(), String> {
         let path = socket_path();
-        if let Ok(sock) = UnixStream::connect(&path) {
+        if let Ok(sock) = connect_sock(&path) {
             configure(&sock);
             self.stream = Some(BufReader::new(sock));
             return Ok(());
@@ -204,7 +226,7 @@ impl AppLink {
             let deadline = Instant::now() + Duration::from_secs(15);
             while Instant::now() < deadline {
                 std::thread::sleep(Duration::from_millis(200));
-                if let Ok(sock) = UnixStream::connect(&path) {
+                if let Ok(sock) = connect_sock(&path) {
                     configure(&sock);
                     self.stream = Some(BufReader::new(sock));
                     return Ok(());
@@ -216,14 +238,25 @@ impl AppLink {
     }
 }
 
-fn configure(sock: &UnixStream) {
-    // A hung app must not wedge the browser's blocking listener; the extension
-    // gives up well before this, but the host should not linger either — every
-    // message behind this one waits for it.
+/// A hung app must not wedge the browser's blocking listener; the extension
+/// gives up well before this, but the host should not linger either — every
+/// message behind this one waits for it.
+///
+/// Windows named pipes opened as a plain `File` have no read/write timeout in
+/// `std` short of hand-rolled overlapped I/O, so that guard is unix-only here;
+/// what still protects the *browser* on Windows is the extension's own
+/// JS-side timeout on `native.js`'s `request()`, which does not wait on this
+/// process at all.
+#[cfg(unix)]
+fn configure(sock: &Sock) {
     let _ = sock.set_read_timeout(Some(Duration::from_secs(10)));
     let _ = sock.set_write_timeout(Some(Duration::from_secs(5)));
 }
 
+#[cfg(windows)]
+fn configure(_sock: &Sock) {}
+
+#[cfg(unix)]
 fn socket_path() -> PathBuf {
     match std::env::var_os("XDG_RUNTIME_DIR") {
         Some(v) if !v.is_empty() => PathBuf::from(v).join("mdm").join("mdm.sock"),
@@ -233,6 +266,7 @@ fn socket_path() -> PathBuf {
     }
 }
 
+#[cfg(unix)]
 fn uid() -> u32 {
     // Avoid a libc dependency in a binary this small.
     std::fs::read_to_string("/proc/self/status")
@@ -244,6 +278,15 @@ fn uid() -> u32 {
         })
         .and_then(|v| v.parse().ok())
         .unwrap_or(1000)
+}
+
+/// Must match `mdm_core::paths::windows_impl::pipe_name()` exactly — this
+/// binary stays dependency-free by design, so it cannot depend on `mdm-core`
+/// to share the constant, and duplicates it instead.
+#[cfg(windows)]
+fn socket_path() -> PathBuf {
+    let user = std::env::var("USERNAME").unwrap_or_else(|_| "unknown".into());
+    PathBuf::from(format!(r"\\.\pipe\mdm-{user}"))
 }
 
 /// Start the app detached, so it outlives this host process.
@@ -260,6 +303,11 @@ fn launch_app() -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(unix)]
+const APP_BIN: &str = "mdm";
+#[cfg(windows)]
+const APP_BIN: &str = "mdm.exe";
+
 fn find_app() -> Option<PathBuf> {
     if let Some(p) = std::env::var_os("MDM_APP_PATH") {
         let p = PathBuf::from(p);
@@ -270,7 +318,7 @@ fn find_app() -> Option<PathBuf> {
     // Installed layout puts the host next to the app.
     if let Ok(me) = std::env::current_exe() {
         if let Some(dir) = me.parent() {
-            let sibling = dir.join("mdm");
+            let sibling = dir.join(APP_BIN);
             if sibling.is_file() {
                 return Some(sibling);
             }
@@ -278,7 +326,7 @@ fn find_app() -> Option<PathBuf> {
     }
     std::env::var_os("PATH").and_then(|path| {
         std::env::split_paths(&path)
-            .map(|d| d.join("mdm"))
+            .map(|d| d.join(APP_BIN))
             .find(|p| p.is_file())
     })
 }

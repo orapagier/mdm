@@ -20,6 +20,13 @@
   <button id="btn-settings" title="Settings" class="icon">⚙</button>
 </header>
 
+<!-- Only ever shown when a check has actually found something newer. -->
+<div class="update-bar" id="update-bar" hidden>
+  <span id="update-text"></span>
+  <button type="button" id="update-install" class="primary">Install and restart</button>
+  <button type="button" id="update-dismiss">Not now</button>
+</div>
+
 <div class="body">
   <nav class="sidebar">
     <div class="nav-group">
@@ -101,11 +108,8 @@
       </label>
       <label class="check"><input type="checkbox" id="s-categorize"> Sort into category folders</label>
 
-      <label>Connections per server (1–16)
-        <input type="number" id="s-connections" min="1" max="16">
-      </label>
-      <label>Segments per download
-        <input type="number" id="s-split" min="1" max="16">
+      <label>Connections per server (ceiling, 1–32)
+        <input type="number" id="s-connections" min="1" max="32">
       </label>
       <label>Minimum segment size
         <input type="text" id="s-minsplit" placeholder="1M">
@@ -122,6 +126,9 @@
       <label>Retries before giving up
         <input type="number" id="s-retries" min="0" max="20">
       </label>
+      <label>Proxy
+        <input type="text" id="s-proxy" placeholder="blank = system settings, off = go direct">
+      </label>
       <label>Default video format
         <input type="text" id="s-format">
       </label>
@@ -131,9 +138,11 @@
       <label>Extra yt-dlp arguments
         <input type="text" id="s-ytargs" placeholder="--extractor-args youtube:player_client=web_safari">
       </label>
+      <label class="check"><input type="checkbox" id="s-ytupdate"> Keep yt-dlp up to date</label>
       <label class="check"><input type="checkbox" id="s-checksum"> Compute SHA-256 when finished</label>
       <label class="check"><input type="checkbox" id="s-notify"> Desktop notifications</label>
       <label class="check"><input type="checkbox" id="s-clipboard"> Watch clipboard for links</label>
+
     </div>
 
     <h3>Schedule</h3>
@@ -145,6 +154,19 @@
       <label>Stop<input type="time" id="q-stop"></label>
     </div>
     <div class="days" id="q-days"></div>
+
+    <h3>Site logins</h3>
+    <p class="hint">For servers that ask for a username and password. A download
+      captured from the browser already carries the session you are signed in
+      with; this is for links added by hand. Stored in plain text in
+      settings.toml.</p>
+    <table class="creds" id="s-creds"></table>
+    <div class="cred-add">
+      <input type="text" id="s-cred-host" placeholder="files.example.com">
+      <input type="text" id="s-cred-user" placeholder="username" autocomplete="off">
+      <input type="password" id="s-cred-pass" placeholder="password" autocomplete="new-password">
+      <button type="button" id="s-cred-add">Add</button>
+    </div>
     <menu>
       <button value="cancel">Cancel</button>
       <button value="ok" class="primary" id="s-save">Save</button>

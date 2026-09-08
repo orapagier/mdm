@@ -1,18 +1,23 @@
-//! Core of My Download Manager: the aria2-backed engine, its store,
+//! Core of My Download Manager: the download engine, its store,
 //! and the IPC surface the browser extension talks to.
 
-pub mod aria2;
 pub mod categories;
 pub mod checksum;
 pub mod clipboard;
 pub mod config;
 pub mod distro;
 pub mod engine;
+pub mod fetch;
 pub mod ipc;
 pub mod model;
 pub mod paths;
+/// DNS with a budget of its own, and addresses this machine can reach.
+pub mod resolve;
 pub mod store;
-pub mod supervisor;
+/// HLS and DASH, fetched and remuxed without an external tool.
+pub mod stream;
+pub mod tools;
+pub mod which;
 pub mod ytdlp;
 
 /// Seconds since the Unix epoch.

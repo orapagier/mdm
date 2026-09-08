@@ -11,9 +11,10 @@ function humanSize(n) {
 }
 
 /**
- * Firefox 127+ grants host permissions at install, but a user can revoke them
- * at any time from about:addons — and without them the webRequest listeners
- * see nothing, silently. Offer a one-click way back.
+ * Firefox 127+ and Chromium both grant host permissions at install, but a user
+ * can revoke them at any time — from about:addons, or the extension's own
+ * details page in chrome://extensions — and without them the webRequest
+ * listeners see nothing, silently. Offer a one-click way back.
  */
 async function checkPermissions() {
   let granted = true;
@@ -41,7 +42,7 @@ async function init() {
   $("dot").classList.toggle("on", state.connected);
   $("status").textContent = state.connected
     ? "Connected to the MDM daemon."
-    : "MDM is not running — downloads stay in Firefox.";
+    : "MDM is not running — downloads stay in the browser.";
   $("enabled").checked = state.cfg.enabled;
 
   const list = $("media");

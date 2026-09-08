@@ -1,6 +1,6 @@
 //! Headless driver for the engine — the app without the window.
 //!
-//! Useful for testing the aria2 path in isolation, and for scripting:
+//! Useful for testing the engine in isolation, and for scripting:
 //!
 //!     cargo run --example mdm-cli -- https://example.com/big.iso
 //!
@@ -66,7 +66,7 @@ async fn main() -> anyhow::Result<()> {
     settings.download_dir = std::env::current_dir()?.to_string_lossy().into_owned();
 
     let engine = Engine::start(settings).await?;
-    println!("engine up, aria2 running");
+    println!("engine up");
 
     let mut ids = Vec::new();
     for url in &urls {

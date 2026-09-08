@@ -1,11 +1,10 @@
 //! The download engine: queueing, dispatch, progress tracking and scheduling.
 
-use crate::aria2::{AddOptions, Aria2, GlobalStat};
 use crate::categories;
-use crate::model::{Download, Job, Queue, Settings, Status};
+use crate::model::{Download, Header, Job, Queue, Settings, Status};
 use crate::store::Store;
-use crate::supervisor::Supervisor;
-use crate::{now, ytdlp};
+
+use crate::{fetch, now, ytdlp};
 use anyhow::{bail, Context, Result};
 use base64::Engine as _;
 use serde::Serialize;
@@ -27,13 +26,105 @@ pub struct Snapshot {
     pub global_speed: i64,
     pub active: i64,
     pub queued: i64,
-    pub aria2_ok: bool,
 }
 
 /// Live state for a yt-dlp download, which bypasses aria2's RPC entirely.
-struct YtState {
+/// A download the in-process fetcher owns.
+///
+/// Holds a row's dispatch claim, and gives it back however the dispatch
+/// ends — including the paths that return early or fail, which is most of
+/// them. A claim left behind would park that row for the life of the
+/// process, so it is not left to a `remove` at the end of a function.
+struct Claim<'a> {
+    set: &'a Mutex<HashSet<i64>>,
+    id: i64,
+}
+
+impl Drop for Claim<'_> {
+    fn drop(&mut self) {
+        self.set.lock().unwrap().remove(&self.id);
+    }
+}
+
+/// Which of the in-process downloaders a job goes to.
+///
+/// All three end in the same place — one file, reported through one
+/// `fetch::Event` channel, reaped by one loop — so the choice is made once,
+/// here, and nothing downstream has to know which it was.
+enum Fetcher {
+    /// One address, one file, as many connections as the server allows.
+    Direct,
+    /// A manifest: hundreds of segments, remuxed once they are all in.
+    Segmented,
+    /// Streams an extractor resolved for us — whole files, fetched by the
+    /// ordinary downloader and then merged into one MP4 in this process.
+    /// This is the path that needs no ffmpeg.
+    Merged(Vec<crate::stream::Stream>),
+}
+
+/// Deliberately shaped like [`YtState`]: both are engines the poll loop has to
+/// watch rather than ask, so they are reaped the same way.
+struct FetchState {
     downloaded: i64,
     total: i64,
+    speed: i64,
+    connections: i64,
+    /// Where it actually landed, known only once the partial file is renamed.
+    output: Option<PathBuf>,
+    /// Raised to wind every connection down. The partial file and its state
+    /// stay put, which is what makes the next start a resume.
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    /// Set when *we* stopped it, so the reaper reads the end as a pause rather
+    /// than a failure worth retrying.
+    stopped_by_us: bool,
+    task: tokio::task::JoinHandle<Result<PathBuf>>,
+}
+
+/// What a yt-dlp job has fetched, and what it weighs.
+///
+/// Its own number is per *stream*: yt-dlp fetches the video and then the
+/// audio, counting each of them from zero, so what it reports walks back to
+/// the start when the second one begins. Taken at face value the bar drops to
+/// nothing and climbs a second time, which reads as the download having
+/// started over. So the streams already done are banked and the report is
+/// added to that.
+#[derive(Debug, Default, Clone, Copy)]
+struct Tally {
+    /// Bytes fetched by streams that have already finished.
+    base: i64,
+    /// What the stream now running has fetched, on yt-dlp's own count.
+    stream: i64,
+    /// The two together: what the row shows.
+    downloaded: i64,
+    /// What the job weighs. Seeded with the picker's figure when there was
+    /// one, since that already weighed every stream.
+    total: i64,
+}
+
+impl Tally {
+    /// Fold in one progress report. `total` is the current stream's, or 0
+    /// where yt-dlp has not said yet.
+    fn advance(&mut self, downloaded: i64, total: i64) {
+        // A count that went backwards is the next stream starting, not bytes
+        // going missing: only the run of a single stream is monotonic.
+        if downloaded < self.stream {
+            self.base += self.stream;
+        }
+        self.stream = downloaded;
+        self.downloaded = self.base + self.stream;
+        if total > 0 {
+            // One stream's weight is a floor for the job rather than the job
+            // itself — taking it as the job is what sent the bar from 99%
+            // back to 67%. A picker's figure covers the lot and stands.
+            self.total = self.total.max(self.base + total);
+        }
+        self.total = self.total.max(self.downloaded);
+    }
+}
+
+struct YtState {
+    /// What has been fetched of this job, and what it weighs.
+    tally: Tally,
     speed: i64,
     child: tokio::process::Child,
     /// Populated by the stderr reader; read when the process exits.
@@ -75,13 +166,31 @@ struct Exit {
 pub struct Engine {
     pub store: Arc<Store>,
     settings: RwLock<Settings>,
-    aria2: Arc<Aria2>,
-    supervisor: Mutex<Option<Supervisor>>,
     events: broadcast::Sender<Snapshot>,
     /// Downloads the scheduler has parked because their queue window is shut.
     scheduler_held: Mutex<HashSet<i64>>,
+    /// Rows a dispatch is currently working on.
+    ///
+    /// Starting a download is not instant — a yt-dlp job asks the extractor
+    /// what the format expression names first, which is seconds of work —
+    /// and until it finishes the row is in none of the job maps and still
+    /// reads as Queued. The scheduler tick lands inside that gap, dispatches
+    /// the same row again, and two downloads write the same files: measured
+    /// here as one of them renaming the part file while the other was still
+    /// fetching into it. So a dispatch claims its row for as long as it
+    /// takes, and the claim is what the second attempt trips over.
+    claimed: Mutex<HashSet<i64>>,
     retries: Mutex<HashMap<i64, u8>>,
+    /// The earliest moment a failed download may be dispatched again.
+    ///
+    /// Without it a retry is re-queued into the very next tick, so five
+    /// attempts against an outage that lasts seconds — a DNS server that
+    /// blinks, a link that drops while a laptop changes network — are all
+    /// spent inside the outage and the row lands on Failed before the
+    /// connection is even back.
+    retry_after: Mutex<HashMap<i64, std::time::Instant>>,
     ytdlp_jobs: Mutex<HashMap<i64, YtState>>,
+    fetch_jobs: Mutex<HashMap<i64, FetchState>>,
     /// Live speed/connection counts, which are not worth persisting.
     live: Mutex<HashMap<i64, (i64, i64)>>,
     /// Weak handle to ourselves so spawned tasks can reach the engine without
@@ -94,25 +203,29 @@ impl Engine {
         crate::paths::ensure_dirs().context("creating application directories")?;
 
         let store = Arc::new(Store::open()?);
-        let supervisor = Supervisor::start(&settings).await?;
-        let aria2 = supervisor.client.clone();
         let (events, _) = broadcast::channel(32);
 
         let engine = Arc::new(Self {
             store,
             settings: RwLock::new(settings),
-            aria2,
-            supervisor: Mutex::new(Some(supervisor)),
             events,
             scheduler_held: Mutex::new(HashSet::new()),
+            claimed: Mutex::new(HashSet::new()),
             retries: Mutex::new(HashMap::new()),
+            retry_after: Mutex::new(HashMap::new()),
             ytdlp_jobs: Mutex::new(HashMap::new()),
+            fetch_jobs: Mutex::new(HashMap::new()),
             live: Mutex::new(HashMap::new()),
             me: RwLock::new(Weak::new()),
         });
         *engine.me.write().unwrap() = Arc::downgrade(&engine);
 
-        engine.apply_global_options().await?;
+        // The extractor, fetched if this machine has none and kept current
+        // if it is ours to keep. In the background and never awaited: a
+        // machine with no network still opens, still downloads everything
+        // that needs no extractor, and tries again tomorrow.
+        let auto_update = engine.settings().ytdlp_auto_update;
+        tokio::spawn(async move { crate::tools::maintain(auto_update).await });
 
         let poll = engine.clone();
         tokio::spawn(async move {
@@ -146,6 +259,13 @@ impl Engine {
     /// Returns the new row id. Dispatch happens here when the queue window is
     /// open; otherwise the row sits at `Queued` for the scheduler to pick up.
     pub async fn submit(&self, job: Job) -> Result<i64> {
+        // A password has no business sitting in the download list, being
+        // logged, or being read over someone's shoulder. If the link arrived
+        // with one — `https://user:secret@host/file` is how an authenticated
+        // link is typed — it moves into the request headers, where every other
+        // credential this app handles already lives, and the URL is kept and
+        // shown without it.
+        let job = strip_userinfo(job);
         // Clicking the same link twice must not start a rival download. aria2
         // would resolve the filename collision by writing "file.1.iso", which
         // is how you end up with one finished copy and one abandoned stub.
@@ -204,7 +324,7 @@ impl Engine {
 
         let mut record = Download {
             id: 0,
-            gid: None,
+
             url: job.url.clone(),
             filename: filename.clone(),
             directory: directory.to_string_lossy().into_owned(),
@@ -314,12 +434,16 @@ impl Engine {
 
     /// A filename that will not be answered with the file already sitting there.
     ///
-    /// aria2 is told to continue whatever it finds, so a finished file of the
-    /// same name reads as a download that is already done: it reports complete
-    /// without fetching a byte. Another copy is what was asked for, so the name
-    /// is numbered — except where a control file marks an interrupted download
-    /// of exactly this target, the one case where reusing the name is how the
-    /// transfer picks up where it left off.
+    /// A finished file of the same name would read as a download that is
+    /// already done, and another copy is what was asked for, so the name gets
+    /// numbered instead.
+    ///
+    /// The exception this used to carry — reuse the name when a control file
+    /// marks an interrupted transfer — went with aria2, which wrote straight
+    /// to the final name. The fetcher and the stream downloader both work in a
+    /// `.mdmdownload` file and only take the real name once they are finished,
+    /// so a file sitting at that name is by definition not one of ours in
+    /// progress, and existing is enough to make the name taken.
     ///
     /// `except` is the row asking, which must not be counted as competition
     /// with itself.
@@ -330,7 +454,7 @@ impl Engine {
         Ok(unique_filename(name, |candidate| {
             let path = dir.join(candidate);
             claimed.iter().any(|held| held == candidate)
-                || (path.exists() && !control_file(&path).exists())
+                || path.exists()
         }))
     }
 
@@ -368,6 +492,16 @@ impl Engine {
 
     /// Hand a download to aria2 (or yt-dlp) and record the resulting handle.
     async fn dispatch(&self, d: &Download, job: &Job) -> Result<()> {
+        // Whoever holds the claim is already starting this one.
+        if !self.claimed.lock().unwrap().insert(d.id) {
+            log::debug!("#{} is already being started; leaving it to that", d.id);
+            return Ok(());
+        }
+        let _claim = Claim { set: &self.claimed, id: d.id };
+        self.dispatch_claimed(d, job).await
+    }
+
+    async fn dispatch_claimed(&self, d: &Download, job: &Job) -> Result<()> {
         // Bytes the extension read out of a page: there is no server to ask,
         // and nothing to segment. Starting one is moving it into place.
         //
@@ -390,35 +524,18 @@ impl Engine {
         }
 
         let settings = self.settings();
-        let opts = AddOptions {
-            dir: d.directory.clone(),
-            out: Some(d.filename.clone()),
-            headers: d.headers.clone(),
-            referer: Some(d.referrer.clone()),
-            connections: settings.connections,
-            split: settings.split,
-            min_split_size: settings.min_split_size.clone(),
-            max_speed: settings.max_speed_per_download,
-            retry_limit: settings.retry_limit,
-            paused: false,
-            extra: Vec::new(),
-        };
 
-        // The original first, then every mirror the capture found. aria2
-        // spreads its connections across the list and abandons the slow ones,
-        // so a well-mirrored file arrives faster than any one server can send it.
-        let mut sources = Vec::with_capacity(1 + d.mirrors.len());
-        sources.push(d.url.clone());
-        sources.extend(d.mirrors.iter().cloned());
-        if sources.len() > 1 {
-            log::info!("#{} has {} sources", d.id, sources.len());
+        // A manifest is not a file. HLS and DASH name hundreds of segments,
+        // often with the picture and the sound in separate sets, and neither
+        // aria2 nor the plain fetcher can make a video out of that — so this
+        // is decided before the backend question, not after it.
+        if crate::stream::looks_like_manifest(&d.url, &d.mime) {
+            return self.dispatch_fetch(d, &settings, Fetcher::Segmented).await;
         }
 
-        let gid = self.aria2.add_uri(&sources, &opts).await?;
-        self.store.set_gid(d.id, Some(&gid))?;
-        log::info!("#{} -> aria2 {gid} ({})", d.id, d.filename);
-        Ok(())
+        self.dispatch_fetch(d, &settings, Fetcher::Direct).await
     }
+
 
     /// Finish a capture whose bytes are already here.
     ///
@@ -446,6 +563,307 @@ impl Engine {
         self.on_complete(&done).await
     }
 
+    /// Hand an ordinary download to the in-process fetcher, or a manifest to
+    /// the in-process stream downloader.
+    ///
+    /// The two share everything after dispatch. A stream reports through the
+    /// same `fetch::Event` channel, is held in the same `fetch_jobs` map and is
+    /// reaped by the same loop — the only difference is which future is
+    /// spawned, because from the outside "download this" is one job either way.
+    ///
+    /// No gid: there is no daemon holding this one, so the row is tracked in
+    /// `fetch_jobs` and reaped by the poll loop the same way a yt-dlp job is.
+    async fn dispatch_fetch(
+        &self,
+        d: &Download,
+        settings: &Settings,
+        how: Fetcher,
+    ) -> Result<()> {
+        let mut spec = fetch::Spec::new(d.url.clone(), &d.directory);
+        spec.mirrors = d.mirrors.clone();
+        spec.filename = Some(d.filename.clone());
+        spec.headers = d.headers.clone();
+        spec.referrer = Some(d.referrer.clone()).filter(|r| !r.is_empty());
+        spec.max_speed = settings.max_speed_per_download;
+        spec.retries = settings.retry_limit;
+        spec.proxy = settings.proxy.clone();
+        // A capture from the browser already carries the session that was
+        // logged in; only a link that arrived without one needs looking up.
+        if let Some(header) = authorization_for(&d.url, settings) {
+            if !spec
+                .headers
+                .iter()
+                .any(|h| h.name.eq_ignore_ascii_case("authorization"))
+            {
+                spec.headers.push(header);
+            }
+        }
+        // The user's connection setting is a ceiling for the governor rather
+        // than a target: it says how many are acceptable, and measurement says
+        // how many actually help.
+        spec.concurrency = fetch::Concurrency::Auto { max: settings.connections };
+
+        let (tx, mut rx) = mpsc::channel(64);
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let task = match &how {
+            Fetcher::Segmented => tokio::spawn(crate::stream::download(spec, tx, stop.clone())),
+            Fetcher::Merged(streams) => {
+                tokio::spawn(crate::stream::merge(spec, streams.clone(), tx, stop.clone()))
+            }
+            Fetcher::Direct => tokio::spawn(fetch::download(spec, tx, stop.clone())),
+        };
+
+        self.fetch_jobs.lock().unwrap().insert(
+            d.id,
+            FetchState {
+                downloaded: 0,
+                total: d.total_bytes,
+                speed: 0,
+                connections: 0,
+                output: None,
+                stop,
+                stopped_by_us: false,
+                task,
+            },
+        );
+        self.store.set_status(d.id, Status::Active, None)?;
+        log::info!(
+            "#{} -> {} ({})",
+            d.id,
+            match &how {
+                Fetcher::Segmented => "stream downloader".to_string(),
+                Fetcher::Merged(streams) => format!("native merge of {} stream(s)", streams.len()),
+                Fetcher::Direct => "built-in fetcher".to_string(),
+            },
+            d.filename
+        );
+
+        // Fold the fetcher's events into the same state the poll loop reads.
+        let id = d.id;
+        let weak = self.me.read().unwrap().clone();
+        tokio::spawn(async move {
+            while let Some(event) = rx.recv().await {
+                let Some(engine) = weak.upgrade() else { break };
+                let mut jobs = engine.fetch_jobs.lock().unwrap();
+                let Some(state) = jobs.get_mut(&id) else { break };
+                match event {
+                    fetch::Event::Progress(p) => {
+                        state.downloaded = p.downloaded as i64;
+                        if let Some(total) = p.total {
+                            state.total = total as i64;
+                        }
+                        state.speed = p.speed as i64;
+                        state.connections = p.connections as i64;
+                    }
+                    fetch::Event::Done(path) => state.output = Some(path),
+                    fetch::Event::Probed(probe) => {
+                        if let Some(total) = probe.size {
+                            state.total = total as i64;
+                        }
+                    }
+                    fetch::Event::Concurrency { connections, speed } => {
+                        log::info!(
+                            "#{id}: settled on {connections} connections at {}/s",
+                            crate::human_bytes(speed as i64)
+                        );
+                    }
+                }
+            }
+        });
+        Ok(())
+    }
+
+    /// Reap finished fetcher jobs and mirror their progress into the store.
+    async fn reconcile_fetch(&self) -> Result<()> {
+        // Live counters first, without holding the lock across an await.
+        let live: Vec<(i64, i64, i64, i64, i64)> = {
+            let jobs = self.fetch_jobs.lock().unwrap();
+            jobs.iter()
+                .map(|(id, s)| (*id, s.downloaded, s.total, s.speed, s.connections))
+                .collect()
+        };
+        for (id, downloaded, total, speed, connections) in live {
+            self.store.update_progress(id, total, downloaded, None, None)?;
+            self.live.lock().unwrap().insert(id, (speed, connections));
+        }
+
+        // Taken out from under the lock, then awaited: the tasks have already
+        // finished, so each await resolves immediately, but holding a mutex
+        // across one is how the poll loop would deadlock against the event
+        // pump that also wants it.
+        let done: Vec<(i64, bool, tokio::task::JoinHandle<Result<PathBuf>>)> = {
+            let mut jobs = self.fetch_jobs.lock().unwrap();
+            let ids: Vec<i64> = jobs
+                .iter()
+                .filter(|(_, s)| s.task.is_finished())
+                .map(|(id, _)| *id)
+                .collect();
+            ids.into_iter()
+                .filter_map(|id| jobs.remove(&id).map(|s| (id, s.stopped_by_us, s.task)))
+                .collect()
+        };
+
+        for (id, stopped, task) in done {
+            let result = match task.await {
+                Ok(result) => result,
+                Err(e) if e.is_cancelled() => continue,
+                Err(e) => Err(anyhow::anyhow!("the fetcher panicked: {e}")),
+            };
+            let Some(mut d) = self.store.get(id)? else { continue };
+            if stopped {
+                // Paused on purpose: the partial file and its state stay, and
+                // the row already says Paused.
+                self.live.lock().unwrap().remove(&id);
+                continue;
+            }
+            match result {
+                Ok(path) => {
+                    if let Some(name) = path.file_name().map(|n| n.to_string_lossy().into_owned()) {
+                        let size = std::fs::metadata(&path)
+                            .map(|m| m.len() as i64)
+                            .unwrap_or(d.total_bytes);
+                        let dir = path
+                            .parent()
+                            .map(|p| p.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| d.directory.clone());
+                        self.store
+                            .update_progress(id, size, size, Some(&name), Some(&dir))?;
+                        d.filename = name;
+                        d.directory = dir;
+                        d.total_bytes = size;
+                        d.completed_bytes = size;
+                    }
+                    self.on_complete(&d).await?;
+                }
+                Err(e) => self.on_failure(&d, &format!("{e:#}")).await?,
+            }
+        }
+        Ok(())
+    }
+
+    /// The streams to fetch ourselves, when this job is one we can finish
+    /// without yt-dlp downloading anything.
+    ///
+    /// `None` is the ordinary answer for half the sites in the world and is
+    /// not a failure: it means "let yt-dlp do it", which is what happened
+    /// before this existed. Nothing here is allowed to fail a download — a
+    /// planner that cannot answer simply declines.
+    async fn native_plan(
+        &self,
+        d: &Download,
+        format: &str,
+        settings: &Settings,
+    ) -> Option<Vec<crate::stream::Stream>> {
+        let resolve = |expression: String| {
+            let url = d.url.clone();
+            let cookies = settings.ytdlp_cookies_from.clone();
+            let extra = settings.ytdlp_extra_args.clone();
+            async move { ytdlp::plan(&url, &expression, Some(cookies.as_str()), &extra).await }
+        };
+
+        let plan = match resolve(format.to_string()).await {
+            Ok(plan) => plan,
+            Err(e) => {
+                // Whatever went wrong here will go wrong again in a moment,
+                // in the download, which is the place that reports it.
+                log::debug!("#{}: could not resolve the formats ({e:#}); leaving it to yt-dlp", d.id);
+                return None;
+            }
+        };
+
+        let plan = if plan.native() {
+            plan
+        } else if ytdlp::can_merge() {
+            // There is something to fall back on, so fall back: yt-dlp with
+            // ffmpeg behind it merges what this cannot, and that selection
+            // is the one that was asked for.
+            log::info!("#{}: {} — yt-dlp will download it", d.id, plan.describe());
+            return None;
+        } else {
+            // Nothing to fall back *to*. What usually lands a selection here
+            // is a picture and a sound from different container families,
+            // which neither muxer will write into one file — but a site in
+            // that position nearly always offers a matched pair as well, and
+            // a matched pair is one MDM can finish alone. Slightly different
+            // bytes beat a download that cannot happen.
+            match resolve(ytdlp::MATCHED_FAMILIES.to_string()).await {
+                Ok(second) if second.native() => {
+                    log::info!(
+                        "#{}: {} would need an ffmpeg this machine has not got; taking {} instead",
+                        d.id,
+                        plan.describe(),
+                        second.describe()
+                    );
+                    second
+                }
+                _ => {
+                    log::info!("#{}: {} — yt-dlp will download it", d.id, plan.describe());
+                    return None;
+                }
+            }
+        };
+
+        // The name is settled here, before a byte lands, rather than
+        // whenever yt-dlp gets round to announcing one — so the row stops
+        // showing a bare video id immediately, and the file is written
+        // under the name it will keep. What the user typed in the picker
+        // wins over the site's own title; a yt-dlp row carries that in
+        // `output_name`, because for that path the filename column is only
+        // ever a placeholder.
+        let chosen = d
+            .output_name
+            .clone()
+            .map(|n| n.trim().to_string())
+            .filter(|n| !n.is_empty())
+            .unwrap_or_else(|| plan.title.trim().to_string());
+        if !chosen.is_empty() {
+            // A lone stream is saved as it arrives; a merge comes out of
+            // the muxer in the family it went in as.
+            let ext = match plan.tracks.as_slice() {
+                [only] if !only.ext.is_empty() => only.ext.clone(),
+                many if many.iter().all(|t| t.ext == "webm") => "webm".to_string(),
+                _ => "mp4".to_string(),
+            };
+            let named = sanitize(chosen);
+            let named = match named.rsplit_once('.') {
+                Some((stem, had)) if had.eq_ignore_ascii_case(&ext) => format!("{stem}.{ext}"),
+                _ => format!("{named}.{ext}"),
+            };
+            // Never over something already there: this path writes a real
+            // file at a real name, unlike the yt-dlp one it replaces, so it
+            // inherits the same duty not to lose a download to a collision.
+            match self.free_filename(Path::new(&d.directory), &named, d.id) {
+                Ok(free) => {
+                    if let Err(e) = self.store.set_filename(d.id, &free) {
+                        log::warn!("#{}: could not name it {free}: {e:#}", d.id);
+                    }
+                }
+                Err(e) => log::warn!("#{}: could not settle on a name: {e:#}", d.id),
+            }
+        }
+        // What the whole job weighs, before a byte of it has arrived.
+        if let Some(size) = plan.size() {
+            let _ = self.store.update_progress(d.id, size as i64, d.completed_bytes, None, None);
+        }
+
+        log::info!(
+            "#{}: {} — fetching and merging it here, no ffmpeg needed",
+            d.id,
+            plan.describe()
+        );
+        Some(
+            plan.tracks
+                .into_iter()
+                .map(|t| crate::stream::Stream {
+                    url: t.url,
+                    headers: t.headers,
+                    size: t.filesize,
+                    ext: t.ext,
+                })
+                .collect(),
+        )
+    }
+
     async fn dispatch_ytdlp(&self, d: &Download, job: &Job) -> Result<()> {
         if !ytdlp::available() {
             bail!(
@@ -458,6 +876,27 @@ impl Engine {
             .format_id
             .clone()
             .unwrap_or_else(|| settings.ytdlp_format.clone());
+
+        // Ask what that expression actually names before handing the job
+        // over. Where every stream it picked is a plain HTTPS file in an
+        // MP4-family container, MDM can do the whole download itself: fetch
+        // them with its own connections, resume and progress, and rebuild
+        // them with its own muxer — which is the entirety of what ffmpeg was
+        // being carried for. Anything else, WebM sound or a fragment list or
+        // a live stream, stays yt-dlp's to download.
+        //
+        // Selection itself is left to yt-dlp. A format selector is a small
+        // language with years of behaviour behind it, and reimplementing it
+        // would be precisely the borrowed rot this arrangement avoids.
+        if let Some(streams) = self.native_plan(d, &format, &settings).await {
+            // Re-read: the planner has just given the row the video's own
+            // title, and the file has to be written under that rather than
+            // under whatever the URL's last path segment was.
+            let named = self.store.get(d.id)?.unwrap_or_else(|| d.clone());
+            return self
+                .dispatch_fetch(&named, &settings, Fetcher::Merged(streams))
+                .await;
+        }
 
         let (tx, mut rx) = mpsc::channel(16);
         let handle = ytdlp::download(
@@ -476,8 +915,11 @@ impl Engine {
         self.ytdlp_jobs.lock().unwrap().insert(
             d.id,
             YtState {
-                downloaded: 0,
-                total: d.total_bytes,
+                // The picker weighs the formats it offers, and that
+                // figure is on the row before yt-dlp is started; a
+                // job that arrived without one starts at nothing and
+                // learns its weight a stream at a time.
+                tally: Tally { total: d.total_bytes, ..Tally::default() },
                 speed: 0,
                 child: handle.child,
                 last_error: handle.last_error,
@@ -503,15 +945,7 @@ impl Engine {
                 if let Some(state) = jobs.get_mut(&id) {
                     match event {
                         ytdlp::Event::Progress(p) => {
-                            state.downloaded = p.downloaded;
-                            if p.total > 0 {
-                                // The streams arrive one after another, so what
-                                // aria2 has weighed so far is a floor rather
-                                // than the job: taking it as the job is what
-                                // sends the bar from 99% back to 67% the moment
-                                // the audio stream appears behind the video.
-                                state.total = state.total.max(p.total);
-                            }
+                            state.tally.advance(p.downloaded, p.total);
                             state.speed = p.speed;
                             state.connections = p.connections;
                         }
@@ -532,92 +966,13 @@ impl Engine {
      * ------------------------------------------------------------------ */
 
     async fn tick(&self) -> Result<()> {
-        self.reconcile_aria2().await?;
         self.reconcile_ytdlp().await?;
+        self.reconcile_fetch().await?;
         self.run_scheduler().await?;
         self.broadcast().await;
         Ok(())
     }
 
-    /// Pull aria2's view of the world and fold it into our rows.
-    async fn reconcile_aria2(&self) -> Result<()> {
-        let tasks = match self.aria2.tell_all(200).await {
-            Ok(t) => t,
-            Err(e) => {
-                log::debug!("aria2 poll failed: {e:#}");
-                return Ok(());
-            }
-        };
-
-        let by_gid: HashMap<&str, _> = tasks.iter().map(|t| (t.gid.as_str(), t)).collect();
-
-        for mut d in self.store.list(500)? {
-            let Some(gid) = d.gid.clone() else { continue };
-            if d.status.is_terminal() {
-                continue;
-            }
-            let Some(task) = by_gid.get(gid.as_str()) else {
-                continue;
-            };
-
-            // aria2 may rename the file (Content-Disposition, or a collision
-            // resolved by auto-file-renaming); adopt whatever it actually wrote.
-            let (new_name, new_dir) = match &task.path {
-                Some(p) if !p.is_empty() => {
-                    let path = Path::new(p);
-                    (
-                        path.file_name().map(|n| n.to_string_lossy().into_owned()),
-                        path.parent().map(|d| d.to_string_lossy().into_owned()),
-                    )
-                }
-                _ => (None, None),
-            };
-
-            self.store.update_progress(
-                d.id,
-                task.total_length,
-                task.completed_length,
-                new_name.as_deref().filter(|n| *n != d.filename),
-                new_dir.as_deref().filter(|p| *p != d.directory),
-            )?;
-
-            self.live
-                .lock()
-                .unwrap()
-                .insert(d.id, (task.download_speed, task.connections));
-
-            let held = self.scheduler_held.lock().unwrap().contains(&d.id);
-            let reported = Status::from_aria2(&task.status);
-            let effective = if held && reported == Status::Paused {
-                Status::Queued
-            } else {
-                reported
-            };
-
-            if effective != d.status {
-                match effective {
-                    Status::Complete => {
-                        if let Some(n) = new_name {
-                            d.filename = n;
-                        }
-                        if let Some(p) = new_dir {
-                            d.directory = p;
-                        }
-                        self.on_complete(&d).await?;
-                    }
-                    Status::Failed => {
-                        let msg = task
-                            .error_message
-                            .clone()
-                            .unwrap_or_else(|| "download failed".into());
-                        self.on_failure(&d, &msg).await?;
-                    }
-                    other => self.store.set_status(d.id, other, None)?,
-                }
-            }
-        }
-        Ok(())
-    }
 
     /// Reap finished yt-dlp children and mirror their progress into the store.
     async fn reconcile_ytdlp(&self) -> Result<()> {
@@ -664,7 +1019,7 @@ impl Engine {
         let live: Vec<(i64, i64, i64, i64, i64)> = {
             let jobs = self.ytdlp_jobs.lock().unwrap();
             jobs.iter()
-                .map(|(id, s)| (*id, s.downloaded, s.total, s.speed, s.connections))
+                .map(|(id, s)| (*id, s.tally.downloaded, s.tally.total, s.speed, s.connections))
                 .collect()
         };
         for (id, downloaded, total, speed, connections) in live {
@@ -814,6 +1169,7 @@ impl Engine {
         self.store.set_status(d.id, Status::Complete, None)?;
         self.live.lock().unwrap().remove(&d.id);
         self.retries.lock().unwrap().remove(&d.id);
+        self.retry_after.lock().unwrap().remove(&d.id);
         log::info!("#{} complete: {}", d.id, d.filename);
 
         let settings = self.settings();
@@ -837,6 +1193,51 @@ impl Engine {
 
     async fn on_failure(&self, d: &Download, message: &str) -> Result<()> {
         let settings = self.settings();
+        // Said in the user's terms rather than the tool's. A Python transport
+        // traceback in a red strip under a progress bar reads as "the app is
+        // broken"; "the DNS lookup failed, check your connection" is the same
+        // fact and can be acted on.
+        // Classified on what the tool said, phrased in what the user needs:
+        // rewriting first would mean deciding "is this worth retrying?" about
+        // a sentence we wrote ourselves.
+        // Read before the message is rewritten: the marker is in the raw text,
+        // and `plain_error` is under no obligation to keep it.
+        let was_page = crate::fetch::is_page_response(message);
+        let permanent = crate::ytdlp::is_permanent_error(message);
+        let message = &if was_page {
+            // The marker exists for this branch, not for the user.
+            "that address is a web page, not a file — trying an extractor".to_string()
+        } else {
+            crate::ytdlp::plain_error(message)
+        };
+
+        // Two ways a URL turns out to be the extractor's job rather than ours,
+        // both discovered by trying rather than guessed at up front:
+        //
+        //   * a manifest the stream downloader will not touch — encrypted,
+        //     live, or a codec it cannot describe;
+        //   * a URL that answered with a *page*. A site whose player sits at
+        //     `view_video.php` is not on any host list we could keep current,
+        //     and the response says what the address does not.
+        //
+        // Either way the row is handed to yt-dlp for the retry that is already
+        // about to happen. Once only: the flag is persisted, so the next
+        // attempt sees a row that has already moved.
+        if !d.use_ytdlp
+            && (was_page || crate::stream::looks_like_manifest(&d.url, &d.mime))
+            && ytdlp::available()
+        {
+            log::info!(
+                "#{}: {} — handing it to yt-dlp",
+                d.id,
+                if was_page {
+                    "that URL is a page, not a file".to_string()
+                } else {
+                    format!("the built-in stream downloader could not take this ({message})")
+                }
+            );
+            self.store.set_use_ytdlp(d.id, true)?;
+        }
         let attempts = {
             let mut r = self.retries.lock().unwrap();
             let n = r.entry(d.id).or_insert(0);
@@ -846,24 +1247,74 @@ impl Engine {
 
         // A missing format or a private video fails identically every time;
         // retrying only delays telling the user what actually went wrong.
-        let permanent = crate::ytdlp::is_permanent_error(message);
         if permanent {
             log::warn!("#{} failed permanently: {message}", d.id);
         }
 
         if !permanent && attempts <= settings.retry_limit {
+            let wait = retry_backoff(attempts);
             log::warn!(
-                "#{} failed ({message}); retry {attempts}/{}",
+                "#{} failed ({message}); retry {attempts}/{} in {}s",
                 d.id,
+                settings.retry_limit,
+                wait.as_secs()
+            );
+            if d.use_ytdlp {
+                // Whatever extraction produced the URLs this attempt just
+                // failed on, handing the retry that same cached extraction
+                // would spend it on the identical signed URLs rather than
+                // fresh ones — the one thing a retry is supposed to change.
+                ytdlp::forget_info(&d.url);
+
+                // A failure of this shape is the strongest evidence there
+                // is that the extractor has fallen behind the site — better
+                // evidence than any clock — so the daily check is brought
+                // forward and the retry gets whatever it finds. It runs in
+                // the background: the retry has its own wait, and a fix
+                // that arrives during the attempt after this one is still a
+                // fix nobody had to be told about.
+                // Not while one is running: on Windows a program that is
+                // executing cannot be replaced, and there is no hurry —
+                // tomorrow's check, or the next failure, comes round soon
+                // enough.
+                let idle = self.ytdlp_jobs.lock().unwrap().is_empty();
+                if idle && settings.ytdlp_auto_update && ytdlp::looks_out_of_date(message) {
+                    tokio::spawn(async move {
+                        crate::tools::force_check();
+                        match crate::tools::update(true).await {
+                            crate::tools::Outcome::Updated(version) => {
+                                log::info!("yt-dlp updated to {version} after a failure that looked like a stale one");
+                            }
+                            crate::tools::Outcome::UpToDate => {
+                                log::info!("yt-dlp is already current; that failure was not staleness");
+                            }
+                            crate::tools::Outcome::Failed(why) => {
+                                log::warn!("could not update yt-dlp: {why}");
+                            }
+                        }
+                    });
+                }
+            }
+            self.retry_after
+                .lock()
+                .unwrap()
+                .insert(d.id, std::time::Instant::now() + wait);
+
+            // The reason is kept on the row rather than cleared. A queued row
+            // that silently sits there for a minute looks stuck; saying which
+            // attempt failed and that another is coming is the difference
+            // between waiting and giving up on the app.
+            let waiting = format!(
+                "{message} — trying again in {}s ({attempts} of {})",
+                wait.as_secs(),
                 settings.retry_limit
             );
-            // Clear the handle so the scheduler re-dispatches from scratch;
-            // aria2 resumes from the partial file it already wrote.
-            self.store.set_gid(d.id, None)?;
-            self.store.set_status(d.id, Status::Queued, None)?;
+            self.store
+                .set_status(d.id, Status::Queued, Some(&waiting))?;
             self.scheduler_held.lock().unwrap().remove(&d.id);
             return Ok(());
         }
+        self.retry_after.lock().unwrap().remove(&d.id);
 
         self.store.set_status(d.id, Status::Failed, Some(message))?;
         self.live.lock().unwrap().remove(&d.id);
@@ -878,9 +1329,8 @@ impl Engine {
      * ------------------------------------------------------------------ */
 
     pub async fn pause(&self, id: i64) -> Result<()> {
-        let Some(d) = self.store.get(id)? else { return Ok(()) };
-        if let Some(gid) = &d.gid {
-            self.aria2.pause(gid).await?;
+        if self.store.get(id)?.is_none() {
+            return Ok(());
         }
         if let Some(state) = self.ytdlp_jobs.lock().unwrap().get_mut(&id) {
             // yt-dlp has no pause; stopping is the honest equivalent, and the
@@ -890,6 +1340,13 @@ impl Engine {
             state.stopped_by_us = true;
             let _ = state.child.start_kill();
         }
+        if let Some(state) = self.fetch_jobs.lock().unwrap().get_mut(&id) {
+            // The fetcher has a real pause: every connection stops at its next
+            // chunk, and the partial file plus its range state stay on disk,
+            // so resuming asks only for what is still missing.
+            state.stopped_by_us = true;
+            state.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         self.store.set_status(id, Status::Paused, None)?;
         self.scheduler_held.lock().unwrap().remove(&id);
         self.broadcast().await;
@@ -898,18 +1355,14 @@ impl Engine {
 
     pub async fn resume(&self, id: i64) -> Result<()> {
         let Some(d) = self.store.get(id)? else { return Ok(()) };
-        match &d.gid {
-            Some(gid) => {
-                self.aria2.unpause(gid).await?;
-                self.store.set_status(id, Status::Active, None)?;
-            }
-            // No aria2 handle: it never started, or a retry cleared it.
-            None => {
-                let job = job_from(&d);
-                self.store.set_status(id, Status::Queued, None)?;
-                self.dispatch(&d, &job).await?;
-            }
-        }
+        // Every downloader MDM has left resumes from what is already on disk
+        // rather than from a handle held by something else, so resuming is
+        // simply dispatching again: the fetcher picks up from its range state,
+        // the stream downloader from the segment it had reached, and yt-dlp
+        // from its own partial fragments.
+        let job = job_from(&d);
+        self.store.set_status(id, Status::Queued, None)?;
+        self.dispatch(&d, &job).await?;
         self.broadcast().await;
         Ok(())
     }
@@ -925,7 +1378,7 @@ impl Engine {
         filename: Option<&str>,
     ) -> Result<()> {
         let Some(d) = self.store.get(id)? else { return Ok(()) };
-        if d.completed_bytes > 0 || d.gid.is_some() {
+        if d.completed_bytes > 0 {
             return Ok(());
         }
         let directory = directory.map(str::trim).filter(|v| !v.is_empty());
@@ -965,10 +1418,9 @@ impl Engine {
     pub async fn retry(&self, id: i64) -> Result<()> {
         let Some(d) = self.store.get(id)? else { return Ok(()) };
         self.retries.lock().unwrap().remove(&id);
-        if let Some(gid) = &d.gid {
-            let _ = self.aria2.remove(gid).await;
-        }
-        self.store.set_gid(id, None)?;
+        // Asked for by hand, so it goes now — whatever backoff an automatic
+        // attempt was still sitting out is not the user's to wait through.
+        self.retry_after.lock().unwrap().remove(&id);
         self.store.set_status(id, Status::Queued, None)?;
         let job = job_from(&d);
         let fresh = self.store.get(id)?.unwrap_or(d);
@@ -980,25 +1432,33 @@ impl Engine {
     /// Remove a download, optionally deleting whatever was written so far.
     pub async fn remove(&self, id: i64, delete_file: bool) -> Result<()> {
         let Some(d) = self.store.get(id)? else { return Ok(()) };
-        if let Some(gid) = &d.gid {
-            let _ = self.aria2.remove(gid).await;
-        }
         if let Some(mut state) = self.ytdlp_jobs.lock().unwrap().remove(&id) {
             let _ = state.child.start_kill();
+        }
+        if let Some(state) = self.fetch_jobs.lock().unwrap().remove(&id) {
+            state.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            state.task.abort();
         }
         // Bytes still waiting on a Start that is never coming.
         let _ = std::fs::remove_file(blob_stash(id));
         if delete_file {
             let path = d.full_path();
             let _ = std::fs::remove_file(&path);
-            // aria2 leaves a control file beside the target when interrupted.
-            // Built by appending, not with_extension: for a name carrying no
-            // extension the latter yields "file..aria2" and misses the file.
-            let _ = std::fs::remove_file(control_file(&path));
+            // The fetcher's partial file and its range state, which live
+            // beside the target under a suffix rather than in place of it.
+            let mut part = path.clone().into_os_string();
+            part.push(fetch::PART_SUFFIX);
+            let part = PathBuf::from(part);
+            let _ = std::fs::remove_file(&part);
+            let mut state = part.into_os_string();
+            state.push(".state");
+            let _ = std::fs::remove_file(PathBuf::from(state));
+
         }
         self.store.delete(id)?;
         self.live.lock().unwrap().remove(&id);
         self.retries.lock().unwrap().remove(&id);
+        self.retry_after.lock().unwrap().remove(&id);
         self.broadcast().await;
         Ok(())
     }
@@ -1026,45 +1486,16 @@ impl Engine {
      * ------------------------------------------------------------------ */
 
     pub async fn update_settings(&self, new: Settings) -> Result<()> {
-        let restart_needed = {
-            let old = self.settings.read().unwrap();
-            old.rpc_port != new.rpc_port
-        };
         crate::config::save(&new)?;
         *self.settings.write().unwrap() = new;
 
-        // Everything else applies live. The port is the one option aria2
-        // cannot change in place, and tearing the daemon down mid-transfer to
-        // honour it would cost more than waiting for the next launch.
-        self.apply_global_options().await?;
+        // Everything applies live now: the fetcher and the stream downloader
+        // both read the settings at dispatch, so there is nothing to push at a
+        // daemon and nothing that has to wait for a restart.
         self.broadcast().await;
-        if restart_needed {
-            log::info!("rpc port change takes effect on next launch");
-        }
         Ok(())
     }
 
-    /// Push the options aria2 can change without a restart.
-    async fn apply_global_options(&self) -> Result<()> {
-        let s = self.settings();
-        self.aria2
-            .set_global(&[
-                ("max-overall-download-limit", s.max_speed.to_string()),
-                ("max-download-limit", s.max_speed_per_download.to_string()),
-                (
-                    "max-concurrent-downloads",
-                    s.max_concurrent.max(1).to_string(),
-                ),
-                (
-                    "max-connection-per-server",
-                    s.connections.clamp(1, crate::aria2::MAX_CONNECTIONS).to_string(),
-                ),
-                ("split", s.split.max(1).to_string()),
-                ("min-split-size", s.min_split_size.clone()),
-                ("dir", s.download_dir.clone()),
-            ])
-            .await
-    }
 
     /* ------------------------------------------------------------------ *
      * Scheduler
@@ -1096,8 +1527,25 @@ impl Engine {
                     continue;
                 }
                 for d in self.store.next_queued(&q.name, slots as i64)? {
-                    if d.gid.is_some() {
-                        continue; // already with aria2, just waiting its turn
+
+                    // A failed attempt is holding this row back deliberately;
+                    // dispatching it now would spend the retry inside the same
+                    // outage that just consumed the last one.
+                    if self
+                        .retry_after
+                        .lock()
+                        .unwrap()
+                        .get(&d.id)
+                        .is_some_and(|t| *t > std::time::Instant::now())
+                    {
+                        continue;
+                    }
+                    if self.fetch_jobs.lock().unwrap().contains_key(&d.id) {
+                        // The fetcher's equivalent of holding a gid. Without
+                        // this a row still winding down from a closed window
+                        // would be dispatched a second time, and two sets of
+                        // connections would write the same file.
+                        continue;
                     }
                     let job = job_from(&d);
                     if let Err(e) = self.dispatch(&d, &job).await {
@@ -1114,8 +1562,12 @@ impl Engine {
                     if d.queue != q.name {
                         continue;
                     }
-                    if let Some(gid) = &d.gid {
-                        let _ = self.aria2.pause(gid).await;
+                    // A fetcher job has to actually be told, or the window
+                    // closes on paper while sixteen connections carry on
+                    // downloading through it.
+                    if let Some(state) = self.fetch_jobs.lock().unwrap().get_mut(&d.id) {
+                        state.stopped_by_us = true;
+                        state.stop.store(true, std::sync::atomic::Ordering::Relaxed);
                     }
                     self.store.set_status(d.id, Status::Queued, None)?;
                     self.scheduler_held.lock().unwrap().insert(d.id);
@@ -1170,7 +1622,6 @@ impl Engine {
             global_speed,
             active,
             queued,
-            aria2_ok: true,
         })
     }
 
@@ -1185,9 +1636,11 @@ impl Engine {
         for (_, mut state) in self.ytdlp_jobs.lock().unwrap().drain() {
             let _ = state.child.start_kill();
         }
-        let mut guard = self.supervisor.lock().unwrap().take();
-        if let Some(sup) = guard.as_mut() {
-            sup.stop().await;
+        // Stopped rather than aborted: the flag lets each connection finish its
+        // current chunk and checkpoint, so closing the app leaves a partial
+        // file that resumes instead of one with holes in it.
+        for (_, state) in self.fetch_jobs.lock().unwrap().drain() {
+            state.stop.store(true, std::sync::atomic::Ordering::Relaxed);
         }
     }
 }
@@ -1243,16 +1696,9 @@ fn stash_blob(id: i64, bytes: &[u8]) -> Result<()> {
     std::fs::write(&path, bytes).with_context(|| format!("writing {}", path.display()))
 }
 
-/// aria2's control file for a given target: `<path>.aria2`.
-pub fn control_file(path: &Path) -> PathBuf {
-    let mut name = path.as_os_str().to_os_string();
-    name.push(".aria2");
-    PathBuf::from(name)
-}
-
 /// GNOME/KDE/COSMIC all honour `notify-send`; absence of it is not an error.
 fn notify(title: &str, body: &str) {
-    if crate::supervisor::which("notify-send").is_none() {
+    if crate::which::which("notify-send").is_none() {
         return;
     }
     let _ = std::process::Command::new("notify-send")
@@ -1328,25 +1774,114 @@ pub fn unique_name(name: &str, taken: impl Fn(&str) -> bool) -> String {
         .unwrap_or_else(|| format!("{name}_{}", now()))
 }
 
-/// Make a server-supplied name safe to use as aria2's `out` option.
+/// Make a name from a server, a page title or the user safe to write to disk.
 ///
-/// The last path segment only: aria2 resolves `out` relative to `dir` and will
-/// happily create parent directories, so a name like `../../.bashrc` would
-/// otherwise write outside the download folder.
+/// The last path segment only: a name like `../../.bashrc` would otherwise
+/// write outside the folder the user chose.
+///
+/// The characters Windows refuses — `< > : " | ? *` — go with it, along with
+/// trailing dots and spaces (which Windows silently drops when it creates the
+/// file, leaving a name we would never find again) and the DOS device names it
+/// still reserves. A video titled "To Rescue a Sinner Like Me | Quennie
+/// Benabaye (Cover)" is otherwise refused outright, before a byte is fetched.
+/// The same rules apply on every platform rather than behind a `cfg`: a folder
+/// is shared, synced and moved, and a name only one system can hold is a name
+/// the download cannot keep.
 pub fn sanitize(name: String) -> String {
+    /// Names MS-DOS gave to devices, which Windows will not let a file take —
+    /// with or without an extension, in any case.
+    const RESERVED: &[&str] = &[
+        "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5",
+        "com6", "com7", "com8", "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5",
+        "lpt6", "lpt7", "lpt8", "lpt9",
+    ];
+    /// Long enough for any real title, short enough to leave room for the
+    /// `.f251.webm.part` an extractor hangs off the stem.
+    const LIMIT: usize = 200;
+
     let base = name.rsplit(['/', '\\']).next().unwrap_or("").to_string();
     let mut out: String = base
         .chars()
-        .map(|c| if c.is_control() { '_' } else { c })
+        .map(|c| if c.is_control() || "<>:\"|?*".contains(c) { '_' } else { c })
         .collect();
-    out = out.trim().trim_start_matches('.').to_string();
+    out = out
+        .trim()
+        .trim_start_matches(['.', ' '])
+        .trim_end_matches(['.', ' '])
+        .to_string();
     if out.is_empty() {
-        out = "download".into();
+        return "download".into();
     }
-    if out.len() > 200 {
-        out.truncate(200);
+    if RESERVED.contains(&split_extension(&out).0.to_ascii_lowercase().as_str()) {
+        out = format!("_{out}");
+    }
+    if out.len() > LIMIT {
+        // Cut the stem, not the extension: a name that loses its `.mp4` is
+        // filed under the wrong category and opens with the wrong program.
+        // Cutting on a byte is not enough either — a title is as likely to be
+        // Japanese as English, and half a character is not a name at all.
+        let (stem, ext) = split_extension(&out);
+        let ext = if ext.len() <= 20 { ext } else { "" };
+        let mut cut = LIMIT.saturating_sub(ext.len()).min(stem.len());
+        while cut > 0 && !stem.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        out = format!("{}{ext}", stem[..cut].trim_end_matches(['.', ' ']));
+        if out.is_empty() || out.starts_with('.') {
+            return "download".into();
+        }
     }
     out
+}
+
+/* ------------------------------------------------------------------ *
+ * HTTP authentication
+ * ------------------------------------------------------------------ */
+
+/// `Authorization: Basic …` for a username and password.
+pub fn basic_auth(username: &str, password: &str) -> Header {
+    use base64::Engine as _;
+    let encoded = base64::engine::general_purpose::STANDARD
+        .encode(format!("{username}:{password}"));
+    Header { name: "Authorization".into(), value: format!("Basic {encoded}") }
+}
+
+/// Move any `user:password@` out of a job's URL and into its headers.
+///
+/// The credentials are the same either way — Basic authentication is what a
+/// server asks for and what a URL of this shape means — but the URL is what
+/// gets stored, logged, shown in the list and copied to the clipboard, and a
+/// password should not be in any of those.
+pub fn strip_userinfo(mut job: Job) -> Job {
+    let Ok(mut url) = url::Url::parse(&job.url) else { return job };
+    let username = percent_decode(url.username());
+    if username.is_empty() {
+        return job;
+    }
+    let password = url.password().map(percent_decode).unwrap_or_default();
+    // Both setters fail only on a URL that cannot have a host — `mailto:`,
+    // `data:` — which is not something this reaches with a username in it.
+    let _ = url.set_username("");
+    let _ = url.set_password(None);
+    job.url = url.to_string();
+    job.headers.retain(|h| !h.name.eq_ignore_ascii_case("authorization"));
+    job.headers.push(basic_auth(&username, &password));
+    job
+}
+
+/// The login configured for this URL's host, if there is one.
+///
+/// Exact host match, deliberately. A wildcard that let `example.com` speak for
+/// `files.example.com` would also let it speak for a host someone else
+/// controls under the same suffix, and a password is not a thing to be
+/// approximate about.
+pub fn authorization_for(url: &str, settings: &Settings) -> Option<Header> {
+    let host = url::Url::parse(url).ok()?.host_str()?.to_ascii_lowercase();
+    settings
+        .credentials
+        .iter()
+        .find(|c| !c.host.trim().is_empty() && c.host.trim().eq_ignore_ascii_case(&host))
+        .map(|c| basic_auth(&c.username, &c.password))
 }
 
 pub fn filename_from_url(url: &str) -> String {
@@ -1355,18 +1890,57 @@ pub fn filename_from_url(url: &str) -> String {
         .and_then(|u| {
             u.path_segments()
                 .and_then(|s| s.filter(|p| !p.is_empty()).next_back())
-                .map(|s| {
-                    percent_decode(s)
-                })
+                .map(percent_decode)
         })
         .filter(|s| !s.is_empty())
+        .map(|name| strip_page_extension(&name))
         .unwrap_or_else(|| "download".into())
+}
+
+/// Drop the extension when the last path segment names a *script* rather than
+/// a file.
+///
+/// `view_video.php` is the address of a player page, and carrying its `.php`
+/// into the download gives a row that claims an extension it will never have,
+/// files itself under "Other" by that extension, and shows the user a name
+/// that was never going to be the name. The real one arrives when the
+/// extractor reports it; until then `view_video` is the honest half of what we
+/// know.
+fn strip_page_extension(name: &str) -> String {
+    const PAGE_EXTENSIONS: &[&str] = &[
+        "php", "php3", "php4", "php5", "asp", "aspx", "jsp", "jspx", "cgi",
+        "pl", "do", "action", "html", "htm", "xhtml", "shtml",
+    ];
+    match name.rsplit_once('.') {
+        Some((stem, ext))
+            if !stem.is_empty()
+                && PAGE_EXTENSIONS.contains(&ext.to_ascii_lowercase().as_str()) =>
+        {
+            stem.to_string()
+        }
+        _ => name.to_string(),
+    }
 }
 
 fn percent_decode(s: &str) -> String {
     percent_encoding::percent_decode_str(s)
         .decode_utf8_lossy()
         .into_owned()
+}
+
+/// How long to wait before attempt number `attempt` is dispatched again.
+///
+/// The outages a retry exists for are measured in seconds to minutes — a DNS
+/// server that stops answering, a wifi handover, a laptop waking up — so the
+/// schedule has to span that. Back-to-back retries span nothing: five of them
+/// against a resolver that is down finish faster than it takes to notice, and
+/// the download fails over a network that came back a moment later. Capped so
+/// a long outage still leaves the last attempt near enough to the failure to
+/// be recognisable as part of it.
+fn retry_backoff(attempt: u8) -> std::time::Duration {
+    const SCHEDULE: &[u64] = &[2, 5, 15, 30, 60];
+    let idx = usize::from(attempt.saturating_sub(1)).min(SCHEDULE.len() - 1);
+    std::time::Duration::from_secs(SCHEDULE[idx])
 }
 
 fn local_minute_of_day() -> u16 {
@@ -1397,10 +1971,6 @@ pub fn queue_open_at(q: &Queue, minute: u16, weekday: u8) -> bool {
     }
 }
 
-/// Re-exported so callers can show aria2's aggregate throughput.
-pub async fn global_stat(aria2: &Aria2) -> Result<GlobalStat> {
-    aria2.global_stat().await
-}
 
 /// Whether yt-dlp belongs between this job and aria2.
 ///
@@ -1419,6 +1989,14 @@ pub async fn global_stat(aria2: &Aria2) -> Result<GlobalStat> {
 /// precisely yt-dlp's job.
 pub fn wants_ytdlp(job: &Job) -> bool {
     job.use_ytdlp.unwrap_or_else(|| {
+        // A manifest is no longer automatically an extractor's problem. HLS
+        // and DASH are fetched and remuxed in process, and the only reason to
+        // hand one to yt-dlp now is that the native path could not cope —
+        // which is decided by trying, not by guessing, and lands here as an
+        // explicit `use_ytdlp` on the retry.
+        if crate::stream::looks_like_manifest(&job.url, &job.mime) {
+            return false;
+        }
         !ytdlp::is_media_response(&job.mime) && ytdlp::looks_like_streaming_site(&job.url)
     })
 }
@@ -1443,5 +2021,74 @@ pub fn job_from_url(url: &str) -> Job {
         output_name: None,
         start_paused: false,
         data: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Tally;
+
+    /// A merged YouTube download: a big video stream, then a small audio one,
+    /// each counted from zero. What the row shows must only ever climb — the
+    /// bar falling back to nothing and setting off again is the complaint this
+    /// exists to answer.
+    ///
+    /// The *fraction* can still step back once, at the moment the audio
+    /// announces a weight nothing knew about: bytes are facts, and a job whose
+    /// weight is learned a stream at a time genuinely does turn out to be
+    /// bigger than it looked. Where the weight is known up front — which is
+    /// every download the picker starts — it does not, and the test below says
+    /// so.
+    #[test]
+    fn the_second_stream_does_not_send_the_bar_backwards() {
+        let mut tally = Tally::default();
+        let mut highest = 0;
+        let mut climbs = |t: &Tally| {
+            assert!(
+                t.downloaded >= highest,
+                "progress went backwards: {} after {highest}",
+                t.downloaded
+            );
+            assert!(t.total >= t.downloaded, "a job cannot weigh less than it has fetched");
+            highest = t.downloaded;
+        };
+
+        for downloaded in [0, 40_000_000, 80_000_000, 100_000_000] {
+            tally.advance(downloaded, 100_000_000);
+            climbs(&tally);
+        }
+        for downloaded in [0, 2_000_000, 4_000_000] {
+            tally.advance(downloaded, 4_000_000);
+            climbs(&tally);
+        }
+
+        assert_eq!(tally.downloaded, 104_000_000, "both streams count");
+        assert_eq!(tally.total, 104_000_000);
+    }
+
+    /// Where the picker weighed the formats up front, the row is scaled to the
+    /// whole job from the first byte and one stream's own figure must not
+    /// shrink it back down.
+    #[test]
+    fn a_weight_known_up_front_stands() {
+        let mut tally = Tally { total: 104_000_000, ..Tally::default() };
+        tally.advance(10_000_000, 100_000_000);
+        assert_eq!(tally.total, 104_000_000);
+        tally.advance(100_000_000, 100_000_000);
+        assert_eq!(tally.total, 104_000_000);
+        tally.advance(4_000_000, 4_000_000);
+        assert_eq!(tally.downloaded, 104_000_000);
+        assert_eq!(tally.total, 104_000_000);
+    }
+
+    /// A resumed stream picks up from what is already on disk rather than from
+    /// zero, which is not a new stream and must not be banked as one.
+    #[test]
+    fn a_resume_is_not_a_second_stream() {
+        let mut tally = Tally::default();
+        tally.advance(30_000_000, 100_000_000);
+        tally.advance(60_000_000, 100_000_000);
+        assert_eq!(tally.downloaded, 60_000_000);
+        assert_eq!(tally.total, 100_000_000);
     }
 }

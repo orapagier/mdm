@@ -7,8 +7,7 @@
 #   the browser  starts the native messaging host on demand, and restarts it
 #                half a second after it dies (extension/src/native.js)
 #   mdm-host     launches the app whenever it cannot reach the app's socket
-#   mdm          starts aria2c and tells it to exit when this pid does
-#   aria2c       outlives the app briefly, and holds the RPC port until it goes
+#   mdm          downloads in its own process, so nothing outlives it
 #
 # Killing any of them alone puts it straight back, so they are stopped from the
 # top of that chain down. The browser is the one link this script will not cut
@@ -17,7 +16,7 @@ set -euo pipefail
 
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/mdm"
 DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/mdm"
-SESSION="$DATA_DIR/aria2.session"
+
 # Mirrors paths::runtime_dir(): XDG_RUNTIME_DIR when the session has one, and a
 # uid-suffixed directory under TMPDIR when it does not.
 if [[ -n "${XDG_RUNTIME_DIR:-}" ]]; then
@@ -38,8 +37,8 @@ usage() {
   cat <<'USAGE'
 Usage: stop.sh [options]
 
-Stops the MDM app, the browser's native messaging host that restarts it, and
-the aria2c daemon they share — in an order that makes them stay stopped.
+Stops the MDM app and the browser's native messaging host that restarts it, in
+an order that makes them stay stopped.
 
   -b, --quit-browser  also close the browser that keeps restarting MDM. Without
                       this, MDM comes back about half a second after it is
@@ -79,18 +78,6 @@ alive() {
 # under `set -e` would abort the script on a non-zero status.
 live_pids()   { local p; for p in $(pgrep -x "$1" 2>/dev/null || true); do alive "$p" && echo "$p"; done; return 0; }
 zombie_pids() { local p; for p in $(pgrep -x "$1" 2>/dev/null || true); do alive "$p" || echo "$p"; done; return 0; }
-
-# Only the aria2c *we* started. Matching on the session path rather than the
-# RPC port matters: the port is a setting the user can change, and killing a
-# stranger's aria2c would take out a download that has nothing to do with MDM.
-our_aria2c() {
-  local pid cmdline
-  for pid in $(pgrep -x aria2c 2>/dev/null || true); do
-    cmdline="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)"
-    [[ "$cmdline" == *"--save-session=$SESSION"* ]] && echo "$pid"
-  done
-  return 0
-}
 
 # Whatever owns a running host: the browser, and the only thing here that can
 # bring MDM back on its own.
@@ -142,12 +129,11 @@ stop_pids() { # stop_pids <label> <grace-seconds> <pid>...
 
 host_pids="$(live_pids mdm-host)"
 app_pids="$(live_pids mdm)"
-aria_pids="$(our_aria2c)"
 dead_apps="$(zombie_pids mdm)"
 # Remembered so the check at the end can tell "never died" from "came back".
-was_running=" $host_pids $app_pids $aria_pids "
+was_running=" $host_pids $app_pids "
 
-if [[ -z "${host_pids}${app_pids}${aria_pids}${dead_apps}" ]]; then
+if [[ -z "${host_pids}${app_pids}${dead_apps}" ]]; then
   say "MDM is not running"
   exit 0
 fi
@@ -240,21 +226,6 @@ fi
 # shellcheck disable=SC2086
 stop_pids "the app" 5 $(live_pids mdm)
 
-# aria2c polls for the app's pid (--stop-with-process) and shuts itself down
-# once it goes, saving its session as it exits. Let it: the app is killed here
-# rather than closed, so the app's own "save and shut down" never runs, and
-# this is the only chance the unfinished downloads get.
-aria_pids="$(our_aria2c)"
-if [[ -n "$aria_pids" && -z "$FORCE" ]]; then
-  say "  waiting for aria2c to save its session and exit"
-  for _ in {1..40}; do
-    aria_pids="$(our_aria2c)"
-    [[ -n "$aria_pids" ]] || break
-    sleep 0.1
-  done
-fi
-# shellcheck disable=SC2086
-stop_pids "aria2c" 5 $aria_pids
 
 # The app clears a stale socket itself on the next start, so this is tidiness
 # rather than a requirement — it just keeps the runtime directory from
@@ -286,7 +257,7 @@ note() { # note <name> <pids>
 }
 note mdm-host "$(live_pids mdm-host)"
 note mdm      "$(live_pids mdm)"
-note aria2c   "$(our_aria2c)"
+
 [[ -n "$(zombie_pids mdm)" ]] && problems+=("a dead mdm (pid $(commas $(zombie_pids mdm))) has not been collected by its parent")
 if command -v ss >/dev/null; then
   holder="$(ss -lntpH "sport = :$port" 2>/dev/null |

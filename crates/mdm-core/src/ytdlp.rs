@@ -1,11 +1,16 @@
 //! yt-dlp integration for streaming sites.
 //!
-//! Streams are the one case a plain HTTP downloader cannot handle: HLS and
-//! DASH arrive as thousands of small fragments behind a manifest. yt-dlp does
-//! the extraction and muxing, but we hand it aria2 as its downloader so the
-//! fragments are still fetched in parallel rather than one at a time.
+//! Narrower than it used to be. HLS and DASH are now fetched and remuxed in
+//! process by [`crate::stream`], which needs no external tool, so what is left
+//! here is the case that genuinely needs an extractor: a *page* that hides its
+//! manifest behind its own JavaScript, which is a per-site problem and one
+//! this project has no business trying to own.
+//!
+//! yt-dlp is optional. Nothing on this path runs unless it is installed, and
+//! the engine only comes here when the native downloader has said it cannot
+//! take a URL.
 
-use crate::supervisor::which;
+use crate::which::which;
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -15,6 +20,15 @@ use std::sync::{Arc, Mutex, OnceLock};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::mpsc;
+
+#[cfg(windows)]
+use std::os::windows::process::CommandExt as _;
+
+/// yt-dlp ships as a console-subsystem binary; this app has none of its own
+/// to inherit, so Windows would otherwise pop up an empty console window for
+/// every probe and every download.
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// One selectable output from `yt-dlp -J`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -170,7 +184,7 @@ const JS_RUNTIMES: &[(&str, &str)] = &[
     ("bun", "bun"),
 ];
 
-/// Enable every JavaScript runtime that is installed.
+/// Enable every JavaScript runtime this machine can offer.
 ///
 /// YouTube obfuscates the `n` query parameter behind a JS challenge. With no
 /// runtime to solve it yt-dlp drops every https format and the extraction
@@ -178,6 +192,12 @@ const JS_RUNTIMES: &[(&str, &str)] = &[
 /// page in the browser changes nothing, because the page was never the
 /// problem. yt-dlp enables only `deno` by default, which almost no desktop
 /// has, so hand it everything present and let it keep its own priority order.
+///
+/// Including MDM's own QuickJS, named by path rather than looked for: it is
+/// deliberately not on anybody's PATH, and it is the reason a machine with
+/// no JavaScript toolchain of any kind can still download from YouTube.
+/// Enabled last, so a Deno or Node the user installed themselves is still
+/// what yt-dlp reaches for first.
 fn apply_js_runtimes(cmd: &mut Command) {
     if !supports_js_runtimes() {
         return;
@@ -186,6 +206,9 @@ fn apply_js_runtimes(cmd: &mut Command) {
         if which(exe).is_some() {
             cmd.arg("--js-runtimes").arg(name);
         }
+    }
+    if let Some(path) = crate::tools::owned_quickjs() {
+        cmd.arg("--js-runtimes").arg(format!("quickjs:{}", path.display()));
     }
 }
 
@@ -199,14 +222,21 @@ fn supports_js_runtimes() -> bool {
     *SUPPORTED.get_or_init(|| {
         binary()
             .ok()
-            .and_then(|bin| std::process::Command::new(bin).arg("--help").output().ok())
+            .and_then(|bin| {
+                let mut cmd = std::process::Command::new(bin);
+                cmd.arg("--help");
+                #[cfg(windows)]
+                cmd.creation_flags(CREATE_NO_WINDOW);
+                cmd.output().ok()
+            })
             .is_some_and(|out| String::from_utf8_lossy(&out.stdout).contains("--js-runtimes"))
     })
 }
 
 /// Is there no JavaScript runtime at all? Used only to explain a failure.
 fn no_js_runtime() -> bool {
-    JS_RUNTIMES.iter().all(|(_, exe)| which(exe).is_none())
+    crate::tools::owned_quickjs().is_none()
+        && JS_RUNTIMES.iter().all(|(_, exe)| which(exe).is_none())
 }
 
 /// Turn a challenge-solving failure into the one thing that fixes it.
@@ -215,11 +245,15 @@ fn no_js_runtime() -> bool {
 /// and reinstalling; it is really a missing dependency on this machine.
 fn js_challenge_advice(line: &str) -> String {
     if no_js_runtime() {
+        // Not an instruction any more. MDM downloads its own JavaScript
+        // runtime, so having none means that download has not happened yet or
+        // did not work — and telling someone to install ninety megabytes of
+        // Node to fix it would be advice for a problem they do not have.
         return format!(
-            "YouTube's player challenge could not be solved: yt-dlp needs a \
-             JavaScript runtime and none is installed. Fix it with: {}   \
-             (deno, bun and quickjs also work). yt-dlp said: {line}",
-            crate::distro::install("nodejs")
+            "YouTube's player challenge could not be solved: the JavaScript \
+             runtime MDM fetches for this is not in place yet. It arrives \
+             shortly after the app starts, so trying again in a moment is \
+             usually the whole of the fix. yt-dlp said: {line}"
         );
     }
     if !supports_js_runtimes() {
@@ -307,6 +341,18 @@ fn sweep_info_cache(dir: &Path) {
     }
 }
 
+/// Discard a cached extraction so the next attempt re-resolves the page
+/// instead of reusing it.
+///
+/// A download that just failed and is about to be retried is exactly the
+/// case `INFO_REUSE` was not built for: the cache exists to skip a *repeat*
+/// extraction moments after a successful probe, not to hand a failing
+/// download the same signed URLs that may be why it failed. Keeping it would
+/// spend every retry on the one extraction already shown not to work.
+pub fn forget_info(url: &str) {
+    let _ = std::fs::remove_file(info_cache_path(url));
+}
+
 /// The probe's result for this URL, if it is recent enough to download from.
 fn fresh_info_json(url: &str) -> Option<std::path::PathBuf> {
     let path = info_cache_path(url);
@@ -353,6 +399,25 @@ fn probe_locks() -> &'static ProbeLocks {
     LOCKS.get_or_init(Default::default)
 }
 
+/// Is this the kind of failure a newer yt-dlp usually fixes?
+///
+/// Not a guess at the cause — nothing here can know that — but a reading of
+/// which failures have a fix that ships in a release rather than one the
+/// user could do anything about. An unsolved player challenge, an extractor
+/// that could not find what it expected on the page, a signature it could
+/// not read: all of those are yt-dlp having been overtaken by a site. A 403
+/// or a private video is not.
+pub fn looks_out_of_date(message: &str) -> bool {
+    let lower = message.to_lowercase();
+    is_js_challenge_failure(&lower)
+        || lower.contains("unable to extract")
+        || lower.contains("failed to extract")
+        || lower.contains("unable to parse")
+        || lower.contains("signature extraction failed")
+        || lower.contains("please report this issue")
+        || lower.contains("update to the latest version")
+}
+
 /// Does this failure mean the player challenge went unsolved?
 fn is_js_challenge_failure(line: &str) -> bool {
     let lower = line.to_lowercase();
@@ -361,17 +426,21 @@ fn is_js_challenge_failure(line: &str) -> bool {
         || lower.contains("challenge solver")
 }
 
+/// The yt-dlp to run: MDM's own copy first, then whatever is on PATH.
+///
+/// Which of the two it is matters to [`crate::tools`], which may update the
+/// first and must never touch the second. Everything here simply runs it.
 fn binary() -> Result<std::path::PathBuf> {
-    which("yt-dlp").ok_or_else(|| {
+    crate::tools::ytdlp().ok_or_else(|| {
         anyhow::anyhow!(
-            "yt-dlp not found on PATH — install it with: {}",
+            "yt-dlp is not available yet — MDM installs its own copy shortly after it starts. Or install one yourself with: {}",
             crate::distro::install("yt-dlp")
         )
     })
 }
 
 pub fn available() -> bool {
-    which("yt-dlp").is_some()
+    crate::tools::ytdlp().is_some()
 }
 
 /// How many times a probe is worth repeating before the refusal is believed.
@@ -394,8 +463,11 @@ async fn run_probe(
     url: &str,
     cookies_from: Option<&str>,
     extra: &[String],
+    skip_hls: bool,
 ) -> Result<std::process::Output> {
     let mut cmd = Command::new(bin);
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
     cmd.args([
         "-J",
         "--no-warnings",
@@ -404,6 +476,17 @@ async fn run_probe(
         "--socket-timeout",
         "15",
     ]);
+    // YouTube describes the same video twice: once in the player API JSON,
+    // and again in an HLS manifest that has to be fetched separately. For an
+    // ordinary video the second copy adds nothing the picker can offer that
+    // the first did not — it is where the two nameless "audio · mp4 ·
+    // Default" rows came from — and fetching it measured as a third of the
+    // whole probe on a slow link. It is *not* redundant for a live stream,
+    // which is served over HLS and nothing else, so `probe` asks again
+    // without this when an extraction comes back with no formats at all.
+    if skip_hls && is_youtube(url) {
+        cmd.arg("--extractor-args").arg("youtube:skip=hls");
+    }
     apply_cookies(&mut cmd, cookies_from);
     apply_js_runtimes(&mut cmd);
     for arg in extra {
@@ -414,6 +497,244 @@ async fn run_probe(
         .output()
         .await
         .context("running yt-dlp -J")
+}
+
+/* ---------------------------------------------------------------------- *
+ * Planning a download MDM can do itself
+ * ---------------------------------------------------------------------- */
+
+/// One stream of a resolved download: an address, and what is behind it.
+#[derive(Debug, Clone)]
+pub struct Track {
+    pub url: String,
+    /// What the site expects to see on a request for it. Signed CDN links are
+    /// routinely bound to the user agent and the referring page.
+    pub headers: Vec<crate::model::Header>,
+    /// yt-dlp's transport: `https` is a file we can fetch, anything else
+    /// (`m3u8_native`, `http_dash_segments`, `websocket_frag`) is not.
+    pub protocol: String,
+    /// yt-dlp's own container name — `mp4_dash`, `m4a_dash`, `webm_dash`.
+    pub container: String,
+    pub ext: String,
+    pub filesize: Option<u64>,
+    /// Whether yt-dlp would fetch this as a list of fragments rather than as
+    /// one file. A fragmented plan is a manifest under another name.
+    pub fragmented: bool,
+}
+
+/// What one format expression resolves to for one page.
+#[derive(Debug, Clone)]
+pub struct Plan {
+    /// The video's own title, so the file can be named before a byte arrives
+    /// rather than when yt-dlp gets round to saying so.
+    pub title: String,
+    pub tracks: Vec<Track>,
+}
+
+/// The two container families MDM can rebuild.
+///
+/// These are lists of *containers*, not codecs, and that is the point: a
+/// remux lifts samples and the codec description that came with them and
+/// copies both untouched, so AV1 in MP4 rebuilds exactly as well as H.264,
+/// and VP9 in WebM exactly as well as either. What it will not do is put a
+/// track from one family into a file of the other: that would mean
+/// translating a codec description between two ways of writing it, and
+/// translating means understanding — the line neither muxer crosses.
+const MP4_FAMILY: &[&str] = &["mp4_dash", "m4a_dash", "mp4", "m4a", "mov", "3gp"];
+const MKV_FAMILY: &[&str] = &["webm_dash", "webm", "mkv"];
+
+impl Plan {
+    /// The total weight of the download, when every track stated one.
+    pub fn size(&self) -> Option<u64> {
+        self.tracks.iter().map(|t| t.filesize).sum()
+    }
+
+    /// What this plan is, in one line, for the log that says which
+    /// downloader took the job and why.
+    pub fn describe(&self) -> String {
+        let parts: Vec<String> = self
+            .tracks
+            .iter()
+            .map(|t| {
+                let what = packaging(t);
+                if t.fragmented {
+                    format!("{what} in fragments")
+                } else if t.protocol != "https" {
+                    format!("{what} over {}", t.protocol)
+                } else {
+                    what.to_string()
+                }
+            })
+            .collect();
+        match self.size() {
+            Some(size) => format!("{} ({})", parts.join(" + "), crate::human_bytes(size as i64)),
+            None => parts.join(" + "),
+        }
+    }
+
+    /// Whether MDM can fetch and rebuild this itself.
+    ///
+    /// Everything has to line up: plain HTTPS files rather than a fragment
+    /// list, and a container the remux can read. One WebM audio track — which
+    /// is what YouTube offers when Opus is the best sound available — is
+    /// enough to send the whole job back to yt-dlp, because half a native
+    /// merge is not a file anyone can play.
+    pub fn native(&self) -> bool {
+        let Some((_, rest)) = self.tracks.split_first() else {
+            return false;
+        };
+        if !self.tracks.iter().all(fetchable) {
+            return false;
+        }
+        // One stream is the whole file already — a progressive format, or
+        // sound on its own — and moving it into place is the entire job.
+        // Nothing is rebuilt, so the container does not have to be one we
+        // could rebuild: it is saved under its own extension and played by
+        // whatever plays it.
+        if rest.is_empty() {
+            return true;
+        }
+        // Merged, and so all of one family or all of the other.
+        let all = |family: &[&str]| self.tracks.iter().all(|t| family.contains(&packaging(t)));
+        all(MP4_FAMILY) || all(MKV_FAMILY)
+    }
+}
+
+/// Whether this stream is a file MDM could fetch at all.
+///
+/// Ordinary HTTPS and one address. A fragment list is a manifest wearing a
+/// format's clothes, and `m3u8_native` or `http_dash_segments` say outright
+/// that there is no single file behind this.
+fn fetchable(t: &Track) -> bool {
+    t.protocol == "https" && !t.fragmented && !t.url.is_empty()
+}
+
+/// What this stream is packaged as: yt-dlp states a container for the
+/// streams it means to merge and leaves it off the ones it does not, in
+/// which case the extension is the only thing that says.
+fn packaging(t: &Track) -> &str {
+    if t.container.is_empty() { &t.ext } else { &t.container }
+}
+
+/// Read one format out of yt-dlp's JSON.
+fn track_from(v: &serde_json::Value) -> Track {
+    let text = |key: &str| v.get(key).and_then(serde_json::Value::as_str).unwrap_or("").to_string();
+    Track {
+        url: text("url"),
+        headers: v
+            .get("http_headers")
+            .and_then(serde_json::Value::as_object)
+            .map(|map| {
+                map.iter()
+                    .filter_map(|(name, value)| {
+                        Some(crate::model::Header {
+                            name: name.clone(),
+                            value: value.as_str()?.to_string(),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        protocol: text("protocol"),
+        container: text("container"),
+        ext: text("ext"),
+        filesize: v
+            .get("filesize")
+            .and_then(serde_json::Value::as_u64)
+            .or_else(|| v.get("filesize_approx").and_then(serde_json::Value::as_u64)),
+        fragmented: v.get("fragments").is_some_and(|f| !f.is_null()),
+    }
+}
+
+/// A selection that keeps both halves of a video in one container family.
+///
+/// The expression to fall back on when the one that was asked for needs a
+/// merge nothing on this machine can do. It is not better than the default —
+/// it says nothing about codecs, so a desktop with no HEVC decoder could be
+/// handed HEVC by it — but it is *finishable*, which on a machine without
+/// ffmpeg the other one may not be.
+pub const MATCHED_FAMILIES: &str =
+    "bestvideo*[ext=mp4]+bestaudio[ext=m4a]/bestvideo*[ext=webm]+bestaudio[ext=webm]/b[ext=mp4]/b[ext=webm]/b";
+
+/// Whether anything on this machine can merge what MDM cannot.
+///
+/// yt-dlp puts two streams together by calling ffmpeg, so without ffmpeg a
+/// selection MDM will not merge is a selection that simply fails. Knowing
+/// that in advance is what lets a different one be chosen instead.
+pub fn can_merge() -> bool {
+    which("ffmpeg").is_some()
+}
+
+/// Resolve a format expression into the streams it actually names.
+///
+/// This is yt-dlp doing the one thing only it can — turning `bv*+ba` and a
+/// page into signed addresses — and then getting out of the way. Format
+/// selection stays yt-dlp's, because a selector is a small language with
+/// years of behaviour behind it and reimplementing it would be exactly the
+/// kind of borrowed rot this module exists to avoid.
+///
+/// Cheap where it matters: with a warm extraction this is a second of local
+/// work and no network at all, because `--load-info-json` re-selects against
+/// the JSON the picker already fetched.
+pub async fn plan(
+    url: &str,
+    format: &str,
+    cookies_from: Option<&str>,
+    extra: &[String],
+) -> Result<Plan> {
+    let bin = binary()?;
+    let mut cmd = Command::new(&bin);
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    cmd.args(["-J", "--no-warnings", "--no-playlist", "--simulate", "-f", format]);
+    apply_cookies(&mut cmd, cookies_from);
+    apply_js_runtimes(&mut cmd);
+    for arg in extra {
+        cmd.arg(arg);
+    }
+    // The picker's extraction, when it is still warm: the same reuse the
+    // download itself does, and the reason this costs no network.
+    //
+    // Read, never written. What comes back from a run with `-f` is an
+    // extraction that has *already chosen*, and yt-dlp re-selecting against
+    // one of those does not select again — asked for `bv*[vcodec^=avc1]
+    // [height<=360]+ba[ext=m4a]` it answered with progressive format 18,
+    // which is neither of the streams named. Only `probe`, which asks
+    // without a selector, may fill this cache.
+    let reused = fresh_info_json(url);
+    match &reused {
+        Some(path) => {
+            cmd.arg("--load-info-json").arg(path);
+        }
+        None => {
+            cmd.arg(url);
+        }
+    }
+
+    let out = cmd
+        .stdin(Stdio::null())
+        .output()
+        .await
+        .context("running yt-dlp to resolve the formats")?;
+    if !out.status.success() {
+        bail!("{}", error_line(&out.stderr));
+    }
+
+    let v: serde_json::Value =
+        serde_json::from_slice(&out.stdout).context("reading yt-dlp's plan")?;
+    let title = v
+        .get("title")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+
+    // Two shapes: a merge names its parts, a single format is the object
+    // itself. Both arrive here as a list of tracks.
+    let tracks = match v.get("requested_formats").and_then(serde_json::Value::as_array) {
+        Some(formats) => formats.iter().map(track_from).collect(),
+        None => vec![track_from(&v)],
+    };
+    Ok(Plan { title, tracks })
 }
 
 /// Ask yt-dlp what a page offers, without downloading anything.
@@ -449,7 +770,7 @@ pub async fn probe(
     // quarter of grabs failed on a page that was perfectly readable. Only
     // failures that are not settled facts are repeated, so a private video
     // still fails once.
-    let mut out = run_probe(&bin, url, cookies_from, extra).await?;
+    let mut out = run_probe(&bin, url, cookies_from, extra, true).await?;
     let attempts = if insist { PROBE_ATTEMPTS } else { 1 };
     for attempt in 2..=attempts {
         if out.status.success() || is_permanent_error(&error_line(&out.stderr)) {
@@ -459,7 +780,21 @@ pub async fn probe(
         // an immediate repeat is the shape it is watching for.
         tokio::time::sleep(std::time::Duration::from_millis(600 * u64::from(attempt - 1))).await;
         log::info!("{url}: no usable answer, asking again ({attempt} of {attempts})");
-        out = run_probe(&bin, url, cookies_from, extra).await?;
+        out = run_probe(&bin, url, cookies_from, extra, true).await?;
+    }
+
+    // A live stream is served over HLS and nothing else, so the manifest the
+    // fast path skipped was the only thing describing it. Everything the
+    // picker could offer is missing rather than merely thinner, which is what
+    // this asks again for — at the cost of one extra extraction on the rare
+    // page that needs it, rather than a slower probe on every page that
+    // does not.
+    if out.status.success() && !offers_formats(&out.stdout) {
+        log::info!("{url}: nothing to download without the HLS manifest, asking again with it");
+        let full = run_probe(&bin, url, cookies_from, extra, false).await?;
+        if full.status.success() && offers_formats(&full.stdout) {
+            out = full;
+        }
     }
 
     if !out.status.success() {
@@ -491,6 +826,23 @@ pub async fn probe(
         store_info_json(url, &out.stdout);
     }
     Ok(info)
+}
+
+/// Did this extraction come back with anything to download?
+///
+/// A playlist counts: it carries entries rather than formats, and asking
+/// again would only produce the same list more slowly. Output that cannot be
+/// parsed at all counts too — the caller reports that failure far better than
+/// a second extraction would.
+fn offers_formats(stdout: &[u8]) -> bool {
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(stdout) else {
+        return true;
+    };
+    let has_formats = v
+        .get("formats")
+        .and_then(|f| f.as_array())
+        .is_some_and(|a| !a.is_empty());
+    has_formats || v.get("entries").is_some()
 }
 
 /// Fold yt-dlp's `-J` output into what the picker needs.
@@ -616,11 +968,25 @@ fn parse_format(v: &serde_json::Value) -> Option<Format> {
 /// distinguishable from yt-dlp's ordinary chatter on the same stream.
 const TAG: &str = "@MDM@";
 
-/// Marker for the final-path line emitted by `--exec after_move`.
-const FILE_TAG: &str = "@MDMFILE@";
-
-/// Marker for the title line emitted by `--exec pre_process`.
-const NAME_TAG: &str = "@MDMNAME@";
+/// Where `--print-to-file` leaves the title and the final path for one
+/// download, instead of writing them to stdout as `--print` does.
+///
+/// `--print` was the first thing tried, and it works — right up until the
+/// download actually needs to show progress. Confirmed by hand: the same
+/// `-f 160+bestaudio` download that prints dozens of `--progress-template`
+/// lines a second normally prints *none* of them, on either leg of the
+/// merge, the moment a `--print` is added — yt-dlp answers "print me
+/// something" by going quiet about everything else it would otherwise write
+/// to stdout, progress included. That is what a download stuck at 0% and
+/// then instantly "done" actually was. `--print-to-file` asks for the exact
+/// same values without touching stdout at all.
+fn print_file_paths() -> (std::path::PathBuf, std::path::PathBuf) {
+    let mut buf = [0u8; 8];
+    let _ = getrandom::fill(&mut buf);
+    let token: String = buf.iter().map(|b| format!("{b:02x}")).collect();
+    let dir = crate::paths::runtime_dir().join("print");
+    (dir.join(format!("{token}.name.txt")), dir.join(format!("{token}.file.txt")))
+}
 
 pub struct YtDlpHandle {
     pub child: Child,
@@ -637,6 +1003,28 @@ pub struct YtDlpHandle {
 /// that never starts, over a character the name was always allowed to contain.
 fn literal(name: &str) -> String {
     name.replace('%', "%%")
+}
+
+/// Is this a page served from YouTube's own domains?
+///
+/// Its CDN (googlevideo.com) hands progressive formats out from signed,
+/// per-request URLs, and answers more than one simultaneous range request
+/// against the same signed URL with a response aria2 cannot parse — not a
+/// clean 403, but a malformed status line, which aria2 reports as exit 22
+/// ("HTTP response header was bad or unexpected") rather than as a rejected
+/// request. yt-dlp's own downloader never trips this because it never
+/// splits a file into parallel ranged connections in the first place.
+fn is_youtube(url: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(url) else {
+        return false;
+    };
+    let Some(host) = parsed.host_str() else {
+        return false;
+    };
+    let host = host.trim_start_matches("www.").to_lowercase();
+    ["youtube.com", "youtu.be"]
+        .iter()
+        .any(|h| host == *h || host.ends_with(&format!(".{h}")))
 }
 
 /// Start a yt-dlp download, streaming progress over `tx`.
@@ -656,6 +1044,8 @@ pub async fn download(
 ) -> Result<YtDlpHandle> {
     let bin = binary()?;
     let mut cmd = Command::new(bin);
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
     cmd.current_dir(dir)
         .arg("--no-warnings")
         .arg("--newline")
@@ -684,34 +1074,32 @@ pub async fn download(
             Some(name) if !name.is_empty() => format!("{}.%(ext)s", literal(name)),
             _ => "%(title)s [%(id)s].%(ext)s".to_string(),
         })
-        // aria2 only handles plain http/ftp, so a fragmented stream (HLS, and
-        // DASH served as segments) never reaches it and reverts to yt-dlp's own
-        // downloader — which fetches one fragment at a time unless told
-        // otherwise. Matching the connection count keeps those streams as
-        // parallel as everything else instead of an order of magnitude slower.
+        // yt-dlp fetches one fragment at a time unless told otherwise, which
+        // on a stream of thousands of fragments is an order of magnitude
+        // slower than it needs to be. There is no external downloader to hand
+        // it any more, so this is the only lever left.
         .arg("--concurrent-fragments")
-        .arg(connections.clamp(1, crate::aria2::MAX_CONNECTIONS).to_string())
-        .arg("--downloader")
-        .arg("aria2c")
-        // `--summary-interval=1` is not cosmetic: an external downloader owns
-        // the transfer, so yt-dlp's own progress hook fires exactly once, at
-        // 100%. Without aria2's own readout a download sits at zero bytes for
-        // its entire life and then jumps to done, which reads as a hang.
-        .arg("--downloader-args")
-        .arg(format!(
-            "aria2c:-x{c} -s{c} -k1M --file-allocation=falloc \
-             --console-log-level=warn --summary-interval=1",
-            c = connections.clamp(1, crate::aria2::MAX_CONNECTIONS)
-        ))
+        .arg(connections.clamp(1, crate::fetch::MAX_CONNECTIONS).to_string());
+
+
+    let (name_file, file_file) = print_file_paths();
+    if let Some(dir) = name_file.parent() {
+        std::fs::create_dir_all(dir).context("creating the print-to-file directory")?;
+    }
+
+    cmd
         // yt-dlp chooses the output name (and the container, after muxing),
         // so ask it to report the final path; nothing else knows it.
-        .arg("--exec")
-        .arg(format!("after_move:printf '{FILE_TAG}%s\\n' {{}}"))
+        // `--print-to-file` rather than `--print`: see `print_file_paths`.
+        .arg("--print-to-file")
+        .arg("after_move:%(filepath)s")
+        .arg(&file_file)
         // pre_process fires right after extraction, so the title is available
-        // before the download starts. --print would be the neater tool but it
-        // implies --simulate at this stage, which would download nothing.
-        .arg("--exec")
-        .arg(format!("pre_process:printf '{NAME_TAG}%%s\\n' %(title)q"))
+        // before the download starts. This does not imply --simulate the way
+        // a bare `--print TEMPLATE` would; the WHEN prefix changes that.
+        .arg("--print-to-file")
+        .arg("pre_process:%(title)s")
+        .arg(&name_file)
         .arg("--progress-template")
         .arg(format!(
             "download:{TAG}%(progress.downloaded_bytes)s|%(progress.total_bytes)s|\
@@ -758,6 +1146,15 @@ pub async fn download(
         let sink = last_error.clone();
         tokio::spawn(async move {
             let mut lines = BufReader::new(stderr).lines();
+            // When an external downloader (aria2c) fails, yt-dlp dumps its
+            // whole captured stderr verbatim ahead of its own one-line
+            // "ERROR: aria2c exited with code N" summary — aria2's own
+            // `[ERROR]`/`[WARN]` lines carry the actual reason (a bad status
+            // line, a redirect, a timeout) but never contain the literal
+            // "ERROR:" our filter used to require, so they were read and then
+            // silently dropped. Keeping the tail of everything printed
+            // means that reason survives into the message the UI shows.
+            let mut recent: std::collections::VecDeque<String> = std::collections::VecDeque::with_capacity(16);
             while let Ok(Some(line)) = lines.next_line().await {
                 if line.contains("ERROR:") {
                     // Strip yt-dlp's own prefixes so the UI shows the cause.
@@ -767,76 +1164,108 @@ pub async fn download(
                         .unwrap_or(line.trim());
                     let msg = if is_js_challenge_failure(raw) {
                         js_challenge_advice(raw)
+                    } else if !recent.is_empty() {
+                        // The external downloader's own diagnostic, printed
+                        // just before this summary line, is more specific
+                        // than the summary itself.
+                        format!("{raw}: {}", recent.iter().cloned().collect::<Vec<_>>().join(" | "))
                     } else {
                         raw.to_string()
                     };
                     log::warn!("yt-dlp: {msg}");
                     *sink.lock().unwrap() = Some(msg);
+                    recent.clear();
+                    continue;
                 }
+                let trimmed = line.trim();
+                if !trimmed.is_empty() {
+                    if recent.len() == recent.capacity() {
+                        recent.pop_front();
+                    }
+                    recent.push_back(trimmed.to_string());
+                }
+            }
+            // The process ended without ever printing a line containing
+            // "ERROR:" — a Python traceback from an unhandled exception, or
+            // being killed outright, both look like this. Falling through to
+            // engine.rs's generic "yt-dlp exited with exit code: 1" then
+            // tells the user nothing they did not already know from the
+            // status column; whatever yt-dlp did print, even unlabelled, is
+            // more than that.
+            if !recent.is_empty() && sink.lock().unwrap().is_none() {
+                *sink.lock().unwrap() =
+                    Some(recent.iter().cloned().collect::<Vec<_>>().join(" | "));
             }
         });
     }
 
     tokio::spawn(async move {
         let mut lines = BufReader::new(stdout).lines();
-        // aria2 prints one summary line per active download; yt-dlp runs it
-        // once for the video stream and again for the audio, so the counts are
-        // summed across gids to describe the job rather than the segment.
-        let mut segments: HashMap<String, Segment> = HashMap::new();
-        // While aria2 is reporting, yt-dlp's own line is strictly worse — it
-        // arrives once per format, at 100%, and would drag the total backwards
-        // when the second format starts from zero.
-        let mut aria2_reporting = false;
+        // yt-dlp's own `[download]` line is the only progress there is now.
+        // It used to be the worse of two, because an external downloader
+        // reported per-segment underneath it; with that gone there is nothing
+        // to prefer over it and nothing to suppress it for.
+        let mut title_sent = false;
+        // Polled rather than watched: the title is a handful of bytes written
+        // once, long before the download is otherwise worth checking on, and
+        // a filesystem watcher would be a lot of machinery for that.
+        let mut poll = tokio::time::interval(std::time::Duration::from_millis(300));
+        poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
-        while let Ok(Some(line)) = lines.next_line().await {
-            let line = line.trim();
-            if let Some(seg) = parse_aria2_summary(line) {
-                aria2_reporting = true;
-                segments.insert(seg.gid.clone(), seg);
-                if tx.send(Event::Progress(total_of(&segments))).await.is_err() {
-                    break;
+        loop {
+            tokio::select! {
+                line = lines.next_line() => {
+                    let Ok(Some(line)) = line else { break };
+                    let line = line.trim();
+                    if let Some(name) = parse_already_downloaded(line) {
+                        if tx.send(Event::Skipped(name.to_string())).await.is_err() {
+                            return;
+                        }
+                        continue;
+                    }
+                    let Some(rest) = line.strip_prefix(TAG) else {
+                        continue;
+                    };
+                    if let Some(p) = parse_progress(rest) {
+                        if tx.send(Event::Progress(p)).await.is_err() {
+                            return; // receiver gone: the download was cancelled
+                        }
+                    }
                 }
-                continue;
-            }
-            if let Some(path) = line.strip_prefix(FILE_TAG) {
-                let path = path.trim();
-                if !path.is_empty()
-                    && tx
-                        .send(Event::Finished(std::path::PathBuf::from(path)))
-                        .await
-                        .is_err()
-                {
-                    break;
-                }
-                continue;
-            }
-            if let Some(name) = parse_already_downloaded(line) {
-                if tx.send(Event::Skipped(name.to_string())).await.is_err() {
-                    break;
-                }
-                continue;
-            }
-            if let Some(title) = line.strip_prefix(NAME_TAG) {
-                let title = title.trim();
-                if !title.is_empty()
-                    && tx.send(Event::Title(title.to_string())).await.is_err()
-                {
-                    break;
-                }
-                continue;
-            }
-            let Some(rest) = line.strip_prefix(TAG) else {
-                continue;
-            };
-            if aria2_reporting {
-                continue;
-            }
-            if let Some(p) = parse_progress(rest) {
-                if tx.send(Event::Progress(p)).await.is_err() {
-                    break; // receiver gone: the download was cancelled
+                _ = poll.tick(), if !title_sent => {
+                    if let Ok(title) = tokio::fs::read_to_string(&name_file).await {
+                        let title = title.trim();
+                        if !title.is_empty() {
+                            title_sent = true;
+                            if tx.send(Event::Title(title.to_string())).await.is_err() {
+                                return;
+                            }
+                        }
+                    }
                 }
             }
         }
+
+        // stdout closed: yt-dlp is done (or as good as). One last look at
+        // both files catches whatever landed between the previous poll tick
+        // and here — the final path always does, since after_move is the
+        // last thing yt-dlp does before exiting.
+        if !title_sent {
+            if let Ok(title) = tokio::fs::read_to_string(&name_file).await {
+                let title = title.trim();
+                if !title.is_empty() {
+                    let _ = tx.send(Event::Title(title.to_string())).await;
+                }
+            }
+        }
+        if let Ok(path) = tokio::fs::read_to_string(&file_file).await {
+            let path = path.trim();
+            if !path.is_empty() {
+                let _ = tx.send(Event::Finished(std::path::PathBuf::from(path))).await;
+            }
+        }
+        let _ = tokio::fs::remove_file(&name_file).await;
+        let _ = tokio::fs::remove_file(&file_file).await;
     });
 
     Ok(YtDlpHandle { child, last_error })
@@ -852,86 +1281,6 @@ fn parse_already_downloaded(line: &str) -> Option<&str> {
     let rest = line.strip_prefix("[download] ")?;
     let (name, _) = rest.split_once(" has already been downloaded")?;
     Some(name.trim()).filter(|name| !name.is_empty())
-}
-
-/// One download's line in aria2's progress summary.
-#[derive(Debug, Clone)]
-struct Segment {
-    gid: String,
-    downloaded: i64,
-    total: i64,
-    speed: i64,
-    connections: i64,
-    seen: std::time::Instant,
-}
-
-/// Fold every segment aria2 has reported into one figure for the job.
-fn total_of(segments: &HashMap<String, Segment>) -> Progress {
-    // A segment aria2 has stopped mentioning has finished; its bytes still
-    // count, but quoting its last speed would invent throughput that stopped.
-    const CURRENT: std::time::Duration = std::time::Duration::from_secs(3);
-    let mut progress = Progress { downloaded: 0, total: 0, speed: 0, connections: 0 };
-    for seg in segments.values() {
-        progress.downloaded += seg.downloaded;
-        progress.total += seg.total;
-        if seg.seen.elapsed() < CURRENT {
-            progress.speed += seg.speed;
-            progress.connections += seg.connections;
-        }
-    }
-    if progress.total <= 0 {
-        progress.total = -1;
-    }
-    progress
-}
-
-/// Parse `[#8d4a4d 31MiB/114MiB(27%) CN:16 DL:10MiB ETA:8s]`.
-///
-/// This readout is the only progress there is once an external downloader owns
-/// the transfer, so it is worth reading even though aria2 rounds it for human
-/// eyes; the exact byte count arrives with the finished file.
-fn parse_aria2_summary(line: &str) -> Option<Segment> {
-    let body = line.strip_prefix("[#")?.strip_suffix(']')?;
-    let mut fields = body.split_whitespace();
-    let gid = fields.next()?.to_owned();
-    let (mut downloaded, mut total, mut speed, mut connections) = (None, None, 0, 0);
-    for field in fields {
-        if let Some(rate) = field.strip_prefix("DL:") {
-            speed = parse_human_size(rate).unwrap_or(0);
-        } else if let Some(n) = field.strip_prefix("CN:") {
-            connections = n.parse().unwrap_or(0);
-        } else if let Some((done, whole)) = field.split_once('/') {
-            // "114MiB(27%)" — the percentage is derivable, so drop it.
-            downloaded = parse_human_size(done);
-            total = parse_human_size(whole.split('(').next().unwrap_or(whole));
-        }
-    }
-    let total = total?;
-    Some(Segment {
-        gid,
-        downloaded: downloaded?,
-        total: if total > 0 { total } else { -1 },
-        speed,
-        connections,
-        seen: std::time::Instant::now(),
-    })
-}
-
-/// aria2 writes sizes for people: `0B`, `368KiB`, `7.7MiB`, `6.5GiB`.
-fn parse_human_size(s: &str) -> Option<i64> {
-    let split = s
-        .find(|c: char| !c.is_ascii_digit() && c != '.')
-        .unwrap_or(s.len());
-    let value: f64 = s[..split].parse().ok()?;
-    let scale: f64 = match &s[split..] {
-        "" | "B" => 1.0,
-        "KiB" => 1024.0,
-        "MiB" => 1024.0 * 1024.0,
-        "GiB" => 1024.0 * 1024.0 * 1024.0,
-        "TiB" => 1024.0 * 1024.0 * 1024.0 * 1024.0,
-        _ => return None,
-    };
-    Some((value * scale) as i64)
 }
 
 /// `downloaded|total|total_estimate|speed`, where yt-dlp writes "NA" for any
@@ -960,6 +1309,71 @@ fn parse_progress(s: &str) -> Option<Progress> {
         // yt-dlp says nothing about connections; aria2's own readout does.
         connections: 0,
     })
+}
+
+/// The host a transport error was complaining about, if it named one.
+///
+/// Python spells it `host='www.youtube.com'`; aria2 and curl put it in the URL
+/// instead. Only the name is wanted — a message that says which site could not
+/// be reached is the difference between "the app is broken" and "my connection
+/// dropped".
+fn failing_host(message: &str) -> Option<String> {
+    let rest = message.split("host='").nth(1)?;
+    let host = rest.split('\'').next()?;
+    (!host.is_empty()).then(|| host.to_owned())
+}
+
+/// Say a failure the way someone who did not write yt-dlp would say it.
+///
+/// The tool reports transport trouble as the Python exception it caught, so a
+/// resolver that blinked arrives as `Unable to download API page:
+/// HTTPSConnection(host='www.youtube.com', port=443): Failed to resolve
+/// 'www.youtube.com' ([Errno 11001] getaddrinfo failed) (caused by
+/// TransportError(…))`. Under a progress bar, clipped to one line, that reads
+/// as the app having broken — when what it means is that the machine could not
+/// look up an address, which the user can actually do something about.
+///
+/// Anything unrecognised is passed through untouched: a message we cannot
+/// improve on is still better than one we have replaced with a guess.
+pub fn plain_error(message: &str) -> String {
+    let lower = message.to_lowercase();
+    let site = failing_host(message)
+        .map(|h| format!(" {h}"))
+        .unwrap_or_default();
+
+    const DNS: &[&str] = &[
+        "getaddrinfo failed",
+        "failed to resolve",
+        "name or service not known",
+        "nodename nor servname",
+        "temporary failure in name resolution",
+    ];
+    if DNS.iter().any(|p| lower.contains(p)) {
+        return format!(
+            "Could not look up{site} — the DNS lookup failed. \
+             Check that this machine is online."
+        );
+    }
+
+    const UNREACHABLE: &[&str] = &[
+        "connection refused",
+        "network is unreachable",
+        "no route to host",
+        "connection reset",
+        "connection aborted",
+        "connection broken",
+    ];
+    if UNREACHABLE.iter().any(|p| lower.contains(p)) {
+        return format!("Could not reach{site} — the connection dropped.");
+    }
+
+    if lower.contains("timed out") || lower.contains("timeout") {
+        let who = site.trim().to_owned();
+        let who = if who.is_empty() { "The server".to_owned() } else { who };
+        return format!("{who} stopped responding — the request timed out.");
+    }
+
+    message.to_owned()
 }
 
 /// Is this failure worth retrying?
@@ -1175,69 +1589,6 @@ mod tests {
     }
 
     #[test]
-    fn reads_a_summary_line() {
-        let seg = parse_aria2_summary("[#8d4a4d 31MiB/114MiB(27%) CN:16 DL:10MiB ETA:8s]")
-            .expect("a well-formed summary line");
-        assert_eq!(seg.gid, "8d4a4d");
-        assert_eq!(seg.downloaded, 31 * 1024 * 1024);
-        assert_eq!(seg.total, 114 * 1024 * 1024);
-        assert_eq!(seg.speed, 10 * 1024 * 1024);
-        assert_eq!(seg.connections, 16);
-    }
-
-    #[test]
-    fn reads_a_line_without_percentage_or_eta() {
-        // aria2 omits both until it knows the size.
-        let seg = parse_aria2_summary("[#685787 0B/0B CN:1 DL:0B]").expect("a bare line");
-        assert_eq!(seg.downloaded, 0);
-        assert_eq!(seg.total, -1, "an unknown size must not read as zero");
-        assert_eq!(seg.speed, 0);
-        assert_eq!(seg.connections, 1);
-    }
-
-    #[test]
-    fn ignores_everything_that_is_not_a_summary_line() {
-        for line in [
-            "[download] Destination: video.mp4",
-            "FILE: /home/u/Downloads/video.mp4.part",
-            "===============================",
-            "@MDM@1|2|3|4",
-            "[#deadbe",
-        ] {
-            assert!(parse_aria2_summary(line).is_none(), "parsed {line:?}");
-        }
-    }
-
-    #[test]
-    fn scales_the_units_aria2_prints() {
-        assert_eq!(parse_human_size("0B"), Some(0));
-        assert_eq!(parse_human_size("368KiB"), Some(376_832));
-        assert_eq!(parse_human_size("7.7MiB"), Some(8_074_035));
-        assert_eq!(parse_human_size("6.5GiB"), Some(6_979_321_856));
-        assert_eq!(parse_human_size("nonsense"), None);
-    }
-
-    #[test]
-    fn sums_segments_so_video_plus_audio_reads_as_one_job() {
-        let mut segments = HashMap::new();
-        segments.insert(
-            "aaa".to_string(),
-            Segment { gid: "aaa".into(), downloaded: 100, total: 100, speed: 0,
-                      connections: 0, seen: std::time::Instant::now() },
-        );
-        segments.insert(
-            "bbb".to_string(),
-            Segment { gid: "bbb".into(), downloaded: 20, total: 60, speed: 7,
-                      connections: 16, seen: std::time::Instant::now() },
-        );
-        let p = total_of(&segments);
-        assert_eq!(p.downloaded, 120);
-        assert_eq!(p.total, 160);
-        assert_eq!(p.speed, 7, "only the segment still moving contributes speed");
-        assert_eq!(p.connections, 16, "and only it contributes connections");
-    }
-
-    #[test]
     fn reads_the_file_yt_dlp_refused_to_fetch_again() {
         assert_eq!(
             parse_already_downloaded("[download] Hymns.webm has already been downloaded"),
@@ -1264,23 +1615,89 @@ mod tests {
         }
     }
 
+}
+
+#[cfg(test)]
+mod plan_tests {
+    use super::*;
+
+    fn track(protocol: &str, container: &str, fragmented: bool) -> Track {
+        Track {
+            url: "https://cdn.test/stream".into(),
+            headers: Vec::new(),
+            protocol: protocol.into(),
+            container: container.into(),
+            ext: "mp4".into(),
+            filesize: Some(1_000),
+            fragmented,
+        }
+    }
+
+    fn plan(tracks: Vec<Track>) -> Plan {
+        Plan { title: "A video".into(), tracks }
+    }
+
+    /// The case this whole path exists for: YouTube's picture and sound, both
+    /// whole files in the MP4 family, fetched here and merged here.
     #[test]
-    fn a_stalled_segment_stops_counting_towards_speed() {
-        let mut segments = HashMap::new();
-        segments.insert(
-            "old".to_string(),
-            Segment {
-                gid: "old".into(),
-                downloaded: 500,
-                total: 500,
-                speed: 999,
-                connections: 16,
-                seen: std::time::Instant::now() - std::time::Duration::from_secs(30),
-            },
-        );
-        let p = total_of(&segments);
-        assert_eq!(p.downloaded, 500, "its bytes still count");
-        assert_eq!(p.speed, 0, "its throughput does not");
-        assert_eq!(p.connections, 0, "nor its connections");
+    fn two_mp4_streams_are_ours_to_merge() {
+        let p = plan(vec![
+            track("https", "mp4_dash", false),
+            track("https", "m4a_dash", false),
+        ]);
+        assert!(p.native());
+        assert_eq!(p.size(), Some(2_000));
+    }
+
+    /// One WebM track is enough to hand the whole job back: half a merge is
+    /// not a file anyone can play, and Matroska is not a container the remux
+    /// can write.
+    #[test]
+    fn webm_sound_goes_back_to_yt_dlp() {
+        let p = plan(vec![
+            track("https", "mp4_dash", false),
+            track("https", "webm_dash", false),
+        ]);
+        assert!(!p.native());
+    }
+
+    /// A fragment list is a manifest wearing a format's clothes, and a
+    /// protocol that is not plain HTTPS is not a file to fetch at all.
+    #[test]
+    fn fragments_and_exotic_protocols_are_not_files() {
+        assert!(!plan(vec![track("https", "mp4_dash", true)]).native());
+        assert!(!plan(vec![track("m3u8_native", "mp4", false)]).native());
+        assert!(!plan(vec![track("http_dash_segments", "mp4", false)]).native());
+    }
+
+    /// A single file is the easiest case of all — nothing is rebuilt, so it
+    /// is fetched and moved into place whatever container it is in, WebM
+    /// included. An empty plan is not a download.
+    #[test]
+    fn one_whole_file_needs_no_merge_and_nothing_is_not_a_plan() {
+        assert!(plan(vec![track("https", "mp4", false)]).native());
+        // Progressive formats often state no container at all.
+        assert!(plan(vec![track("https", "", false)]).native());
+        assert!(plan(vec![track("https", "webm", false)]).native());
+        assert!(!plan(Vec::new()).native());
+    }
+
+    /// A track that resolved to no address cannot be fetched, whatever else
+    /// it claims about itself.
+    #[test]
+    fn an_addressless_track_is_not_native() {
+        let mut t = track("https", "mp4_dash", false);
+        t.url = String::new();
+        assert!(!plan(vec![t]).native());
+    }
+
+    /// A weight is only reported when every part stated one: adding up the
+    /// halves that did know would scale the bar to less than the job.
+    #[test]
+    fn a_part_that_did_not_weigh_itself_leaves_the_job_unweighed() {
+        let mut t = track("https", "m4a_dash", false);
+        t.filesize = None;
+        let p = plan(vec![track("https", "mp4_dash", false), t]);
+        assert_eq!(p.size(), None);
     }
 }

@@ -9,6 +9,10 @@ BIN_DIR="${HOME}/.local/bin"
 APP_DIR="${HOME}/.local/share/applications"
 ICON_DIR="${HOME}/.local/share/icons/hicolor"
 EXT_ID="mdm@ramlej.local"
+# Chromium derives an extension's id from its public key, so pinning the key in
+# manifest.chrome.json pins the id -- which is what lets the native messaging
+# manifest name it before the extension has ever been installed.
+CHROME_ID="pegdlonllkokelfmdafooihklghlkimh"
 HOST_NAME="io.mdm.host"
 
 say()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
@@ -60,7 +64,7 @@ FAMILY="$(detect_family)"
 # Debian splits the Rust toolchain in two, Fedora spells the compilers out.
 pkg() {
   case "$1" in
-    aria2|yt-dlp|ffmpeg|nodejs|zip|zenity) echo "$1" ;;
+    yt-dlp|ffmpeg|nodejs|zip|zenity) echo "$1" ;;
     rust)
       case "$FAMILY" in
         debian) echo "rustc cargo" ;; fedora|suse) echo "rust cargo" ;;
@@ -130,7 +134,6 @@ require() { # require <command> <generic package>
   command -v "$1" >/dev/null || { missing+=("$1"); need+=("$2"); }
 }
 require cargo      rust
-require aria2c     aria2
 require zip        zip           # the extension is shipped as a zipped .xpi
 require pkg-config pkgconfig
 command -v cc >/dev/null || command -v gcc >/dev/null || {
@@ -167,25 +170,32 @@ if [[ -n "$MSRV" && "$have" != "$MSRV" ]] &&
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"
 fi
 
-for cmd in yt-dlp ffmpeg; do
-  command -v "$cmd" >/dev/null || \
-    warn "$cmd not found — video extraction will be unavailable. Install it with:
-    $(install_line "$cmd")"
-done
+# yt-dlp is not asked for here any more: MDM keeps its own copy under
+# ~/.local/share/mdm/bin, fetches it on first run and keeps it current, which
+# is the only way a tool that has to move weekly stays current on a desktop.
+# A yt-dlp already on PATH is still used, and never touched.
+command -v yt-dlp >/dev/null || \
+  say "yt-dlp not installed — MDM will fetch its own copy the first time it runs."
 
-# YouTube obfuscates its stream URLs behind a JavaScript challenge. Without a
-# runtime to solve it, yt-dlp drops every format and reports "The page needs to
-# be reloaded" — which sends people reloading a page that was never at fault.
-if command -v yt-dlp >/dev/null; then
-  js_runtime=""
-  for cmd in deno node qjs bun; do
-    command -v "$cmd" >/dev/null && { js_runtime="$cmd"; break; }
-  done
-  if [[ -z "$js_runtime" ]]; then
-    warn "no JavaScript runtime found — YouTube downloads will fail with
-  \"The page needs to be reloaded\". Install one with:
-    $(install_line nodejs)        (deno, bun and quickjs also work)"
-  fi
+# ffmpeg is now a fallback rather than a dependency. Two streams from one
+# container family — which is what the default format asks for, and what a
+# video site almost always offers — are fetched and merged in process, MP4 by
+# stream::mp4 and WebM by stream::mkv. Only a mixed pair or a fragmented
+# format goes to yt-dlp, which merges with ffmpeg; and where ffmpeg is
+# missing, MDM asks the extractor for a matched pair instead.
+command -v ffmpeg >/dev/null || \
+  say "ffmpeg not installed — not needed for ordinary downloads; MDM merges its own."
+
+# YouTube hides its stream URLs behind a JavaScript challenge, and yt-dlp needs
+# a JavaScript runtime to solve it. Nothing to install: MDM fetches QuickJS —
+# two megabytes — into its own bin directory on first run. A deno, node, bun or
+# qjs already on PATH is preferred over it, since that one is the user's choice.
+js_runtime=""
+for cmd in deno node qjs bun; do
+  command -v "$cmd" >/dev/null && { js_runtime="$cmd"; break; }
+done
+if [[ -z "$js_runtime" ]]; then
+  say "No JavaScript runtime installed — MDM will fetch its own QuickJS on first run."
 fi
 
 command -v notify-send >/dev/null || \
@@ -339,7 +349,7 @@ Exec=$BIN_DIR/mdm %u
 Icon=io.mdm.app
 Terminal=false
 Categories=Network;FileTransfer;
-Keywords=mdm;my download manager;download;manager;downloader;aria2;idm;video;
+Keywords=mdm;my download manager;download;manager;downloader;idm;video;
 StartupWMClass=io.mdm.app
 MimeType=x-scheme-handler/mdm;
 DESKTOP
@@ -407,13 +417,72 @@ if [[ "$snap_firefox" == yes ]]; then
   Mozilla's apt repository (a .deb, not a snap) and re-run this script."
 fi
 
+# Chromium's own registration. A different manifest -- `allowed_origins` with a
+# chrome-extension:// URL where Firefox wants `allowed_extensions` with a bare
+# id -- and a different directory per browser and per packaging. Same rule as
+# above: write to every tree that exists, an unused manifest is inert.
+say "Registering the native messaging host for Chrome and Edge"
+CHROMIUM_NM_DIRS=(
+  "${HOME}/.config/google-chrome/NativeMessagingHosts"
+  "${HOME}/.config/chromium/NativeMessagingHosts"
+  "${HOME}/.config/microsoft-edge/NativeMessagingHosts"
+  "${HOME}/.config/BraveSoftware/Brave-Browser/NativeMessagingHosts"
+  "${HOME}/.config/vivaldi/NativeMessagingHosts"
+  "${HOME}/.var/app/com.google.Chrome/config/google-chrome/NativeMessagingHosts"
+  "${HOME}/.var/app/com.brave.Browser/config/BraveSoftware/Brave-Browser/NativeMessagingHosts"
+)
+for nm_dir in "${CHROMIUM_NM_DIRS[@]}"; do
+  # Only where the browser's config tree already exists: creating one for a
+  # browser that is not installed leaves litter in ~/.config forever.
+  [[ -d "$(dirname "$nm_dir")" ]] || continue
+  mkdir -p "$nm_dir"
+  manifest_lines+="  Host manifest $nm_dir/${HOST_NAME}.json"$'\n'
+  cat > "$nm_dir/${HOST_NAME}.json" <<MANIFEST
+{
+  "name": "${HOST_NAME}",
+  "description": "My Download Manager native host",
+  "path": "${BIN_DIR}/mdm-host",
+  "type": "stdio",
+  "allowed_origins": ["chrome-extension://${CHROME_ID}/"]
+}
+MANIFEST
+done
 # ---------------------------------------------------------------- extension
 
 say "Packaging the extension"
 XPI="$REPO/target/mdm-firefox.xpi"
 # The test directory is developer-only; shipping it would put dead code in
-# front of AMO reviewers and bloat the package.
-( cd "$REPO/extension" && rm -f "$XPI" && zip -qr "$XPI" . -x '*.DS_Store' 'test/*' )
+# front of AMO reviewers and bloat the package. The Chromium manifest and its
+# service worker go the same way: Firefox reads neither.
+( cd "$REPO/extension" && rm -f "$XPI" \
+  && zip -qr "$XPI" . -x '*.DS_Store' 'test/*' 'manifest.chrome.json' 'src/sw.js' )
+
+# The Chromium build: same source, one file swapped. Left unpacked as well as
+# zipped because Chrome and Edge load an *unzipped folder* in developer mode,
+# which is how this gets used before a store listing exists, while the zip is
+# what the store dashboards want uploaded.
+say "Packaging the extension for Chrome and Edge"
+CHROME_DIR="$REPO/target/mdm-chrome"
+rm -rf "$CHROME_DIR"
+mkdir -p "$CHROME_DIR"
+( cd "$REPO/extension" && tar cf - --exclude=test --exclude=manifest.json . ) \
+  | ( cd "$CHROME_DIR" && tar xf - )
+mv "$CHROME_DIR/manifest.chrome.json" "$CHROME_DIR/manifest.json"
+# Staging this folder wrong is silent and expensive, so it is checked rather
+# than assumed. The folder still loads with the Firefox manifest in it; what
+# breaks is downstream and mute -- Chromium derives the id from the path when
+# no key is pinned, the native host allows exactly one id and refuses every
+# other, and the popup then sits on "Checking..." for good with nothing said
+# anywhere about why. Checked here rather than trusted because the zip below,
+# and any package built from this folder, carry whatever it finds.
+[[ -f "$CHROME_DIR/manifest.json" ]] \
+  || die "staging $CHROME_DIR produced no manifest.json"
+grep -q '"key"' "$CHROME_DIR/manifest.json" \
+  || die "$CHROME_DIR/manifest.json carries no pinned key, so it is the Firefox
+  manifest rather than the Chromium one. A browser would derive an id from the
+  path and the native host would refuse it."
+( cd "$CHROME_DIR" && rm -f "$REPO/target/mdm-chrome.zip" \
+  && zip -qr "$REPO/target/mdm-chrome.zip" . -x '*.DS_Store' )
 
 # Firefox installs nothing Mozilla has not signed, and signing happens at AMO
 # rather than here. So the package built above is the one to submit, and the

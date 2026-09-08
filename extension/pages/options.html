@@ -6,7 +6,7 @@
 <p class="hint">Settings apply immediately.</p>
 
 <h2>Capture</h2>
-<label class="row"><input type="checkbox" id="enabled"> <span>Capture downloads from Firefox</span></label>
+<label class="row"><input type="checkbox" id="enabled"> <span>Capture downloads from this browser</span></label>
 <label class="row"><input type="checkbox" id="sniffMedia"> <span>Detect video and audio streams on pages</span></label>
 <label class="row"><input type="checkbox" id="videoButton"> <span>Show a download button over videos</span></label>
 <label class="row"><input type="checkbox" id="captureImages"> <span>Capture image downloads</span></label>
@@ -16,16 +16,16 @@
   not apply to them.</p>
 <p class="hint">Chat and gallery sites often assemble a file in the page and hand the browser a
   <code>blob:</code> link to it, which no downloader can fetch. MDM asks the page for those bytes instead. Turn
-  this off to leave them to Firefox.</p>
+  this off to leave them to the browser.</p>
 
 <label>Minimum size to capture (MiB)
   <input type="number" id="minSize" min="0" step="0.5">
-  <p class="hint">Smaller files are left to Firefox — segmenting them gains nothing. Files sent with <code>Content-Disposition: attachment</code> are always captured regardless of size.</p>
+  <p class="hint">Smaller files are left to the browser — segmenting them gains nothing. Files sent with <code>Content-Disposition: attachment</code> are always captured regardless of size.</p>
 </label>
 
 <label>Hand-off timeout (ms)
   <input type="number" id="handoffTimeoutMs" min="200" max="10000" step="100">
-  <p class="hint">How long a request is held while the daemon confirms. If it does not answer in time, Firefox downloads the file itself.</p>
+  <p class="hint">How long a request is held while the daemon confirms. If it does not answer in time, the browser downloads the file itself.</p>
 </label>
 
 <h2>Exclusions</h2>
@@ -42,4 +42,5 @@
   <button class="primary" id="save">Save</button>
   <span id="saved" class="hint"></span>
 </div>
+<script src="../src/polyfill.js"></script>
 <script src="options.js"></script>

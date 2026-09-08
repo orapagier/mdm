@@ -4,12 +4,17 @@
 //! between copies. X11 has no equivalent without an extra helper binary, so it
 //! falls back to polling — which is why this is opt-in rather than default-on.
 
-use crate::supervisor::which;
-use std::process::Stdio;
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::Command;
 use tokio::sync::mpsc;
+
+#[cfg(unix)]
+use crate::which::which;
+#[cfg(unix)]
+use std::process::Stdio;
+#[cfg(unix)]
+use tokio::io::{AsyncBufReadExt, BufReader};
+#[cfg(unix)]
+use tokio::process::Command;
 
 /// How often the X11 fallback re-reads the selection.
 const POLL_INTERVAL: Duration = Duration::from_millis(1500);
@@ -26,6 +31,7 @@ const MAX_LEN: usize = 8 * 1024;
 /// Takes an explicit runtime handle rather than calling `tokio::spawn`: this is
 /// invoked from Tauri's setup hook, which runs outside any Tokio runtime, and a
 /// bare spawn there panics the process before the window ever appears.
+#[cfg(unix)]
 pub fn watch(runtime: &tokio::runtime::Handle, tx: mpsc::Sender<String>) -> bool {
     if which("wl-paste").is_some() {
         runtime.spawn(watch_wayland(tx));
@@ -39,9 +45,43 @@ pub fn watch(runtime: &tokio::runtime::Handle, tx: mpsc::Sender<String>) -> bool
     false
 }
 
+/// Windows has no clipboard-watch CLI to shell out to the way wl-paste/xclip
+/// give Linux, so this polls the clipboard directly, the same way the X11
+/// fallback above does in the absence of an event-driven API.
+#[cfg(windows)]
+pub fn watch(runtime: &tokio::runtime::Handle, tx: mpsc::Sender<String>) -> bool {
+    runtime.spawn(poll_windows(tx));
+    true
+}
+
+#[cfg(windows)]
+async fn poll_windows(tx: mpsc::Sender<String>) {
+    let mut last = String::new();
+    loop {
+        tokio::time::sleep(POLL_INTERVAL).await;
+        // A fresh handle per poll, never held across an `.await`: the
+        // Windows clipboard is tied to the thread that opened it.
+        let Ok(text) = arboard::Clipboard::new().and_then(|mut c| c.get_text()) else {
+            continue;
+        };
+        if text.len() > MAX_LEN {
+            continue;
+        }
+        if let Some(url) = extract_url(&text) {
+            if url != last {
+                last = url.clone();
+                if tx.send(url).await.is_err() {
+                    return;
+                }
+            }
+        }
+    }
+}
+
 /// `wl-paste --watch CMD` pipes each new clipboard value to CMD's stdin. We
 /// have it echo the value followed by a NUL so records stay separable even
 /// when the copied text itself contains newlines.
+#[cfg(unix)]
 async fn watch_wayland(tx: mpsc::Sender<String>) {
     loop {
         let mut child = match Command::new("wl-paste")
@@ -107,6 +147,7 @@ async fn watch_wayland(tx: mpsc::Sender<String>) {
     }
 }
 
+#[cfg(unix)]
 async fn poll_x11(tx: mpsc::Sender<String>) {
     let mut last = String::new();
     loop {
@@ -128,6 +169,7 @@ async fn poll_x11(tx: mpsc::Sender<String>) {
     }
 }
 
+#[cfg(unix)]
 async fn read_x11_clipboard() -> Option<String> {
     for (bin, args) in [
         ("xclip", vec!["-selection", "clipboard", "-o"]),
@@ -165,7 +207,7 @@ pub fn extract_url(text: &str) -> Option<String> {
         return None;
     }
     // The original text, not `parsed.as_str()`: the url crate normalises, and
-    // handing aria2 anything other than exactly what the user copied risks
+    // downloading anything other than exactly what the user copied risks
     // breaking signed URLs whose signature covers the literal path.
     Some(trimmed.to_string())
 }

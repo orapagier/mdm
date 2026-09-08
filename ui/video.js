@@ -186,9 +186,19 @@ function label(f) {
 /**
  * The fallback covers a format that turns out to carry sound already, or a
  * page with no separate audio stream to pair with.
+ *
+ * An MP4 picture asks for MP4 sound first. Both halves in that family is
+ * what lets the app fetch and merge them itself, with no ffmpeg in the
+ * middle; the cost where it applies is AAC in place of Opus at the same
+ * bitrate. A WebM picture is not offered the choice, because merging it
+ * with m4a sound would only rewrite the file into a third container.
  */
 function formatExpression(f) {
-  return needsAudio(f) ? `${f.formatId}+bestaudio/${f.formatId}` : f.formatId;
+  if (!needsAudio(f)) return f.formatId;
+  const id = f.formatId;
+  return f.ext === "mp4"
+    ? `${id}+bestaudio[ext=m4a]/${id}+bestaudio/${id}`
+    : `${id}+bestaudio/${id}`;
 }
 
 /**
@@ -979,7 +989,7 @@ async function start(paused) {
     url,
     directory: $("vid-dir").value.trim() || null,
     // A direct media URL has nothing to extract; handing it to yt-dlp would
-    // only put an extractor between aria2 and a file it can already fetch.
+    // only put an extractor in front of a file we can already fetch.
     // Said outright rather than left unset, because the engine's own guess is
     // made from the host — and a video site serves its files from its own
     // name, so on a CDN URL that guess is wrong every time.
@@ -1013,7 +1023,9 @@ async function start(paused) {
 function stateWord(d) {
   switch (d.status) {
     case "paused": return "Paused";
-    case "queued": return "Waiting";
+    // A queued row carrying a reason is one that failed and is sitting out a
+    // backoff. Calling that "Waiting" hides an attempt that is still going on.
+    case "queued": return d.error ? "Retrying" : "Waiting";
     case "failed": return "Failed";
     case "complete": return "Done";
     // Active but nothing transferred yet: a streamed page has to be resolved
@@ -1088,6 +1100,10 @@ function render(snapshot) {
   // The reserved line, which only the two things too long for the stats row
   // ever use. It keeps its height whether or not it has anything to say.
   if (d.status === "failed") note(d.error || "Download failed.", "bad");
+  // An attempt that failed and is waiting to be repeated. Said in the same
+  // line the final failure would use, but not in red: nothing has been given
+  // up on yet, and a red strip over a download that then completes is a lie.
+  else if (d.status === "queued" && d.error) note(d.error, "warn", d.error);
   // The name, not just the folder: a second copy of something already saved is
   // numbered, and this is where that becomes visible.
   else if (d.status === "complete") {
@@ -1263,11 +1279,11 @@ async function handleRequest(request) {
 (async () => {
   settings = await invoke("get_settings").catch(() => null);
   if (!(await invoke("ytdlp_available").catch(() => false))) {
-    // The install command is asked for rather than assumed: apt, dnf and
-    // pacman machines all end up here and only one of the three lines works.
-    const how = await invoke("install_hint", { package: "yt-dlp" })
-      .catch(() => "your package manager (the package is called yt-dlp)");
-    say("vid-status", `yt-dlp is not installed — run: ${how}`, "hint bad");
+    // Not an error and not an instruction: the app fetches its own copy
+    // shortly after it starts, so the only thing to do about this is wait a
+    // moment. It is said at all because a picker that cannot resolve anything
+    // yet should explain itself rather than look broken.
+    say("vid-status", "fetching yt-dlp — video pages will work in a moment", "hint");
   }
   // The window is usually opened *for* a request, which was set before the
   // page existed and so could not have been delivered as an event.

@@ -1,17 +1,27 @@
 # My Download Manager (MDM)
 
-An IDM-style download manager for Linux and Firefox — yours, not rented. It
-captures **every** download the browser makes — binaries, archives, documents,
-media — and fetches it with up to 16 parallel connections through aria2.
+**New here? [Setup-guide.md](Setup-guide.md) is the step-by-step** — installing,
+building, bundling, both browser extensions, and what to do when something
+does not connect. What follows is why the thing is shaped the way it is.
+
+An IDM-style download manager for Linux and Windows, in Firefox and every
+Chromium browser — yours, not rented. It captures **every** download the
+browser makes — binaries, archives, documents, media — and fetches it with up
+to 32 parallel connections, in its own process, with no external downloader.
 
 ```
-Firefox ──webRequest/downloads──▶ extension ──native messaging──▶ mdm-host
+browser ──webRequest/downloads──▶ extension ──native messaging──▶ mdm-host
                                                                       │
-                                                              unix socket
+                                                        socket / named pipe
                                                                       ▼
-                                              mdm (Tauri app) ──JSON-RPC──▶ aria2c
-                                                       │
-                                                       └──▶ yt-dlp (streams)
+                                                            mdm (Tauri app)
+                                                          ┌────────┴────────┐
+                                            segmented HTTP fetcher    HLS/DASH
+                                                                   + MP4 remux
+                                                                      │
+                                                        yt-dlp (optional, for
+                                                        pages that hide their
+                                                          manifests in JS)
 ```
 
 ## Why this shape
@@ -23,25 +33,80 @@ so a request can be held open while the daemon confirms it accepted the job,
 then cancelled. That makes double-downloads structurally impossible rather than
 merely unlikely.
 
-**aria2, not a hand-rolled engine.** IDM's speed comes from dynamic
-segmentation: when a connection finishes its slice it splits the largest
-remaining slice and steals half, so nothing idles at the tail. aria2 does the
-same thing via `--min-split-size`, and brings resume, session persistence and
-FTP/BitTorrent along for free.
+**Our own engine, not aria2.** IDM's speed comes from dynamic segmentation:
+when a connection finishes its slice it splits the largest remaining slice and
+steals half, so nothing idles at the tail. MDM does that in process, and adds
+the part no external downloader can do for us — choosing the connection count
+by *measuring* the file being downloaded rather than by asking the user to
+guess. Bytes land in a `.mdmdownload` file beside a small state file recording
+exactly which ranges are complete, so a crash resumes instead of restarting.
+
+This replaced an aria2 daemon, and the daemon is gone: there is no second
+process to install, supervise, or have fail on a machine that never needed it.
 
 **More than one server per file.** A server answering a download may advertise
 its mirrors in the response, as `Link: <https://…>; rel=duplicate` (RFC 6249).
 The capture reads those headers — it is the only part of the system that ever
-sees them — and hands every mirror to aria2 alongside the original. aria2 then
-treats them as sources for *one* file: it spreads its connections across them,
-prefers whichever proves fastest, and drops the dead ones. On a mirrored file
+sees them — and carries every mirror alongside the original. They are then
+sources for *one* file: connections are dealt across them round-robin, so a
+slow mirror costs one connection rather than the download. On a mirrored file
 that is a multiple, not a percentage, and it is the one thing a single-source
 downloader structurally cannot do. Mirrors are stored on the row, because a
 resume never gets to see those headers again.
 
-**A daemon, not a process per download.** One long-lived `aria2c` on a private
-port with a random secret gives real queueing, live pause/resume and global
-throttling through one RPC surface.
+**Streams without ffmpeg.** HLS and DASH are parsed, fetched segment by
+segment and rebuilt into a single MP4 in process — including the case where the
+picture and the sound arrive as two separate segment sets. The samples are
+copied, never re-encoded, so the result is bit-identical to what the server
+sent. This is format-driven rather than site-driven, so it needs no per-site
+extractor and does not rot when a site is redesigned.
+
+The same muxers finish the job for an *extracted* video too. A site that
+serves picture and sound as two adaptive streams — every YouTube format above
+360p — is resolved by yt-dlp, then fetched here with all the connections an
+ordinary download gets, and merged here: MP4 by the muxer above, WebM by a
+Matroska writer beside it. That is the whole of what ffmpeg was ever carried
+for, and it is carried no longer. Measured against ffmpeg's own merge of the
+identical streams, the output is packet-identical — every frame, every
+timestamp, in both containers.
+
+Neither muxer understands a codec. A track is copied by lifting its
+description — an MP4 `stsd` entry, a Matroska `TrackEntry` — and writing it
+out untouched, so AV1 rebuilds exactly as well as H.264 and Opus as well as
+AAC. What that forbids is mixing the two families in one file, because *that*
+would mean translating a description rather than copying it; so the default
+format asks for both halves from one family, and on a machine with no ffmpeg
+at all it asks again rather than give up.
+
+The weight of a merged download is known before the first byte, because both
+streams weighed themselves at extraction; and because the fetching is MDM's
+own, a merge pauses, resumes and reports speed like any other download.
+
+**yt-dlp is optional, and looks after itself.** It is only reached for a *page*
+that hides its manifest behind its own JavaScript — a per-site problem this
+project has no business trying to own. Even then it is asked to *resolve*
+rather than to download, wherever what it resolved is something MDM can fetch
+itself.
+
+Because that is the one dependency which genuinely has to move — sites change
+weekly, and a yt-dlp a few months old fails in ways that look like the app
+being broken — MDM keeps its own copy under its data directory, fetches it on
+first run and checks daily for a newer one. A failure that looks like
+staleness brings that check forward rather than waiting out the day. A yt-dlp
+already on PATH is used as it is and never written to: that copy belongs to
+whoever installed it.
+
+**Nothing to install.** YouTube hides its stream URLs behind a JavaScript
+challenge, which yt-dlp solves by running the page's own code in a JavaScript
+runtime it cannot supply itself. The usual answer is to install Node — ninety
+eight megabytes of toolchain for a few milliseconds of arithmetic. MDM fetches
+QuickJS instead: two megabytes, beside its yt-dlp, and yt-dlp is pointed
+straight at it by path rather than expected to find it on anyone's PATH. A
+Deno or Node already installed still wins, because that one was somebody's
+choice.
+
+What that adds up to: on a machine with no yt-dlp, no ffmpeg and no JavaScript
+anything, MDM downloads and merges a 4K YouTube video by itself.
 
 ## Capture rules
 
@@ -53,11 +118,15 @@ Three independent nets, because none of them is sufficient alone:
    captured at `onBeforeSendHeaders`**. Replaying the original `Cookie`,
    `Referer` and `Authorization` is what makes captured downloads actually
    resolve instead of returning 403.
-2. `downloads.onCreated` — the backstop for anything the first net missed
+2. The `downloads` API — the backstop for anything the first net missed
    ("Save Link As", script-initiated downloads), cancelled and erased once the
    daemon confirms. Erased *and* removed from disk: a small file can finish
    inside the hand-off, and a download cancelled a moment too late would leave
-   a second copy under Firefox's own name.
+   a second copy under the browser's own name. Where the browser offers
+   `downloads.onDeterminingFilename` — Chromium does, Firefox does not — the
+   hand-off happens *there* rather than at `onCreated`, because it is the one
+   point at which the browser is still holding the download: named but not yet
+   placed, and not yet asked about. See **Chromium** below.
 3. A content script, for downloads that never had a URL to begin with — see
    **In-memory downloads** below.
 
@@ -405,11 +474,12 @@ has already paid it. Its raw result is kept for five minutes and handed to the
 download as `--load-info-json`, which takes a YouTube start from about ten
 seconds to about one, and halves how hard the site is hit.
 
-*aria2 is asked to report.* yt-dlp's own progress hook fires exactly once, at
-100%, when an external downloader owns the transfer — so a download would sit
-at zero bytes for its whole life and then jump to done. `--summary-interval=1`
-makes aria2 print its own readout, which is parsed back into live bytes, speed
-and connection count; the exact byte count still comes from the finished file.
+*yt-dlp reports for itself.* It used to be handed an external downloader,
+whose readout had to be parsed back out of its output because yt-dlp's own
+progress hook fires exactly once, at 100%, when something else owns the
+transfer. With no external downloader left, its own `[download]` line is the
+progress, and `--concurrent-fragments` is what keeps a fragmented stream from
+arriving one fragment at a time.
 
 The picker's answer is also cached and shared: the window and the request that
 opened it ask at the same moment, and one extraction per page serves both.
@@ -439,7 +509,7 @@ older toolchain than this needs.
 **Debian, Ubuntu, Mint, Pop!\_OS…**
 
 ```bash
-sudo apt install aria2 yt-dlp ffmpeg nodejs zip zenity libnotify-bin \
+sudo apt install yt-dlp ffmpeg nodejs zip zenity libnotify-bin \
                  build-essential pkg-config libwebkit2gtk-4.1-dev libdbus-1-dev \
                  rustc cargo
 ./install.sh
@@ -448,7 +518,7 @@ sudo apt install aria2 yt-dlp ffmpeg nodejs zip zenity libnotify-bin \
 **Fedora, RHEL, Nobara…**
 
 ```bash
-sudo dnf install aria2 yt-dlp ffmpeg nodejs zip zenity libnotify \
+sudo dnf install yt-dlp ffmpeg nodejs zip zenity libnotify \
                  gcc gcc-c++ make pkgconf-pkg-config webkit2gtk4.1-devel dbus-devel \
                  rust cargo
 ./install.sh
@@ -457,7 +527,7 @@ sudo dnf install aria2 yt-dlp ffmpeg nodejs zip zenity libnotify \
 **Arch, Manjaro, EndeavourOS…**
 
 ```bash
-sudo pacman -S aria2 yt-dlp ffmpeg nodejs zip zenity libnotify \
+sudo pacman -S yt-dlp ffmpeg nodejs zip zenity libnotify \
                base-devel pkgconf webkit2gtk-4.1 dbus rust
 ./install.sh
 ```
@@ -507,6 +577,112 @@ Mozilla's `.deb`, `~/snap/firefox` for the snap Ubuntu installs by default,
 prints the one `flatpak override` a sandboxed Firefox additionally needs before
 it may launch a host binary from `~/.local/bin`.
 
+### Windows, and a redistributable installer
+
+`install.ps1` is the Windows counterpart: it installs per-user into
+`%LOCALAPPDATA%\Programs\mdm`, writes the native messaging manifest and the
+registry value Firefox finds it through, registers `mdm://`, and needs no
+Administrator prompt at any point.
+
+For a machine that is not this one, `.\install.ps1 -Installer` additionally
+produces a double-click setup:
+
+    target\release\bundle\nsis\My Download Manager_1.0.0_x64-setup.exe
+
+It carries the app, the native host and the signed extension, and its NSIS
+hooks do the same registration the script does — so a machine that runs the
+`.exe` ends up in the same state as one that ran the script. Uninstalling
+removes the binaries, the manifest and both registry keys, and deliberately
+keeps `mdm.db`: an uninstall is not a request to lose a download history.
+
+Unlike the script's own install, the packaged one registers an uninstall entry,
+so it appears in Windows' "Installed apps" list.
+
+What it does *not* install is yt-dlp, which is only reached for sites that hide
+their video behind a page — everything else downloads without it.
+
+### Chrome, Edge and the other Chromium browsers
+
+The extension is one codebase with two manifests. `manifest.json` is Firefox's;
+`manifest.chrome.json` is Chromium's, and `install.ps1` assembles the second
+into `target\mdm-chrome` (plus a `.zip` for the store dashboards) with the
+Chromium manifest in place.
+
+Two things differ, and both are Chromium's doing:
+
+- **A response cannot be intercepted; a download still can.**
+  `webRequestBlocking` is Manifest V3's one casualty that matters here —
+  outside force-installed enterprise extensions, Chromium will not let a
+  listener hold a *response* open and cancel it. So `src/background.js`
+  registers that listener non-blocking there, and net 2 does the catching.
+  What net 1 sees is remembered for it to describe the file with, because
+  response headers are the only place a download's real size, type and mirrors
+  are stated.
+
+  Net 2 catches it at `downloads.onDeterminingFilename`, not at `onCreated`,
+  and the difference is a whole dialog. Chromium settles a download's target in
+  a fixed order — generate a name, notify extensions, reserve the path, prompt
+  the user — and a listener that returns `true` there holds the download for up
+  to fifteen seconds while it answers. That is *before* the browser asks where
+  to save the file. Caught one step later at `onCreated`, the browser has
+  already put its own "Save as" dialog on screen by the time the hand-off
+  finishes, and a browser set to ask where to save each file gives the user two
+  dialogs for one click: its own, and then MDM's. Held at the naming step there
+  is no prompt, no partial file and nothing to clean up — the cancel is the
+  whole of the browser's copy.
+- **The id has to be known in advance.** The native messaging manifest names
+  who may connect, so the extension's id must exist before the extension is
+  ever installed. Chromium derives an id from the public key, so
+  `manifest.chrome.json` pins one — `pegdlonllkokelfmdafooihklghlkimh` — and it
+  stays that whether the extension is loaded unpacked or from a store listing.
+  The private half lives in `packaging/chrome-extension-key.pem`, which is
+  gitignored, and is needed only to publish.
+
+Load it from `chrome://extensions` (or `edge://extensions`) with Developer mode
+on and "Load unpacked". `install.ps1` writes the `allowed_origins` manifest and
+the registry value for Chrome, Edge, Chromium, Brave and Vivaldi.
+
+### Updating itself
+
+The app asks GitHub Releases once per launch whether there is a newer version,
+and shows a bar offering it if so. Nothing installs itself, and a failed check
+says nothing to the user — the reason goes to the log, because a dialog about
+an unreachable update server on every launch behind a firewall is a nuisance
+rather than information.
+
+Updates are signed with their own key, independently of any code-signing
+certificate: `packaging/mdm-updater.key` signs, the public half in
+`tauri.conf.json` verifies, and a build the key did not sign is refused. Losing
+the private key means no installed copy can ever be updated again, so it is the
+one file in this repo worth backing up somewhere else.
+
+To publish a release:
+
+    $env:TAURI_SIGNING_PRIVATE_KEY_PATH = "$PWD\packaging\mdm-updater.key"
+    .\install.ps1 -Installer
+
+That produces the setup `.exe` and a `.sig` beside it. Upload both to a GitHub
+release, along with a `latest.json` naming the version and the signature — the
+shape Tauri's updater expects:
+
+    {
+      "version": "1.0.1",
+      "notes": "What changed",
+      "pub_date": "2026-09-08T00:00:00Z",
+      "platforms": {
+        "windows-x86_64": {
+          "signature": "<contents of the .sig file>",
+          "url": "https://github.com/orapagier/mdm/releases/download/v1.0.1/My.Download.Manager_1.0.1_x64-setup.exe"
+        }
+      }
+    }
+
+The installer is **not** code-signed, so Windows SmartScreen warns on first run
+until a certificate is added. That is a separate mechanism from the update
+signature above and needs a certificate issued to a real identity; the cheapest
+legitimate route is Azure Trusted Signing, and `tauri.conf.json`'s
+`bundle.windows.certificateThumbprint` is where it would be named.
+
 ## Is it fast?
 
 Measure, do not assume — and do not measure the way it is tempting to. Running
@@ -527,7 +703,7 @@ between rounds. It will say `INCONCLUSIVE` and mean it.
 ## Tests
 
 ```bash
-cargo test                              # engine logic: categories, scheduling, aria2 options
+cargo test                              # engine logic: categories, scheduling, manifests, MP4 muxing
 node extension/test/capture.test.js     # capture rules and header parsing
 node extension/test/permalink.test.js   # finding the post a feed video sits in
 node extension/test/candidates.test.js  # which URL, and which file, a grab means
@@ -563,7 +739,7 @@ python3 packaging/test-native-host.py target/debug/mdm-host
 | Path | What |
 |---|---|
 | `extension/` | Firefox MV3 extension: capture rules, video button, popup, options |
-| `crates/mdm-core/` | Engine, aria2 client, SQLite store, scheduler, IPC |
+| `crates/mdm-core/` | Engine, HTTP fetcher, HLS/DASH + MP4 remux, SQLite store, scheduler, IPC |
 | `crates/mdm-host/` | Native messaging bridge (dependency-free, std only) |
 | `src-tauri/` | Desktop app and its commands |
 | `ui/` | Frontend — plain HTML/CSS/JS, no bundler |
@@ -575,5 +751,4 @@ python3 packaging/test-native-host.py target/debug/mdm-host
 |---|---|
 | `~/.config/mdm/settings.toml` | Settings |
 | `~/.local/share/mdm/mdm.db` | History and queues |
-| `~/.local/share/mdm/aria2.session` | Unfinished transfers, restored on launch |
 | `$XDG_RUNTIME_DIR/mdm/mdm.sock` | IPC socket (0700) |

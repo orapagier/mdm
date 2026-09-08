@@ -19,6 +19,8 @@ pub enum PackageManager {
     Pacman,
     Zypper,
     Apk,
+    /// Windows' built-in package manager (Windows 10 21H2+ / Windows 11).
+    Winget,
     Unknown,
 }
 
@@ -33,6 +35,7 @@ pub fn package_manager() -> PackageManager {
 /// The file is the authority when it is there, but stripped images and
 /// containers often carry a useless one (or none), and by then the binary is
 /// the better answer anyway: a machine with `apt-get` takes apt commands.
+#[cfg(unix)]
 fn detect() -> PackageManager {
     if let Some(pm) = std::fs::read_to_string("/etc/os-release")
         .ok()
@@ -47,11 +50,23 @@ fn detect() -> PackageManager {
         ("zypper", PackageManager::Zypper),
         ("apk", PackageManager::Apk),
     ] {
-        if crate::supervisor::which(bin).is_some() {
+        if crate::which::which(bin).is_some() {
             return pm;
         }
     }
     PackageManager::Unknown
+}
+
+/// Windows has exactly one package manager worth naming: winget, which has
+/// shipped inline with Windows since 10 21H2. There is no distro family to
+/// distinguish, so detection is just "is it on PATH".
+#[cfg(windows)]
+fn detect() -> PackageManager {
+    if crate::which::which("winget").is_some() {
+        PackageManager::Winget
+    } else {
+        PackageManager::Unknown
+    }
 }
 
 /// Read `ID`, then `ID_LIKE`.
@@ -94,8 +109,20 @@ fn family_of(id: &str) -> Option<PackageManager> {
     })
 }
 
+/// winget identifies packages by publisher-qualified id, not the plain name
+/// every Linux family happens to share. Only the three packages MDM ever
+/// names (see the module doc) need an entry.
+fn winget_id(package: &str) -> &str {
+    match package {
+        "yt-dlp" => "yt-dlp.yt-dlp",
+        "nodejs" => "OpenJS.NodeJS",
+        other => other,
+    }
+}
+
 /// How to install `package` here — `sudo apt install aria2` on Debian,
-/// `sudo dnf install aria2` on Fedora.
+/// `sudo dnf install aria2` on Fedora, `winget install --id aria2.aria2` on
+/// Windows.
 ///
 /// When the family is unknown the package is still named, because the name is
 /// the part the user cannot look up on their own.
@@ -106,6 +133,9 @@ pub fn install(package: &str) -> String {
         PackageManager::Pacman => format!("sudo pacman -S {package}"),
         PackageManager::Zypper => format!("sudo zypper install {package}"),
         PackageManager::Apk => format!("sudo apk add {package}"),
+        PackageManager::Winget => {
+            format!("winget install --id {} -e --source winget", winget_id(package))
+        }
         PackageManager::Unknown => {
             format!("your package manager (the package is called {package})")
         }
@@ -124,6 +154,9 @@ pub fn upgrade(package: &str) -> String {
         PackageManager::Pacman => format!("sudo pacman -Syu {package}"),
         PackageManager::Zypper => format!("sudo zypper update {package}"),
         PackageManager::Apk => format!("sudo apk upgrade {package}"),
+        PackageManager::Winget => {
+            format!("winget upgrade --id {} -e --source winget", winget_id(package))
+        }
         PackageManager::Unknown => {
             format!("your package manager (the package is called {package})")
         }

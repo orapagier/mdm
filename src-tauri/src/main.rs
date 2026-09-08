@@ -32,6 +32,7 @@ fn claim_desktop_identity() {
 
 /// The application id: `tauri.conf.json`'s `identifier`, and the base name of
 /// the desktop entry `install.sh` writes. All three have to say the same thing.
+#[cfg(target_os = "linux")]
 const IDENTIFIER: &str = "io.mdm.app";
 
 /// Put a fatal startup error in front of whoever launched from a menu, where
@@ -40,6 +41,7 @@ const IDENTIFIER: &str = "io.mdm.app";
 /// Two helpers rather than one: zenity is a GNOME assumption, and a KDE
 /// desktop — Kubuntu and Debian KDE included — commonly ships kdialog and no
 /// zenity at all, which would make this failure entirely silent.
+#[cfg(unix)]
 fn show_startup_failure(detail: &str) {
     let text = format!("Could not start the download engine:\n\n{detail}");
     let attempts: Vec<(&str, Vec<String>)> = vec![
@@ -62,12 +64,26 @@ fn show_startup_failure(detail: &str) {
         ),
     ];
     for (bin, args) in attempts {
-        if mdm_core::supervisor::which(bin).is_none() {
+        if mdm_core::which::which(bin).is_none() {
             continue;
         }
         if std::process::Command::new(bin).args(&args).status().is_ok() {
             return;
         }
+    }
+}
+
+/// `MessageBoxW` needs no spawned helper process — the dialog is always
+/// present on Windows, unlike zenity/kdialog which may both be absent.
+#[cfg(windows)]
+fn show_startup_failure(detail: &str) {
+    use windows::core::HSTRING;
+    use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
+
+    let text = HSTRING::from(format!("Could not start the download engine:\n\n{detail}"));
+    let title = HSTRING::from("My Download Manager");
+    unsafe {
+        MessageBoxW(None, &text, &title, MB_OK | MB_ICONERROR);
     }
 }
 
@@ -91,24 +107,9 @@ fn main() {
         std::process::exit(1);
     }
 
-    // If an instance already owns the socket, hand it the focus request and
-    // exit rather than starting a second engine on the same database.
-    if already_running() {
-        if urls.is_empty() {
-            log::info!("another instance is running; asking it to show itself");
-            let _ = send_to_running(r#"{"type":"focus"}"#.to_string());
-        } else {
-            // Hand the URLs to the instance that owns the database, rather
-            // than starting a second engine that would fight over it.
-            log::info!("forwarding {} url(s) to the running instance", urls.len());
-            for url in &urls {
-                let msg = serde_json::json!({
-                    "type": "download",
-                    "job": { "url": url, "source": "cli" },
-                });
-                let _ = send_to_running(msg.to_string());
-            }
-        }
+    // If an instance already owns the socket, hand this launch to it and exit
+    // rather than starting a second engine on the same database.
+    if hand_off(&urls) {
         return;
     }
 
@@ -121,8 +122,9 @@ fn main() {
     let engine = match runtime.block_on(Engine::start(settings)) {
         Ok(e) => e,
         Err(e) => {
-            // Without aria2 there is no download manager, so fail loudly and
-            // point at the fix rather than starting a useless window.
+            // Only genuinely fatal causes reach here now — the database, or
+            // the application directories. A missing downloader tool does not:
+            // the engine warns and fetches in-process instead.
             eprintln!("MDM could not start its download engine:\n  {e:#}");
             show_startup_failure(&format!("{e:#}"));
             std::process::exit(1);
@@ -163,6 +165,10 @@ fn main() {
 
     let app_engine = engine.clone();
     tauri::Builder::default()
+        // Checks GitHub for a newer version and verifies its signature against
+        // the public key in tauri.conf.json. It only ever *offers*: the check
+        // is asked for by the frontend on launch and nothing installs itself.
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(engine.clone())
         .manage(video::Pending::default())
         // The shape the download window is currently in, so it is only ever
@@ -194,6 +200,8 @@ fn main() {
             commands::take_pending_video,
             commands::start_capture,
             commands::fit_window,
+            commands::check_update,
+            commands::install_update,
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
@@ -302,7 +310,77 @@ fn main() {
                             directory,
                             url,
                         } => {
-                            video::show_download(&ui_handle, id, filename, directory, url);
+                            video::show_download(
+                                &ui_handle,
+                                id,
+                                filename,
+                                directory,
+                                url.clone(),
+                            );
+                            // A URL that answers with a *page* is a quality to
+                            // choose rather than a file to save. The engine
+                            // finds that out too, but only once the download
+                            // has been started and failed — by which point all
+                            // it can do is hand yt-dlp the address and take
+                            // whichever format it settles on. Asked here, while
+                            // the window is still offering the capture and not
+                            // a byte has been fetched, the answer arrives in
+                            // time to put the format picker up instead.
+                            let engine = probe_engine.clone();
+                            let handle = ui_handle.clone();
+                            tauri::async_runtime::spawn(async move {
+                                let Some(d) = engine.download(id) else { return };
+                                // The browser knew what it was handing over
+                                // whenever it had seen the response; only a
+                                // capture that arrived without a type — a link
+                                // off the context menu — has anything to ask.
+                                if !d.mime.is_empty() && !d.mime.starts_with("text/") {
+                                    return;
+                                }
+                                if !mdm_core::ytdlp::available() {
+                                    return; // no formats could be offered anyway
+                                }
+                                match mdm_core::fetch::is_page(
+                                    &d.url,
+                                    &d.filename,
+                                    &d.headers,
+                                    Some(&d.referrer),
+                                )
+                                .await
+                                {
+                                    Ok(true) => {}
+                                    Ok(false) => return,
+                                    // Unreachable, refused, or simply slow: the
+                                    // capture stands as it is, and the download
+                                    // itself will meet whatever this met.
+                                    Err(e) => {
+                                        log::debug!(
+                                            "#{id}: could not tell whether {} is a page \
+                                             ({e:#}); offering it as a file",
+                                            d.url
+                                        );
+                                        return;
+                                    }
+                                }
+                                // Only while it is still an offer. The user may
+                                // have pressed Start in the meantime, and
+                                // withdrawing a running download to ask a
+                                // question about it would throw away the bytes
+                                // it had already fetched.
+                                let Some(d) = engine.download(id) else { return };
+                                if d.status != mdm_core::model::Status::Paused {
+                                    return;
+                                }
+                                if let Err(e) = engine.remove(id, false).await {
+                                    log::warn!("#{id}: could not withdraw the capture: {e:#}");
+                                    return;
+                                }
+                                log::info!(
+                                    "#{id}: {} is a page — offering its formats instead",
+                                    d.url
+                                );
+                                video::open(&handle, d.url, String::new(), 0.0, Vec::new());
+                            });
                             continue;
                         }
                         _ => {}
@@ -374,18 +452,86 @@ fn main() {
         });
 }
 
-/// Cheap synchronous liveness check on the IPC socket.
-fn already_running() -> bool {
-    let path = paths::socket_path();
-    path.exists() && std::os::unix::net::UnixStream::connect(&path).is_ok()
+/// Hand this launch to the instance that already owns the database, if there
+/// is one. `true` means it was taken and there is nothing left to do here.
+///
+/// One connection, asked for once. The previous shape asked "is anything
+/// there?" by opening the socket and dropping it, then opened it a second time
+/// to speak — which on Windows was a bug with teeth: a named pipe instance
+/// serves exactly one client, so the liveness check *consumed* the one that was
+/// waiting, and the open right behind it raced the server's creation of a
+/// replacement and came back `ERROR_PIPE_BUSY`. The error was discarded, so
+/// clicking the Start Menu entry while the app was already running in the
+/// background did nothing whatsoever — no window, no message, no log. Speaking
+/// on the connection we already hold removes the race instead of narrowing it.
+fn hand_off(urls: &[String]) -> bool {
+    use std::io::Write;
+
+    let Some(mut conn) = connect_to_running() else {
+        return false;
+    };
+    let lines: Vec<String> = if urls.is_empty() {
+        log::info!("another instance is running; asking it to show itself");
+        vec![r#"{"type":"focus"}"#.to_string()]
+    } else {
+        // Hand the URLs to the instance that owns the database, rather than
+        // starting a second engine that would fight over it.
+        log::info!("forwarding {} url(s) to the running instance", urls.len());
+        urls.iter()
+            .map(|url| {
+                serde_json::json!({
+                    "type": "download",
+                    "job": { "url": url, "source": "cli" },
+                })
+                .to_string()
+            })
+            .collect()
+    };
+    for line in lines {
+        if let Err(e) = writeln!(conn, "{line}") {
+            // Starting a second engine on the same database would be worse
+            // than this launch doing nothing, so the answer is still "taken".
+            log::error!("could not reach the running instance: {e}");
+            break;
+        }
+    }
+    let _ = conn.flush();
+    true
 }
 
-fn send_to_running(line: String) -> std::io::Result<()> {
-    use std::io::Write;
-    let mut sock = std::os::unix::net::UnixStream::connect(paths::socket_path())?;
-    sock.write_all(line.as_bytes())?;
-    sock.write_all(b"\n")?;
-    sock.flush()
+/// Open the IPC socket of a running instance, or `None` if there is not one.
+#[cfg(unix)]
+fn connect_to_running() -> Option<std::os::unix::net::UnixStream> {
+    let path = paths::socket_path();
+    if !path.exists() {
+        return None;
+    }
+    std::os::unix::net::UnixStream::connect(&path).ok()
+}
+
+/// Same, over a named pipe — there is no socket *file* to check for first, so
+/// this is just "can we open it".
+///
+/// `ERROR_PIPE_BUSY` is not "no instance": it means every instance of the pipe
+/// is occupied this moment. The server creates the next one as soon as it has
+/// accepted, so a short wait finds it. Anything else — the pipe not existing
+/// above all — is answered immediately, so a launch with nothing running is
+/// not delayed at all.
+#[cfg(windows)]
+fn connect_to_running() -> Option<std::fs::File> {
+    const ERROR_PIPE_BUSY: i32 = 231;
+    let path = paths::socket_path();
+    for _ in 0..50 {
+        match std::fs::OpenOptions::new().read(true).write(true).open(&path) {
+            Ok(pipe) => return Some(pipe),
+            Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY) => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            Err(_) => return None,
+        }
+    }
+    log::warn!("the running instance never freed up its pipe");
+    None
 }
 
 /// Accept a bare http(s) URL, or one wrapped in our own `mdm:` scheme so the
