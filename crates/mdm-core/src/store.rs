@@ -16,7 +16,6 @@ pub struct Store {
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS downloads (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    gid             TEXT,
     url             TEXT    NOT NULL,
     filename        TEXT    NOT NULL,
     directory       TEXT    NOT NULL,
@@ -37,7 +36,7 @@ CREATE TABLE IF NOT EXISTS downloads (
 
 CREATE INDEX IF NOT EXISTS idx_downloads_status  ON downloads(status);
 CREATE INDEX IF NOT EXISTS idx_downloads_created ON downloads(created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_downloads_gid     ON downloads(gid);
+
 
 CREATE TABLE IF NOT EXISTS queues (
     name           TEXT PRIMARY KEY,
@@ -107,8 +106,9 @@ impl Store {
     }
 
     /// Anything recorded as running when we last exited is not running now.
-    /// Demote it to queued so the engine re-dispatches it (aria2 resumes from
-    /// the partial file, so no bytes are lost).
+    /// Demote it to queued so the engine re-dispatches it; the fetcher and the
+    /// stream downloader both resume from what is already on disk, so no bytes
+    /// are lost.
     ///
     /// Paused is left alone. It is not a stale state but a decision — the
     /// user's "later", or a capture still waiting to be confirmed — and
@@ -117,7 +117,7 @@ impl Store {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "UPDATE downloads
-                SET status = 'queued', gid = NULL
+                SET status = 'queued'
               WHERE status = 'active'",
             [],
         )?;
@@ -130,12 +130,11 @@ impl Store {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT INTO downloads
-                (gid, url, filename, directory, category, status, total_bytes,
+                (url, filename, directory, category, status, total_bytes,
                  completed_bytes, mime, referrer, headers, created_at, queue, use_ytdlp,
                  output_name, format_id, mirrors)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
             params![
-                d.gid,
                 d.url,
                 d.filename,
                 d.directory,
@@ -157,9 +156,19 @@ impl Store {
         Ok(conn.last_insert_rowid())
     }
 
-    pub fn set_gid(&self, id: i64, gid: Option<&str>) -> Result<()> {
+
+    /// Move a row between the native stream downloader and yt-dlp.
+    ///
+    /// Written to the database rather than kept in memory because it has to
+    /// survive the retry that acts on it: the scheduler re-reads the row, and
+    /// a fallback the row does not remember would dispatch to the extractor
+    /// that just failed.
+    pub fn set_use_ytdlp(&self, id: i64, use_ytdlp: bool) -> Result<()> {
         let conn = self.conn.lock().unwrap();
-        conn.execute("UPDATE downloads SET gid = ?1 WHERE id = ?2", params![gid, id])?;
+        conn.execute(
+            "UPDATE downloads SET use_ytdlp = ?1 WHERE id = ?2",
+            params![use_ytdlp as i32, id],
+        )?;
         Ok(())
     }
 
@@ -253,18 +262,11 @@ impl Store {
         Ok(row)
     }
 
-    pub fn by_gid(&self, gid: &str) -> Result<Option<Download>> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(&SELECT_ALL.replace("{where}", "gid = ?1"))?;
-        let row = stmt.query_row(params![gid], row_to_download).optional()?;
-        Ok(row)
-    }
-
     /// Most recent first, capped so the UI never has to render unbounded rows.
     pub fn list(&self, limit: i64) -> Result<Vec<Download>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, gid, url, filename, directory, category, status, total_bytes,
+            "SELECT id, url, filename, directory, category, status, total_bytes,
                     completed_bytes, mime, referrer, headers, error, sha256,
                     created_at, finished_at, queue, use_ytdlp, output_name,
                     format_id, mirrors
@@ -299,7 +301,7 @@ impl Store {
     ) -> Result<Option<Download>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, gid, url, filename, directory, category, status, total_bytes,
+            "SELECT id, url, filename, directory, category, status, total_bytes,
                     completed_bytes, mime, referrer, headers, error, sha256,
                     created_at, finished_at, queue, use_ytdlp, output_name,
                     format_id, mirrors
@@ -356,7 +358,7 @@ impl Store {
     pub fn next_queued(&self, queue: &str, limit: i64) -> Result<Vec<Download>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, gid, url, filename, directory, category, status, total_bytes,
+            "SELECT id, url, filename, directory, category, status, total_bytes,
                     completed_bytes, mime, referrer, headers, error, sha256,
                     created_at, finished_at, queue, use_ytdlp, output_name,
                     format_id, mirrors
@@ -443,45 +445,44 @@ impl Store {
     }
 }
 
-const SELECT_COLS: &str = "SELECT id, gid, url, filename, directory, category, status,
+const SELECT_COLS: &str = "SELECT id, url, filename, directory, category, status,
      total_bytes, completed_bytes, mime, referrer, headers, error, sha256,
      created_at, finished_at, queue, use_ytdlp, output_name, format_id, mirrors \
      FROM downloads WHERE id = ?1";
 
-const SELECT_ALL: &str = "SELECT id, gid, url, filename, directory, category, status,
+const SELECT_ALL: &str = "SELECT id, url, filename, directory, category, status,
      total_bytes, completed_bytes, mime, referrer, headers, error, sha256,
      created_at, finished_at, queue, use_ytdlp, output_name, format_id, mirrors \
      FROM downloads WHERE {where}";
 
 fn row_to_download(r: &Row<'_>) -> rusqlite::Result<Download> {
-    let headers_json: String = r.get(11)?;
+    let headers_json: String = r.get(10)?;
     let headers: Vec<Header> = serde_json::from_str(&headers_json).unwrap_or_default();
-    let status: String = r.get(6)?;
+    let status: String = r.get(5)?;
     Ok(Download {
         id: r.get(0)?,
-        gid: r.get(1)?,
-        url: r.get(2)?,
-        filename: r.get(3)?,
-        directory: r.get(4)?,
-        category: r.get(5)?,
+        url: r.get(1)?,
+        filename: r.get(2)?,
+        directory: r.get(3)?,
+        category: r.get(4)?,
         status: Status::parse(&status),
-        total_bytes: r.get(7)?,
-        completed_bytes: r.get(8)?,
-        // Live-only fields; refreshed from aria2 on each poll.
+        total_bytes: r.get(6)?,
+        completed_bytes: r.get(7)?,
+        // Live-only fields, refreshed by the poll loop rather than stored.
         download_speed: 0,
         connections: 0,
-        mime: r.get(9)?,
-        referrer: r.get(10)?,
+        mime: r.get(8)?,
+        referrer: r.get(9)?,
         headers,
-        error: r.get(12)?,
-        sha256: r.get(13)?,
-        created_at: r.get(14)?,
-        finished_at: r.get(15)?,
-        queue: r.get(16)?,
-        use_ytdlp: r.get::<_, i64>(17)? != 0,
-        output_name: r.get(18)?,
-        format_id: r.get(19)?,
+        error: r.get(11)?,
+        sha256: r.get(12)?,
+        created_at: r.get(13)?,
+        finished_at: r.get(14)?,
+        queue: r.get(15)?,
+        use_ytdlp: r.get::<_, i64>(16)? != 0,
+        output_name: r.get(17)?,
+        format_id: r.get(18)?,
         // A row written before this column existed reads as an empty list.
-        mirrors: serde_json::from_str(&r.get::<_, String>(20)?).unwrap_or_default(),
+        mirrors: serde_json::from_str(&r.get::<_, String>(19)?).unwrap_or_default(),
     })
 }

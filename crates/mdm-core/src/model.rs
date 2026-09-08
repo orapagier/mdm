@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-/// A single HTTP header captured by the extension and replayed by aria2.
+/// A single HTTP header captured by the extension and replayed on the download.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Header {
     pub name: String,
@@ -10,7 +10,7 @@ pub struct Header {
 }
 
 impl Header {
-    /// aria2's `--header` wire format.
+    /// Rendered as `Name: value` when the request is built.
     pub fn to_arg(&self) -> String {
         format!("{}: {}", self.name, self.value)
     }
@@ -23,7 +23,7 @@ impl Header {
 pub struct Job {
     pub url: String,
     /// Other servers the capture found holding this same file (RFC 6249
-    /// `Link: rel=duplicate`). Handed to aria2 alongside `url` so one file can
+    /// `Link: rel=duplicate`). Dealt across connections alongside `url` so one file can
     /// be pulled from several places at once.
     #[serde(default)]
     pub mirrors: Vec<String>,
@@ -47,7 +47,7 @@ pub struct Job {
     /// Set by the UI when the user picks a directory explicitly.
     #[serde(default)]
     pub directory: Option<String>,
-    /// Whether yt-dlp belongs between this URL and aria2.
+    /// Whether yt-dlp belongs between this URL and the downloader.
     ///
     /// Three answers rather than two. `None` is "no opinion", and only then
     /// does the engine guess from the host. A caller that has already looked
@@ -95,19 +95,6 @@ impl Status {
         matches!(self, Status::Complete | Status::Failed | Status::Removed)
     }
 
-    /// Map an aria2 status string onto ours.
-    pub fn from_aria2(s: &str) -> Self {
-        match s {
-            "active" => Status::Active,
-            "waiting" => Status::Queued,
-            "paused" => Status::Paused,
-            "complete" => Status::Complete,
-            "error" => Status::Failed,
-            "removed" => Status::Removed,
-            _ => Status::Queued,
-        }
-    }
-
     pub fn as_str(self) -> &'static str {
         match self {
             Status::Queued => "queued",
@@ -131,13 +118,11 @@ impl Status {
     }
 }
 
-/// A download as the app tracks it. `gid` is aria2's handle, absent until the
-/// job is actually dispatched.
+/// A download as the app tracks it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Download {
     pub id: i64,
-    pub gid: Option<String>,
     pub url: String,
     pub filename: String,
     pub directory: String,
@@ -198,6 +183,24 @@ impl Download {
     }
 }
 
+/// One server's login, as the user typed it.
+///
+/// Kept in `settings.toml` in the clear, which is worth being plain about: the
+/// file is under the user's own profile and readable only by them, but anything
+/// with that user's rights can read it. It is the same bargain every
+/// `.netrc`-shaped file makes. Nothing here is sent anywhere except to the host
+/// it names, over the scheme that host was reached by.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct Credential {
+    /// The host it applies to — `files.example.com`. Matched exactly, and on
+    /// the *final* URL, so a redirect to another host does not carry the
+    /// password with it.
+    pub host: String,
+    pub username: String,
+    pub password: String,
+}
+
 /// User-facing configuration, persisted as TOML.
 ///
 /// camelCase rather than the more usual TOML snake_case: this same struct is
@@ -210,12 +213,12 @@ pub struct Settings {
     pub download_dir: String,
     /// Sort finished files into per-type subdirectories.
     pub categorize: bool,
-    /// Connections to a single server per download. aria2's RPC caps this at
-    /// 16 regardless of what its command line accepts.
+    /// The most connections the governor may open to one server: a ceiling,
+    /// not a target. It measures what this server and this link actually
+    /// reward and settles on the fewest connections that go that fast, which
+    /// is commonly well below this number.
     pub connections: u8,
-    /// Segments per download; aria2 will not split below `min_split_size`.
-    pub split: u8,
-    /// Smallest piece aria2 will hand to a separate connection.
+    /// Smallest piece worth handing to a separate connection.
     pub min_split_size: String,
     /// Downloads running at once.
     pub max_concurrent: u8,
@@ -224,16 +227,29 @@ pub struct Settings {
     /// Per-download cap in bytes/sec; 0 means unlimited.
     pub max_speed_per_download: u64,
     pub retry_limit: u8,
+    /// How to reach the internet.
+    ///
+    /// Empty means "the way everything else on this machine does": the system
+    /// proxy settings, which is what a browser follows and what an office
+    /// network configures centrally. A URL — `http://host:3128`,
+    /// `socks5://host:1080`, either with `user:password@` in front of the host
+    /// — overrides that. The word `off` ignores the system settings and goes
+    /// direct, which is the only way to say "no proxy" on a machine that
+    /// configures one.
+    pub proxy: String,
+    /// Logins for servers that ask for one, matched by host.
+    ///
+    /// A download captured from the browser already carries the browser's own
+    /// `Authorization` header, so those need nothing here; this is for the
+    /// links typed, pasted or queued by hand, which arrive with no session
+    /// behind them.
+    pub credentials: Vec<Credential>,
     /// Watch the clipboard for URLs and offer to download them.
     pub clipboard_watch: bool,
     /// Verify SHA-256 after completion.
     pub checksum: bool,
     pub notify: bool,
     pub start_minimized: bool,
-    /// aria2 RPC port. Changing it restarts the daemon.
-    pub rpc_port: u16,
-    /// Extra flags appended to the aria2 command line, for power users.
-    pub aria2_extra_args: Vec<String>,
     pub ytdlp_format: String,
     /// Browser yt-dlp should lift cookies from, in its `--cookies-from-browser`
     /// syntax (e.g. "firefox", "firefox:/path/to/profile", "chromium").
@@ -243,6 +259,13 @@ pub struct Settings {
     /// `["--extractor-args", "youtube:player_client=web_safari"]`.
     /// YouTube's extraction changes often; this avoids needing a rebuild.
     pub ytdlp_extra_args: Vec<String>,
+    /// Whether MDM keeps its own copy of yt-dlp current.
+    ///
+    /// Only ever its own copy — one installed by a package manager is that
+    /// package manager's to update. Worth a switch because a pinned version
+    /// is a real thing to want: a site can break in a new release as easily
+    /// as it is fixed by one.
+    pub ytdlp_auto_update: bool,
 }
 
 impl Default for Settings {
@@ -255,20 +278,17 @@ impl Default for Settings {
             // 16 is the sweet spot: enough to saturate most links, low
             // enough that servers rarely throttle or ban for it.
             connections: 16,
-            split: 16,
             min_split_size: "1M".into(),
             max_concurrent: 4,
             max_speed: 0,
             max_speed_per_download: 0,
             retry_limit: 5,
+            proxy: String::new(),
+            credentials: Vec::new(),
             clipboard_watch: false,
             checksum: false,
             notify: true,
             start_minimized: false,
-            // Deliberately not aria2's default 6800: MDM runs its own daemon
-            // and must not collide with one the user already has.
-            rpc_port: 6810,
-            aria2_extra_args: Vec::new(),
             // Best picture, with one exception: a codec the desktop cannot
             // decode. TikTok offers the same video twice, 1080p in HEVC and
             // 720p in H.264, and prefers the HEVC — which is patent-encumbered
@@ -279,7 +299,24 @@ impl Default for Settings {
             // more that do not. Sites offering nothing else are unaffected:
             // the last branch is the old expression, so HEVC is still taken
             // where it is the only thing on offer.
-            ytdlp_format: "bestvideo*[vcodec!*=hev][vcodec!*=h265]+bestaudio/\
+            //
+            // The branches are ordered so that both halves come from one
+            // container family wherever that is possible: two MP4-family
+            // streams are merged by `stream::mp4`, two WebM ones by
+            // `stream::mkv`, and either way the whole download is MDM's own
+            // work with no ffmpeg anywhere. A mix of the two would mean
+            // translating a codec description from one container's way of
+            // writing it to the other's, which is understanding rather than
+            // copying — so it is avoided here instead, and only the last
+            // branches, for a site that offers nothing better, fall back to
+            // yt-dlp doing the merge.
+            //
+            // Picture quality is not traded for this: YouTube offers AV1 in
+            // MP4 up to 2160p, so the first branch is not a lower ceiling
+            // than the third.
+            ytdlp_format: "bestvideo*[vcodec!*=hev][vcodec!*=h265][ext=mp4]+bestaudio[ext=m4a]/\
+                           bestvideo*[vcodec!*=hev][vcodec!*=h265][ext=webm]+bestaudio[ext=webm]/\
+                           bestvideo*[vcodec!*=hev][vcodec!*=h265]+bestaudio/\
                            best[vcodec!*=hev][vcodec!*=h265]/\
                            bestvideo*+bestaudio/best"
                 .into(),
@@ -288,6 +325,7 @@ impl Default for Settings {
             // signed in in Firefox, which is where the request came from.
             ytdlp_cookies_from: "firefox".into(),
             ytdlp_extra_args: Vec::new(),
+            ytdlp_auto_update: true,
         }
     }
 }

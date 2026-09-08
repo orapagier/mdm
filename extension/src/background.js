@@ -25,6 +25,23 @@ async function loadSettings() {
   return cfg;
 }
 
+/**
+ * Resolves once `cfg` holds the user's settings rather than the defaults.
+ *
+ * Started here, at the top of the script, and awaited by every handler that
+ * reads `cfg`. Chromium stops the service worker after about thirty seconds
+ * idle and starts it again for the next event, so this file is re-run far more
+ * often than Firefox's event page re-runs it — and a handler that fires in the
+ * gap before the read completes would see `enabled: true`, an empty blocklist
+ * and every other default. Capturing a download the user had switched off is
+ * not a race worth taking: the wait is one storage read, once per worker.
+ */
+let settingsLoaded = false;
+const settingsReady = loadSettings().then((loaded) => {
+  settingsLoaded = true;
+  return loaded;
+});
+
 browser.storage.onChanged.addListener((changes, area) => {
   if (area === "local" && changes.settings) {
     cfg = { ...DEFAULTS, ...(changes.settings.newValue || {}) };
@@ -45,9 +62,24 @@ const state = {
 const requests = new Map();
 const REQUEST_TTL_MS = 60_000;
 
-/** Guards against the webRequest net and the downloads net both firing. */
+/**
+ * Guards against two nets both firing for one download.
+ *
+ * A note left by whichever net got there first, for the other to find a moment
+ * later: same URL, same click. It says nothing about the *file* — only that
+ * this particular hand-off has already been made.
+ *
+ * Which is why a claim is taken by its reader rather than left to expire, and
+ * why the window is seconds rather than tens of them. The two nets fire within
+ * milliseconds of each other, so a note that outlives that gap is not
+ * protecting anything — it is lying in wait for the user to ask for the same
+ * file a second time, and answering "already captured" about a download that
+ * has not happened yet. Left standing for fifteen seconds it did exactly that:
+ * the first click went to MDM, the second read MDM's own note and went to the
+ * browser, and the two appeared to take turns.
+ */
 const recentlyCaptured = new Map(); // url -> timestamp
-const CAPTURE_DEDUPE_MS = 15_000;
+const CAPTURE_DEDUPE_MS = 5_000;
 
 /** tabId -> Map<url, mediaInfo> discovered by the sniffer. */
 const tabMedia = new Map();
@@ -56,23 +88,27 @@ function markCaptured(url) {
   recentlyCaptured.set(url, Date.now());
 }
 
-function wasRecentlyCaptured(url) {
+/** Take the claim on this URL, if there is one. True if there was. */
+function claimCapture(url) {
   const t = recentlyCaptured.get(url);
   if (t === undefined) return false;
-  if (Date.now() - t > CAPTURE_DEDUPE_MS) {
-    recentlyCaptured.delete(url);
-    return false;
-  }
-  return true;
+  recentlyCaptured.delete(url);
+  return Date.now() - t <= CAPTURE_DEDUPE_MS;
 }
 
-/** Periodic sweep; cheap and keeps the maps from growing without bound. */
+/** Periodic sweep; cheap and keeps the maps from growing without bound.
+ *
+ * On Chromium the service worker is stopped when idle and every one of these
+ * maps goes with it, which does the same job more thoroughly — so a sweep that
+ * never fires there costs nothing. */
 setInterval(() => {
   const now = Date.now();
   for (const [id, r] of requests)
     if (now - r.at > REQUEST_TTL_MS) requests.delete(id);
   for (const [url, t] of recentlyCaptured)
     if (now - t > CAPTURE_DEDUPE_MS) recentlyCaptured.delete(url);
+  for (const [url, seen] of seenResponses)
+    if (now - seen.at > RESPONSE_TTL_MS) seenResponses.delete(url);
 }, 30_000);
 
 /* ------------------------------------------------------------------ *
@@ -104,7 +140,78 @@ function forwardableHeaders(list) {
 
 /* ------------------------------------------------------------------ *
  * Net 1 — webRequest
+ *
+ * Firefox lets an extension hold a response open while it decides what to do
+ * with it. Chromium removed that in Manifest V3: `webRequestBlocking` is now
+ * only for force-installed enterprise extensions, so on Chrome and Edge this
+ * net can watch but not intercept, and net 2 does the catching.
+ *
+ * Watching is still worth doing there. Response headers are the only place a
+ * download's true size, type and mirrors are stated, and the downloads API
+ * reports none of them — so what this sees is remembered for net 2 to use,
+ * and a Chromium capture ends up describing the file as well as a Firefox one
+ * does.
  * ------------------------------------------------------------------ */
+
+/** Does this browser let a listener hold a response open and cancel it? */
+const CAN_BLOCK = (browser.runtime.getManifest().permissions || []).includes(
+  "webRequestBlocking"
+);
+
+/**
+ * Chromium hides `Cookie`, `Referer` and friends from webRequest unless the
+ * listener asks for "extraHeaders"; Firefox has no such option and rejects the
+ * value outright. Asked for only where it exists.
+ */
+const EXTRA_HEADERS = browser.webRequest.OnBeforeSendHeadersOptions?.EXTRA_HEADERS
+  ? ["extraHeaders"]
+  : [];
+
+/**
+ * The request types this browser will accept in a webRequest filter.
+ *
+ * `object_subrequest` is Firefox's alone, and Chromium does not merely ignore
+ * an unknown type — it throws out the whole `addListener` call, which on a
+ * service worker takes the entire extension down with it: no capture, no
+ * native connection, and a popup stuck on "Checking…".
+ *
+ * Filtered against the browser's own enum rather than a hardcoded allowlist,
+ * so a type either browser adds later needs no change here. `CAPTURABLE_TYPES`
+ * itself is left whole: it is also what `classify` matches against, and the
+ * classification is right on both browsers even where the filter cannot say so.
+ */
+const FILTER_TYPES = (() => {
+  const wanted = [...CAPTURABLE_TYPES];
+  const known = browser.webRequest.ResourceType;
+  if (known) {
+    const allowed = new Set(Object.values(known));
+    return wanted.filter((type) => allowed.has(type));
+  }
+  // No enum to ask. Falling back to the whole set is what caused the crash in
+  // the first place, so the fallback drops the one type that is Firefox's
+  // alone — and only on the build that cannot block, which is the Chromium
+  // one, because these two manifests are ours and only Firefox's asks for
+  // `webRequestBlocking`.
+  return CAN_BLOCK ? wanted : wanted.filter((type) => type !== "object_subrequest");
+})();
+
+/** url -> the response headers net 1 saw, for net 2 to describe the file with. */
+const seenResponses = new Map();
+const RESPONSE_TTL_MS = 60_000;
+
+function rememberResponse(url, headers) {
+  seenResponses.set(url, { headers, at: Date.now() });
+}
+
+function recallResponse(url) {
+  const seen = seenResponses.get(url);
+  if (!seen) return null;
+  if (Date.now() - seen.at > RESPONSE_TTL_MS) {
+    seenResponses.delete(url);
+    return null;
+  }
+  return seen.headers;
+}
 
 browser.webRequest.onBeforeSendHeaders.addListener(
   (details) => {
@@ -114,7 +221,7 @@ browser.webRequest.onBeforeSendHeaders.addListener(
       type: details.type,
       tabId: details.tabId,
       cookieStoreId: details.cookieStoreId,
-      documentUrl: details.documentUrl || details.originUrl || "",
+      documentUrl: details.documentUrl || details.originUrl || details.initiator || "",
       headers: forwardableHeaders(details.requestHeaders),
       at: Date.now(),
     });
@@ -122,12 +229,18 @@ browser.webRequest.onBeforeSendHeaders.addListener(
   },
   // Not "blocking": this listener only records headers, and making every
   // navigation wait on the event page would cost latency for no gain.
-  { urls: ["<all_urls>"], types: [...CAPTURABLE_TYPES] },
-  ["requestHeaders"]
+  { urls: ["<all_urls>"], types: FILTER_TYPES },
+  ["requestHeaders", ...EXTRA_HEADERS]
 );
 
 browser.webRequest.onHeadersReceived.addListener(
   (details) => {
+    // Deliberately a flag rather than an `await`: this listener is *blocking*
+    // on Firefox, and returning a promise from it would hold every response on
+    // the browser for as long as the promise takes. Skipping the handful of
+    // requests that arrive before the first storage read is finished costs at
+    // most one capture, and net 2 catches that one anyway.
+    if (!settingsLoaded) return {};
     const req = requests.get(details.requestId) || {
       method: details.method,
       url: details.url,
@@ -147,9 +260,20 @@ browser.webRequest.onHeadersReceived.addListener(
     if (!verdict.capture) return {};
 
     const url = details.url;
-    if (wasRecentlyCaptured(url)) return {};
+    if (claimCapture(url)) return {};
 
-    // Fail open: if the daemon is not reachable, let Firefox download it
+    // Everything above is the same judgement on either browser. Only the
+    // acting on it differs.
+    if (!CAN_BLOCK) {
+      // Nothing can be cancelled here, so say nothing to the daemon yet —
+      // acting now would download the file twice, once by each of us. Leave
+      // what was learned where net 2 will find it when the browser announces
+      // the same URL as a download a moment later.
+      rememberResponse(url, headers);
+      return {};
+    }
+
+    // Fail open: if the daemon is not reachable, let the browser download it
     // normally rather than stalling or losing the file.
     if (!Native.isAvailable()) {
       Native.connect();
@@ -158,9 +282,9 @@ browser.webRequest.onHeadersReceived.addListener(
 
     const job = buildJob(req, details, headers, verdict.reason);
 
-    // Firefox — unlike Chrome — lets a blocking listener return a Promise, so
-    // the request is held open until the daemon confirms it took the job.
-    // Only then is it cancelled, which makes double-downloads impossible.
+    // Firefox lets a blocking listener return a Promise, so the request is
+    // held open until the daemon confirms it took the job. Only then is it
+    // cancelled, which makes double-downloads impossible.
     return Native.request({ type: "download", job }, cfg.handoffTimeoutMs)
       .then((reply) => {
         if (reply && reply.accepted) {
@@ -170,12 +294,12 @@ browser.webRequest.onHeadersReceived.addListener(
         return {};
       })
       .catch((e) => {
-        console.warn("[mdm] handoff failed, leaving to Firefox:", e.message);
+        console.warn("[mdm] handoff failed, leaving it to the browser:", e.message);
         return {};
       });
   },
-  { urls: ["<all_urls>"], types: [...CAPTURABLE_TYPES] },
-  ["responseHeaders", "blocking"]
+  { urls: ["<all_urls>"], types: FILTER_TYPES },
+  CAN_BLOCK ? ["responseHeaders", "blocking"] : ["responseHeaders"]
 );
 
 function cleanup(details) {
@@ -230,79 +354,303 @@ async function ensureNative(timeoutMs = 2000) {
   return Native.isAvailable();
 }
 
-browser.downloads.onCreated.addListener(async (item) => {
-  if (!cfg.enabled) return;
-  if (wasRecentlyCaptured(item.url)) return;
+/**
+ * Does this browser hold a download open while extensions name it?
+ *
+ * `onDeterminingFilename` is Chromium's, and it is the one blocking hook
+ * Manifest V3 left standing: a listener that returns true keeps the download
+ * suspended for up to fifteen seconds while it decides, which is most of what
+ * `webRequestBlocking` used to buy on Firefox.
+ *
+ * Where it matters is *when* it fires. Chromium settles a download's target in
+ * order — generate a name, **notify extensions**, reserve the path, then
+ * prompt the user — so a download cancelled from this listener never reaches
+ * the "Save as" dialog. Caught in `onCreated` instead, one step later, the
+ * browser has already put its own file picker on screen by the time the
+ * hand-off finishes, and the user answers two dialogs for one click: the
+ * browser's, and then MDM's.
+ */
+const HOLDS_FILENAME = !!browser.downloads.onDeterminingFilename;
+
+/**
+ * Decide a plain http(s) download and hand it to MDM.
+ *
+ * Everything the two nets below must agree on lives here; they differ only in
+ * how the browser's own copy is kept still while this runs. Returns whether
+ * MDM took the job, and the caller clears the browser's copy only if it did.
+ */
+async function offerWebDownload(item) {
+  await settingsReady;
+  if (!cfg.enabled) return false;
+  // Another net's claim — the context menu, or net 1 where net 1 can act.
+  // Never this one's own: see the markCaptured at the end of this function.
+  if (claimCapture(item.url)) return false;
   if (state.bypass.has(item.url)) {
     state.bypass.delete(item.url);
-    return;
+    return false;
   }
-  if (!(await ensureNative())) return;
-
-  // A blob has no server to re-fetch it from; the page is the only source.
-  if (/^blob:/i.test(item.url)) return captureBlob(item);
-  // A data: URL cannot be re-fetched either — but it does not need to be. It
-  // *is* the bytes, spelled out in the URL, so it is handed over the way a
-  // blob's are rather than left behind as unfetchable.
-  if (/^data:/i.test(item.url)) return captureDataUrl(item);
-  if (!/^https?:\/\//i.test(item.url)) return;
 
   const host = hostOf(item.url);
-  if (host && cfg.blockedSites.some((s) => hostMatches(host, s))) return;
+  if (host && cfg.blockedSites.some((s) => hostMatches(host, s))) return false;
 
   const filename = sanitizeFilename(
     (item.filename || "").split("/").pop() || filenameFromUrl(item.url)
   );
   const ext = extensionOf(filename);
-  if (cfg.blockedExtensions.includes(ext)) return;
-  if (looksLikeImage(item.mime || "", ext) && !cfg.captureImages) return;
+  if (cfg.blockedExtensions.includes(ext)) return false;
+  if (looksLikeImage(item.mime || "", ext) && !cfg.captureImages) return false;
 
   // No size floor here, deliberately, and none by file type either.
   //
   // That threshold belongs to the *automatic* net, where a small response is
   // far more likely to be an API reply than a file and guessing wrong costs
-  // the user a download they never asked for. Nothing reaches this listener by
-  // guesswork: the browser has already decided every one of these is a
+  // the user a download they never asked for. Nothing reaches these listeners
+  // by guesswork: the browser has already decided every one of these is a
   // download. A 40 KB photo saved out of a chat is exactly as much a download
   // as a 4 GB image, and skipping it only meant MDM captured some of what the
   // browser downloaded rather than all of it.
 
+  if (!(await ensureNative())) return false;
+
+  // What net 1 saw of the response, if it saw it. On Firefox this is usually
+  // empty — net 1 captured the file itself and this never runs — but on
+  // Chromium it is the only sight anyone gets of the response headers, and it
+  // is what turns "some bytes, type unknown" into a properly described job.
+  const seen = recallResponse(item.url);
+  const size =
+    item.fileSize > 0
+      ? item.fileSize
+      : item.totalBytes > 0
+        ? item.totalBytes
+        : seen
+          ? sizeOf(seen)
+          : -1;
+
   const job = {
     url: item.url,
     filename: filename || "download",
-    size: item.fileSize > 0 ? item.fileSize : (item.totalBytes > 0 ? item.totalBytes : -1),
-    mime: item.mime || "",
+    size,
+    mime: item.mime || (seen ? mimeOf(seen) : ""),
+    mirrors: seen ? mirrorsOf(seen, item.url) : [],
     headers: await headersForUrl(item.url, item.referrer, item.cookieStoreId),
     referrer: item.referrer || "",
     cookieStoreId: item.cookieStoreId || "",
     tabId: -1,
-    reason: "downloads.onCreated",
+    reason: "downloads API",
     source: "downloads",
   };
 
+  const reply = await Native.request({ type: "download", job }, 4000);
+  if (!reply || !reply.accepted) return false;
+
+  // Claimed only where net 1 can act on it, because net 1 is its only reader:
+  // on Firefox the response headers can arrive after the download item has
+  // been created, so net 1 has still to be told this one is spoken for. Where
+  // net 1 can only watch, nothing will ever read this claim except this same
+  // line on the user's next download of the same file — which would then be
+  // handed straight back to the browser.
+  if (CAN_BLOCK) markCaptured(item.url);
+  return true;
+}
+
+/* ------------------------------------------------------------------ *
+ * Net 2a — while the browser is still holding the download
+ * ------------------------------------------------------------------ */
+
+if (HOLDS_FILENAME) {
+  browser.downloads.onDeterminingFilename.addListener((item, suggest) => {
+    // blob: and data: carry their bytes rather than an address, and are dealt
+    // with in net 2b where the page that owns them can be read back. Returning
+    // false leaves the browser's own naming of them untouched.
+    if (!/^https?:\/\//i.test(item.url)) return false;
+
+    (async () => {
+      let taken = false;
+      try {
+        taken = await offerWebDownload(item);
+      } catch (e) {
+        console.warn("[mdm] handoff failed, leaving it to the browser:", e.message);
+      }
+      if (taken) await takeOverDownload(item.id);
+
+      // Released either way, and last. Until this call the browser has neither
+      // asked where to put the file nor written a byte of it to disk, so the
+      // cancel above is the whole of its copy — there is no partial file to
+      // clear up and no dialog to dismiss, which is the difference between
+      // this net and the backstop below. On a download that was taken the item
+      // is already erased and this throws; that is the ordinary ending here,
+      // not a failure.
+      try {
+        suggest();
+      } catch (e) {
+        /* already cancelled and erased */
+      }
+    })();
+
+    // "suggest will be called asynchronously" — the fifteen seconds Chromium
+    // allows for that are well clear of ensureNative (2s) plus the hand-off
+    // (4s), which is the longest this can take before it gives up.
+    return true;
+  });
+}
+
+/* ------------------------------------------------------------------ *
+ * Net 2b — the downloads backstop
+ * ------------------------------------------------------------------ */
+
+browser.downloads.onCreated.addListener(async (item) => {
+  // Whether this is a network transfer at all, decided without awaiting
+  // anything. blob: and data: downloads are the page's own bytes, already in
+  // memory; there is no second transfer to race with, and captureBlob and
+  // captureDataUrl clear the browser's copy themselves.
+  const isWeb = /^https?:\/\//i.test(item.url);
+
+  // Where the browser is about to hold the download for us, that is where it
+  // is caught: net 2a decides it before the file picker opens, and deciding it
+  // here as well would be two hand-offs for one click. A web download that
+  // never reaches that listener is left to the browser, which is the same
+  // failing open every other path in this file does.
+  if (isWeb && HOLDS_FILENAME) return;
+
+  // Nothing above this line awaits, and that is the whole point.
+  //
+  // On a browser that will not hold the download, the transfer is already
+  // running by the time this fires, so every await before the browser's copy
+  // is stopped is bytes written to disk. `await settingsReady` used to come
+  // first, and it is not a cheap await here: this event is usually what
+  // *starts* the service worker, so it is a storage read on a cold worker,
+  // after importScripts has pulled in five files. For a small file that is the
+  // entire download, and the hand-off then arrives to find nothing left to
+  // cancel -- which is the double download this is here to prevent.
+  //
+  // So the copy is stopped first and asked about afterwards. Paused rather
+  // than cancelled because the decision has not been made yet and a pause is
+  // free to undo; the finally below resumes every path that does not end with
+  // MDM taking the download, so a daemon that is missing, busy or unwilling
+  // leaves the browser to finish exactly as it would have.
+  const held = isWeb ? await holdBrowserCopy(item.id) : false;
+  let taken = false;
+
   try {
-    const reply = await Native.request({ type: "download", job }, 4000);
-    if (!reply || !reply.accepted) return;
-    markCaptured(item.url);
+    await settingsReady;
+    if (!cfg.enabled) return;
+    if (claimCapture(item.url)) return;
+    if (state.bypass.has(item.url)) {
+      state.bypass.delete(item.url);
+      return;
+    }
+
+    // A blob has no server to re-fetch it from; the page is the only source.
+    if (/^blob:/i.test(item.url)) {
+      if (!(await ensureNative())) return;
+      return await captureBlob(item);
+    }
+    // A data: URL cannot be re-fetched either — but it does not need to be. It
+    // *is* the bytes, spelled out in the URL, so it is handed over the way a
+    // blob's are rather than left behind as unfetchable.
+    if (/^data:/i.test(item.url)) {
+      if (!(await ensureNative())) return;
+      return await captureDataUrl(item);
+    }
+    if (!isWeb) return;
+
+    if (!(await offerWebDownload(item))) return;
+    taken = true;
     await takeOverDownload(item.id);
   } catch (e) {
     console.warn("[mdm] backstop handoff failed:", e.message);
+  } finally {
+    // Every way out of that block other than MDM having taken the download —
+    // a return, a throw, a daemon that said no — arrives here. held is false
+    // for anything that was never paused, and releasing that is a no-op.
+    if (!taken) await releaseBrowserCopy(item.id, held);
   }
 });
 
 /**
- * Leave Firefox with no trace of a download MDM has taken over.
+ * Hold the browser's own transfer still while the hand-off is decided.
  *
- * Cancel first, so a transfer still running lets go of its partial file. But a
- * small file — and every blob — can be finished before the hand-off completes,
- * and a cancelled-too-late download leaves a second copy on disk under
- * Firefox's own name, which is exactly the duplicate this is here to prevent:
- * hence removeFile as well, which only bites when it did finish.
+ * Whether there is anything to release afterwards is the return value. A
+ * download the browser will not pause — one that has already finished, most
+ * often — is not a failure here: it only means that if MDM does take the job,
+ * clearing the browser's copy falls to removeFile rather than to cancel.
+ */
+async function holdBrowserCopy(id) {
+  try {
+    await browser.downloads.pause(id);
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+/**
+ * Let the browser get on with a download MDM did not take.
+ *
+ * Failing open is the rule everywhere in this file: a daemon that is missing,
+ * busy or unwilling has to cost the user nothing. This is what makes pausing
+ * before the answer is known a safe thing to do.
+ */
+async function releaseBrowserCopy(id, held) {
+  if (!held) return;
+  try {
+    await browser.downloads.resume(id);
+  } catch (e) {
+    console.warn("[mdm] could not resume the browser's copy:", e.message);
+  }
+}
+
+/**
+ * Leave the browser with no trace of a download MDM has taken over.
+ *
+ * Cancel first, so a transfer still running — or held by holdBrowserCopy —
+ * lets go of its partial file. But a small file, and every blob, can be
+ * finished before the hand-off completes, and a cancelled-too-late download
+ * leaves a second copy on disk under the browser's own name, which is exactly
+ * the duplicate this is here to prevent: hence removeFile as well, which only
+ * bites when it did finish.
+ *
+ * Each of those fails for an ordinary reason as well as an alarming one —
+ * cancel on a download that already finished, removeFile on one that did not —
+ * so neither failing is worth reporting by itself. What is worth reporting is
+ * a copy that survived both, and that is checked rather than assumed. Every
+ * failure here used to be swallowed, which is what let a duplicate sit on disk
+ * with nothing anywhere to say why.
  */
 async function takeOverDownload(id) {
-  await browser.downloads.cancel(id).catch(() => {});
-  await browser.downloads.removeFile(id).catch(() => {});
-  await browser.downloads.erase({ id }).catch(() => {});
+  try {
+    await browser.downloads.cancel(id);
+  } catch (e) {
+    // Expected when it had already finished; removeFile is what covers that.
+  }
+  try {
+    await browser.downloads.removeFile(id);
+  } catch (e) {
+    // Expected when the cancel got there first: there is no file to remove.
+  }
+
+  let survived = false;
+  try {
+    const [left] = await browser.downloads.search({ id });
+    survived = !!(left && left.exists);
+  } catch (e) {
+    // Not searchable — there is nothing further to be learned about it.
+  }
+
+  // Erased last: the entry has to still exist for the check above to see it.
+  try {
+    await browser.downloads.erase({ id });
+  } catch (e) {
+    console.warn("[mdm] could not erase the browser's download entry:", e.message);
+  }
+
+  if (survived) {
+    console.warn(
+      "[mdm] the browser's copy survived the hand-off and is still on disk — " +
+        "MDM has downloaded it as well"
+    );
+  }
+  return !survived;
 }
 
 /* ------------------------------------------------------------------ *
@@ -580,7 +928,8 @@ const STREAM_HINT = /\.(m3u8|mpd)(\?|$)/i;
 const MAX_SNIFFED = 50;
 
 browser.webRequest.onHeadersReceived.addListener(
-  (details) => {
+  async (details) => {
+    await settingsReady;
     if (!cfg.sniffMedia || details.tabId < 0) return;
     const headers = headerMap(details.responseHeaders);
     const mime = mimeOf(headers);
@@ -836,6 +1185,7 @@ function notifyPlain(message) {
  * A page serving a plain file gets that file downloaded directly.
  */
 async function grabVideo(msg, tabId) {
+  await settingsReady;
   const pageUrl = msg.pageUrl || "";
   const host = hostOf(pageUrl);
   if (host && cfg.blockedSites.some((s) => hostMatches(host, s))) {
@@ -1112,7 +1462,12 @@ Native.onMessage((msg) => {
  * Startup
  * ------------------------------------------------------------------ */
 
-loadSettings().then(() => {
+// The settings read is already in flight from the top of the file; this only
+// waits for it so the badge is drawn from the real ones. Connecting the native
+// port is the other half: it is what makes the app reachable, and on Chromium
+// an open port is also what keeps this service worker resident instead of
+// being stopped thirty seconds later.
+settingsReady.then(() => {
   Native.connect();
   updateBadge();
 });

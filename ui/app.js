@@ -98,6 +98,10 @@ function updateRow({ refs }, d) {
 
   const parts = [d.category];
   if (d.status === "failed" && d.error) parts.push(d.error);
+  // A queued row only carries a reason when an attempt failed and another is
+  // pending. Showing "queued" instead would make a download that is actively
+  // recovering look like one nobody has started.
+  else if (d.status === "queued" && d.error) parts.push(d.error);
   else if (d.status === "complete") parts.push(d.directory);
   else if (d.connections > 0) parts.push(`${d.connections} connections`);
   else parts.push(d.status);
@@ -379,6 +383,54 @@ function wireSettingsDialog() {
   const KB = 1024;
   let mainQueue = null;
 
+  // Edited as a copy: a login removed and then Cancel pressed must come back.
+  let credentials = [];
+
+  function renderCredentials() {
+    $("s-creds").replaceChildren(
+      ...credentials.map((cred, i) => {
+        const row = document.createElement("tr");
+        const host = document.createElement("td");
+        host.textContent = cred.host;
+        const user = document.createElement("td");
+        user.textContent = cred.username;
+        // The password is never shown, here or anywhere else. Knowing one is
+        // set is the whole of what this row has to say about it.
+        const secret = document.createElement("td");
+        secret.textContent = cred.password ? "••••••••" : "no password";
+        secret.className = "muted";
+        const remove = document.createElement("td");
+        const button = document.createElement("button");
+        button.type = "button";
+        button.textContent = "Remove";
+        button.addEventListener("click", () => {
+          credentials.splice(i, 1);
+          renderCredentials();
+        });
+        remove.append(button);
+        row.append(host, user, secret, remove);
+        return row;
+      })
+    );
+  }
+
+  $("s-cred-add").addEventListener("click", () => {
+    const host = $("s-cred-host").value.trim().toLowerCase();
+    if (!host) return;
+    // One login per host: a second for the same host would never be reached,
+    // so adding it replaces the first rather than sitting under it unused.
+    credentials = credentials.filter((c) => c.host.toLowerCase() !== host);
+    credentials.push({
+      host,
+      username: $("s-cred-user").value,
+      password: $("s-cred-pass").value,
+    });
+    $("s-cred-host").value = "";
+    $("s-cred-user").value = "";
+    $("s-cred-pass").value = "";
+    renderCredentials();
+  });
+
   // Day chips are static; build them once.
   $("q-days").replaceChildren(
     ...DAY_NAMES.map((name, i) => {
@@ -395,15 +447,18 @@ function wireSettingsDialog() {
     $("s-dir").value = settings.downloadDir;
     $("s-categorize").checked = settings.categorize;
     $("s-connections").value = settings.connections;
-    $("s-split").value = settings.split;
     $("s-minsplit").value = settings.minSplitSize;
     $("s-concurrent").value = settings.maxConcurrent;
     $("s-maxspeed").value = Math.round(settings.maxSpeed / KB);
     $("s-maxspeed-each").value = Math.round(settings.maxSpeedPerDownload / KB);
     $("s-retries").value = settings.retryLimit;
+    $("s-proxy").value = settings.proxy || "";
+    credentials = (settings.credentials || []).map((c) => ({ ...c }));
+    renderCredentials();
     $("s-format").value = settings.ytdlpFormat;
     $("s-cookies").value = settings.ytdlpCookiesFrom || "";
     $("s-ytargs").value = (settings.ytdlpExtraArgs || []).join(" ");
+    $("s-ytupdate").checked = settings.ytdlpAutoUpdate;
     $("s-checksum").checked = settings.checksum;
     $("s-notify").checked = settings.notify;
     $("s-clipboard").checked = settings.clipboardWatch;
@@ -436,17 +491,19 @@ function wireSettingsDialog() {
       ...settings,
       downloadDir: $("s-dir").value.trim() || settings.downloadDir,
       categorize: $("s-categorize").checked,
-      connections: clamp(+$("s-connections").value, 1, 16),
-      split: clamp(+$("s-split").value, 1, 32),
+      connections: clamp(+$("s-connections").value, 1, 32),
       minSplitSize: $("s-minsplit").value.trim() || "1M",
       maxConcurrent: clamp(+$("s-concurrent").value, 1, 20),
       maxSpeed: Math.max(0, +$("s-maxspeed").value) * KB,
       maxSpeedPerDownload: Math.max(0, +$("s-maxspeed-each").value) * KB,
       retryLimit: clamp(+$("s-retries").value, 0, 20),
+      proxy: $("s-proxy").value.trim(),
+      credentials,
       ytdlpFormat: $("s-format").value.trim() || settings.ytdlpFormat,
       ytdlpCookiesFrom: $("s-cookies").value.trim(),
       // Naive split: these are flags, never paths with spaces.
       ytdlpExtraArgs: $("s-ytargs").value.trim().split(/\s+/).filter(Boolean),
+      ytdlpAutoUpdate: $("s-ytupdate").checked,
       checksum: $("s-checksum").checked,
       notify: $("s-notify").checked,
       clipboardWatch: $("s-clipboard").checked,
@@ -515,6 +572,43 @@ async function init() {
 
   settings = await invoke("get_settings").catch(() => null);
   await refresh();
+  offerUpdate();
+}
+
+/**
+ * Ask whether there is a newer version, and say so if there is.
+ *
+ * Deliberately last and deliberately unawaited: it talks to the network, and
+ * nothing about the download list should wait on GitHub being reachable. A
+ * failed check is silent by design — the backend logs the reason and answers
+ * "nothing new", because a dialog about a failed update check is a nuisance
+ * on every launch behind a firewall.
+ */
+async function offerUpdate() {
+  const offer = await invoke("check_update").catch(() => null);
+  if (!offer) return;
+
+  $("update-text").textContent =
+    `Version ${offer.version} is available — you have ${offer.currentVersion}.`;
+  $("update-bar").hidden = false;
+
+  $("update-dismiss").addEventListener("click", () => {
+    // For this run only. There is no "skip this version" list to get stuck in.
+    $("update-bar").hidden = true;
+  });
+
+  $("update-install").addEventListener("click", async () => {
+    $("update-install").disabled = true;
+    $("update-text").textContent = `Downloading ${offer.version}…`;
+    try {
+      // Returns when the installer takes over, which is also when this window
+      // stops existing, so there is nothing to do afterwards.
+      await invoke("install_update");
+    } catch (e) {
+      $("update-install").disabled = false;
+      $("update-text").textContent = `Update failed: ${e}`;
+    }
+  });
 }
 
 init().catch((e) => toast(`Startup failed: ${e}`));

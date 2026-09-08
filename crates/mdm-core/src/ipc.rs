@@ -11,9 +11,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::path::Path;
 use std::sync::Arc;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{UnixListener, UnixStream};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc;
+
+#[cfg(unix)]
+use tokio::net::{UnixListener, UnixStream};
+#[cfg(windows)]
+use tokio::net::windows::named_pipe::ServerOptions;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Link {
@@ -96,7 +100,7 @@ pub struct Candidate {
     ///
     /// Only the media candidates carry these, and only they need to: a page
     /// goes to yt-dlp, which brings its own cookies. A file goes straight to
-    /// aria2, out of the browser entirely — and a CDN that signs its links for
+    /// the downloader, out of the browser entirely — and a CDN that signs its links for
     /// one session hands back 403 to a request that arrives bare.
     #[serde(default)]
     pub headers: Vec<Header>,
@@ -151,6 +155,7 @@ pub enum UiRequest {
 ///
 /// A stale socket from a crashed process is removed; a live one means another
 /// instance owns it and this call fails, which is how single-instance works.
+#[cfg(unix)]
 pub async fn serve(engine: Arc<Engine>, ui: mpsc::Sender<UiRequest>) -> Result<()> {
     let path = crate::paths::socket_path();
     crate::paths::ensure_dirs()?;
@@ -186,16 +191,73 @@ pub async fn serve(engine: Arc<Engine>, ui: mpsc::Sender<UiRequest>) -> Result<(
 }
 
 /// Is something actually listening, or is this a leftover socket file?
+#[cfg(unix)]
 pub async fn probe(path: &Path) -> bool {
     UnixStream::connect(path).await.is_ok()
 }
 
-async fn handle(
-    stream: UnixStream,
-    engine: Arc<Engine>,
-    ui: mpsc::Sender<UiRequest>,
-) -> Result<()> {
-    let (read, mut write) = stream.into_split();
+/// Create and serve a named pipe forever.
+///
+/// There is no socket *file* to leave stale here — a named pipe is a kernel
+/// object, not a filesystem entry — so single-instance works by trying to
+/// connect as a client first: success means another instance already owns the
+/// name.
+///
+/// A Windows named pipe instance serves exactly one client and then is spent,
+/// which is why the loop creates the *next* instance before handing the
+/// current one off to `handle` — there must always be one instance waiting
+/// to accept, or a second launch racing the handoff would find nothing there.
+#[cfg(windows)]
+pub async fn serve(engine: Arc<Engine>, ui: mpsc::Sender<UiRequest>) -> Result<()> {
+    crate::paths::ensure_dirs()?;
+    let path = crate::paths::socket_path();
+
+    if probe(&path).await {
+        anyhow::bail!("another MDM instance is already running");
+    }
+
+    let mut server = ServerOptions::new()
+        .first_pipe_instance(true)
+        .create(&path)
+        .with_context(|| format!("creating named pipe {}", path.display()))?;
+    log::info!("ipc listening on {}", path.display());
+
+    loop {
+        if let Err(e) = server.connect().await {
+            log::warn!("accept failed: {e}");
+            continue;
+        }
+        let connected = server;
+        server = ServerOptions::new()
+            .create(&path)
+            .with_context(|| format!("creating named pipe {}", path.display()))?;
+
+        let engine = engine.clone();
+        let ui = ui.clone();
+        tokio::spawn(async move {
+            if let Err(e) = handle(connected, engine, ui).await {
+                log::debug!("ipc connection ended: {e:#}");
+            }
+        });
+    }
+}
+
+/// Is something actually listening on the pipe?
+#[cfg(windows)]
+pub async fn probe(path: &Path) -> bool {
+    tokio::net::windows::named_pipe::ClientOptions::new()
+        .open(path)
+        .is_ok()
+}
+
+/// Serve one connection, over either transport — a Unix socket and a named
+/// pipe both satisfy `AsyncRead + AsyncWrite`, so the JSON-lines protocol
+/// itself does not need to know which one it is running over.
+async fn handle<S>(stream: S, engine: Arc<Engine>, ui: mpsc::Sender<UiRequest>) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Send + 'static,
+{
+    let (read, mut write) = tokio::io::split(stream);
     let mut lines = BufReader::new(read).lines();
 
     while let Some(line) = lines.next_line().await? {

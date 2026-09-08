@@ -21,3 +21,18 @@ serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros"] }
 log = "0.4"
 env_logger = "0.11"
+# Checks GitHub Releases for a newer version, verifies its minisign signature
+# against the public key in tauri.conf.json, and runs the installer. Desktop
+# only: the plugin has no meaning where the app was installed by a package
+# manager, and the check below is gated on Windows for exactly that reason.
+tauri-plugin-updater = "2"
+
+[target.'cfg(windows)'.dependencies]
+# Replace zenity/kdialog (folder picker) and xclip/wl-paste (clipboard read),
+# neither of which exist on Windows, with the native equivalents. rfd uses the
+# Win32 common item dialog on this target with no extra feature flags needed.
+rfd = "0.15"
+arboard = "3"
+# Already pulled transitively by Tauri at 2.11.x; used directly here for one
+# MessageBoxW call rather than spawning zenity/kdialog's Windows equivalent.
+windows = { version = "0.61", features = ["Win32_UI_WindowsAndMessaging", "Win32_Foundation"] }

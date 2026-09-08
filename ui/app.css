@@ -131,7 +131,14 @@ main { flex: 1; min-width: 0; overflow-y: auto; position: relative; }
 
 /* ---------------- list ---------------- */
 
-.list { width: 100%; border-collapse: collapse; }
+/* `fixed` rather than the default `auto`, which is what made Pause and Cancel
+   unreachable. Under `auto` the browser sizes columns to their *content*, so a
+   long filename widened the name column past whatever `max-width` asked for,
+   pushed the table wider than the window, and carried the last column — the
+   actions — off the edge. `main` scrolls vertically only, so there was no way
+   to scroll across to them. Under `fixed` the declared widths below are
+   authoritative and the name column absorbs whatever is left. */
+.list { width: 100%; border-collapse: collapse; table-layout: fixed; }
 .list thead th {
   position: sticky;
   top: 0;
@@ -146,10 +153,43 @@ main { flex: 1; min-width: 0; overflow-y: auto; position: relative; }
   padding: 8px 10px;
   border-bottom: 1px solid var(--line);
 }
-.col-name { max-width: 0; } /* lets the flexible column actually shrink */
+/* No width: under `table-layout: fixed` a column without one takes the space
+   the others leave, which is exactly what the name should do. */
 .col-size, .col-speed, .col-eta { width: 92px; }
 .col-progress { width: 200px; }
 .col-actions { width: 132px; }
+
+/* The controls stay put while everything else gives way.
+ *
+ * Sticky rather than merely last: even with the widths honoured, a window
+ * dragged narrower than the columns can add up to has to take the space from
+ * somewhere, and the one column that must never be the one to go is the one
+ * holding Pause and Cancel. It keeps the row's own background so the name
+ * scrolling underneath does not show through it. */
+.list td:last-child {
+  position: sticky;
+  right: 0;
+  background: var(--bg);
+  /* Above the cells sliding underneath, below the sticky header, so the
+     top-right corner stays the header's rather than a row's. */
+  z-index: 1;
+}
+.list th.col-actions {
+  position: sticky;
+  right: 0;
+  z-index: 2;
+}
+.list tbody tr:hover td:last-child { background: var(--hover); }
+
+/* Below this the fixed columns no longer fit beside the sidebar, and speed and
+   ETA are the two that can be inferred from the progress bar. Dropping them
+   buys back 184px — enough for the name to stay readable and the actions to
+   stay whole. The window's own minimum is 760px, so this is a size a user can
+   really arrive at. */
+@media (max-width: 900px) {
+  .col-speed, .col-eta,
+  .list td.speed, .list td.eta { display: none; }
+}
 
 .list tbody tr { border-bottom: 1px solid var(--line); }
 .list tbody tr:hover { background: var(--hover); }
@@ -382,3 +422,31 @@ dialog input[type="time"] {
 
 .save-block { margin-top: 4px; }
 .save-block label { margin: 12px 0 0; }
+
+/* Site logins ------------------------------------------------------- */
+
+.creds { width: 100%; border-collapse: collapse; }
+.creds td {
+  padding: 5px 6px;
+  border-bottom: 1px solid var(--line);
+  font-size: 12px;
+  word-break: break-all;
+}
+.creds td.muted { color: var(--muted); }
+.creds td:last-child { text-align: right; width: 1%; white-space: nowrap; }
+.cred-add { display: flex; gap: 6px; margin-top: 8px; }
+/* Each field shrinks rather than pushing the button off the dialog. */
+.cred-add input { flex: 1 1 0; min-width: 0; }
+
+/* Update banner ----------------------------------------------------- */
+
+.update-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line);
+  background: var(--accent-soft, rgba(64, 120, 240, 0.12));
+  font-size: 13px;
+}
+.update-bar span { flex: 1 1 auto; }

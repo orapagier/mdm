@@ -46,7 +46,7 @@ pub async fn add_download(
     start_paused: Option<bool>,
     size: Option<i64>,
     // Only a direct download carries these, and only it needs them: the URL
-    // the window is about to hand aria2 came out of a page, and the server
+    // the window is about to download came out of a page, and the server
     // behind it may only answer a request that looks like it did too.
     headers: Option<Vec<mdm_core::model::Header>>,
     referrer: Option<String>,
@@ -256,6 +256,7 @@ pub fn fit_window(app: AppHandle, grow: f64) -> Cmd<()> {
 }
 
 /// Open a finished file, or reveal its folder, using the desktop's handler.
+#[cfg(unix)]
 #[tauri::command]
 pub fn open_path(path: String, reveal: bool) -> Cmd<()> {
     let p = std::path::PathBuf::from(&path);
@@ -274,10 +275,60 @@ pub fn open_path(path: String, reveal: bool) -> Cmd<()> {
     Ok(())
 }
 
+/// `explorer` doubles as both "open" (double-click behaviour on a file or
+/// folder) and, with `/select,`, "reveal this file in its folder" — there is
+/// no separate reveal-only helper on Windows the way `xdg-open` needs one.
+#[cfg(windows)]
+#[tauri::command]
+pub fn open_path(path: String, reveal: bool) -> Cmd<()> {
+    use std::os::windows::process::CommandExt as _;
+
+    // explorer is the one path consumer on Windows that will not accept `/`
+    // as a separator. Everything else here treats the two interchangeably —
+    // `exists()` below happily confirms a mixed-separator path — so a path
+    // that is correct for every other purpose arrives at explorer unusable.
+    // And explorer never says so: handed a path it cannot parse it silently
+    // opens a default folder instead, Documents for a bare path and the
+    // last-browsed folder after `/select,`. That is exactly what "Open" and
+    // "Open folder" landing in two unrelated places looks like. `/` is not
+    // legal in a Windows filename, so rewriting every one is unambiguous.
+    let p = std::path::PathBuf::from(path.replace('/', "\\"));
+    if !p.exists() {
+        return Err(format!("{} no longer exists", p.display()));
+    }
+    let mut cmd = std::process::Command::new("explorer");
+    if reveal {
+        // explorer's own command-line parser (not the usual
+        // CommandLineToArgvW) wants exactly `/select,"path"` — the comma
+        // outside the quotes, the path inside. Handing `/select,<path>` to
+        // `Command::arg()` as one argument used to work for paths with no
+        // spaces, but `arg()` quotes an argument containing spaces by
+        // wrapping the *whole* string — comma included — in one extra pair
+        // of quotes. Explorer doesn't recognise that shape as the /select,
+        // switch at all, and silently falls back to a default folder
+        // (typically Documents) instead of erroring, which is why nearly any
+        // real download title reproduced this. Windows filenames can never
+        // contain `"`, so quoting the path ourselves needs no escaping, and
+        // `raw_arg` is what lets those quotes reach explorer exactly as
+        // written instead of being re-quoted by `Command`.
+        let mut raw = std::ffi::OsString::from("/select,\"");
+        raw.push(p.as_os_str());
+        raw.push("\"");
+        cmd.raw_arg(raw);
+    } else {
+        cmd.arg(&p);
+    }
+    // explorer.exe returns exit code 1 on plain success (a long-standing
+    // quirk), so spawning and not waiting on a status is deliberate here.
+    cmd.spawn().map_err(err)?;
+    Ok(())
+}
+
 /// Native folder chooser via whichever dialog helper the desktop provides.
 ///
 /// This avoids a GTK/portal dependency in-process; both helpers are present on
 /// essentially every desktop install and print the chosen path on stdout.
+#[cfg(unix)]
 #[tauri::command]
 pub fn pick_directory(start: Option<String>) -> Cmd<Option<String>> {
     let start = start.unwrap_or_default();
@@ -299,7 +350,7 @@ pub fn pick_directory(start: Option<String>) -> Cmd<Option<String>> {
     ];
 
     for (bin, args) in attempts {
-        if mdm_core::supervisor::which(bin).is_none() {
+        if mdm_core::which::which(bin).is_none() {
             continue;
         }
         let out = std::process::Command::new(bin).args(&args).output();
@@ -316,6 +367,20 @@ pub fn pick_directory(start: Option<String>) -> Cmd<Option<String>> {
     Err("no folder chooser found — install zenity or kdialog".into())
 }
 
+/// The native Win32 common item dialog via `rfd`, in-process — there is no
+/// standalone CLI folder-chooser to shell out to the way zenity/kdialog are.
+#[cfg(windows)]
+#[tauri::command]
+pub fn pick_directory(start: Option<String>) -> Cmd<Option<String>> {
+    let start = start.unwrap_or_default();
+    let mut dialog = rfd::FileDialog::new().set_title("Choose a download folder");
+    if !start.is_empty() {
+        dialog = dialog.set_directory(&start);
+    }
+    Ok(dialog.pick_folder().map(|p| p.display().to_string()))
+}
+
+#[cfg(unix)]
 #[tauri::command]
 pub fn read_clipboard_url() -> Option<String> {
     for (bin, args) in [
@@ -323,7 +388,7 @@ pub fn read_clipboard_url() -> Option<String> {
         ("xclip", vec!["-selection", "clipboard", "-o"]),
         ("xsel", vec!["--clipboard", "--output"]),
     ] {
-        if mdm_core::supervisor::which(bin).is_none() {
+        if mdm_core::which::which(bin).is_none() {
             continue;
         }
         if let Ok(o) = std::process::Command::new(bin).args(&args).output() {
@@ -336,4 +401,83 @@ pub fn read_clipboard_url() -> Option<String> {
         }
     }
     None
+}
+
+#[cfg(windows)]
+#[tauri::command]
+pub fn read_clipboard_url() -> Option<String> {
+    let text = arboard::Clipboard::new().ok()?.get_text().ok()?;
+    let text = text.trim();
+    (text.starts_with("http://") || text.starts_with("https://")).then(|| text.to_string())
+}
+
+/* ------------------------------------------------------------------ *
+ * Updates
+ * ------------------------------------------------------------------ */
+
+/// What the frontend needs to offer an update, or `None` when this is already
+/// the newest build.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateOffer {
+    pub version: String,
+    pub current_version: String,
+    pub notes: String,
+    pub date: String,
+}
+
+/// Is there a newer version, and what is it?
+///
+/// Answers `None` for every reason that is not "yes": no update, no network,
+/// an endpoint that is not there yet. An update check is a convenience, and a
+/// convenience that reports its own failures to the user is a nuisance — the
+/// reason goes to the log instead, where someone looking for it will find it.
+#[tauri::command]
+pub async fn check_update(app: AppHandle) -> Cmd<Option<UpdateOffer>> {
+    use tauri_plugin_updater::UpdaterExt;
+
+    let updater = match app.updater() {
+        Ok(u) => u,
+        Err(e) => {
+            log::debug!("no updater on this build: {e}");
+            return Ok(None);
+        }
+    };
+    match updater.check().await {
+        Ok(Some(update)) => Ok(Some(UpdateOffer {
+            version: update.version.clone(),
+            current_version: update.current_version.clone(),
+            notes: update.body.clone().unwrap_or_default(),
+            date: update.date.map(|d| d.to_string()).unwrap_or_default(),
+        })),
+        Ok(None) => Ok(None),
+        Err(e) => {
+            log::debug!("update check failed: {e}");
+            Ok(None)
+        }
+    }
+}
+
+/// Fetch the new version and hand it to the installer.
+///
+/// This one *does* report its failures: the user asked for it, and an update
+/// that quietly does nothing is worse than one that says why it could not.
+/// The app is replaced and restarted by the installer, so nothing after a
+/// successful call here runs for long.
+#[tauri::command]
+pub async fn install_update(app: AppHandle) -> Cmd<()> {
+    use tauri_plugin_updater::UpdaterExt;
+
+    let updater = app.updater().map_err(err)?;
+    // Checked again rather than carried over from `check_update`: holding a
+    // half-hour-old `Update` across two commands buys nothing, and re-asking
+    // costs one request against a URL that is certainly warm.
+    let Some(update) = updater.check().await.map_err(err)? else {
+        return Err("there is no update to install".into());
+    };
+    update
+        .download_and_install(|_chunk, _total| {}, || {})
+        .await
+        .map_err(err)?;
+    Ok(())
 }

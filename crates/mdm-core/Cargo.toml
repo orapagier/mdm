@@ -13,8 +13,16 @@ serde_json = "1"
 tokio = { version = "1", features = [
     "rt-multi-thread", "macros", "net", "process", "time", "sync", "io-util", "fs",
 ] }
-# No TLS features: the aria2 RPC endpoint is always plain HTTP on loopback.
-reqwest = { version = "0.12", default-features = false, features = ["json"] }
+# Everything but the TLS backend, which is chosen per platform further down:
+# the right answer differs, and getting it wrong shows up as downloads that
+# fail with a certificate error the browser never sees.
+reqwest = { version = "0.12", default-features = false, features = [
+    "json", "stream", "gzip", "brotli",
+    # SOCKS is a proxy scheme reqwest only speaks when asked to; an office or
+    # VPN proxy is as likely to be socks5 as http.
+    "socks",
+] }
+futures-util = "0.3"
 # Bundled SQLite so the build does not depend on the distro's -devel package.
 rusqlite = { version = "0.32", features = ["bundled"] }
 sha2 = "0.10"
@@ -25,8 +33,46 @@ log = "0.4"
 toml = "0.8"
 url = "2"
 percent-encoding = "2"
+# DASH manifests are XML, and a hand-rolled reader for them would be a liability
+# rather than one less dependency. Already in the lock file by way of Tauri, so
+# it costs nothing new to fetch. HLS is line-based and parsed in `stream::hls`
+# without a crate.
+quick-xml = "0.41"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+# Cross-platform CSPRNG, used for the aria2 RPC secret on every OS.
+getrandom = "0.3"
+
+[target.'cfg(unix)'.dependencies]
 libc = "0.2"
+# rustls here: it needs no system OpenSSL, so the build stays self-contained on
+# every distribution.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+
+[target.'cfg(windows)'.dependencies]
+# SChannel here, through native-tls, rather than the rustls used on Linux.
+#
+# Not a preference — a correctness fix. rustls verifies exactly the chain the
+# server sends, and a surprising number of servers send an incomplete one:
+# trustviewer.com offers its leaf certificate and no intermediate, leaving the
+# app to report "invalid peer certificate: UnknownIssuer" for a download every
+# browser on the machine completes without comment. Windows repairs that gap
+# itself by fetching the missing intermediate from the certificate's Authority
+# Information Access URL, and it trusts the roots this machine has actually
+# been given — the ones a corporate or antivirus TLS proxy installs included.
+# Behaving like the rest of the system is the whole point on Windows; on Linux
+# there is no equivalent store to borrow, so rustls stays.
+#
+# SChannel is part of the OS, so this costs no OpenSSL and no bundled root list.
+reqwest = { version = "0.12", default-features = false, features = ["native-tls"] }
+# Only for GetDiskFreeSpaceExW: Rust has no portable "how much room is left"
+# and refusing a download that cannot fit is worth one narrow import.
+windows-sys = { version = "0.59", features = ["Win32_Storage_FileSystem"] }
+# XDG has no Windows equivalent; this resolves the same config/data/cache
+# directories through the platform's own conventions (%APPDATA%, %LOCALAPPDATA%).
+dirs = "6"
+# Windows has no wl-paste/xclip CLI to poll; this reads the clipboard directly
+# for the same opt-in "grab the URL I just copied" feature.
+arboard = "3"
 
 # Only the example driver needs these; the library itself logs through `log`.
 [dev-dependencies]

@@ -1,14 +1,13 @@
 //! Tests for the pure decision logic: category routing, scheduling windows,
-//! filename safety and the options handed to aria2.
+//! filename safety and the credentials a download is sent with.
 
-use mdm_core::aria2::{AddOptions, MAX_CONNECTIONS};
 use mdm_core::categories::{categorize, extension_of};
 use mdm_core::engine::{
-    filename_from_url, job_from_url, queue_open_at, sanitize, stem_taken, unique_filename,
-    unique_name, wants_ytdlp,
+    authorization_for, filename_from_url, job_from_url, queue_open_at, sanitize, stem_taken,
+    strip_userinfo, unique_filename, unique_name, wants_ytdlp,
 };
 use mdm_core::human_bytes;
-use mdm_core::model::{Header, Queue, Status};
+use mdm_core::model::{Credential, Queue, Settings, Status};
 
 /* ------------------------------- categories ------------------------------ */
 
@@ -55,8 +54,8 @@ fn extension_of_rejects_junk() {
 
 #[test]
 fn sanitise_strips_path_components() {
-    // aria2 resolves `out` against `dir` and creates parents, so anything that
-    // survives here could write outside the download folder.
+    // A name is joined to the download folder, so anything that survives here
+    // could write outside the folder the user chose.
     assert_eq!(sanitize("../../etc/passwd".into()), "passwd");
     assert_eq!(sanitize("/absolute/path.iso".into()), "path.iso");
     assert_eq!(sanitize("a/../b.zip".into()), "b.zip");
@@ -88,6 +87,45 @@ fn sanitise_replaces_control_characters() {
 fn sanitise_falls_back_when_nothing_usable_remains() {
     assert_eq!(sanitize("".into()), "download");
     assert_eq!(sanitize("...".into()), "download");
+}
+
+#[test]
+fn sanitise_replaces_the_characters_windows_refuses() {
+    // The report that started this: every YouTube title with a pipe in it
+    // failed at `CreateFile` with os error 123, before a byte was fetched.
+    assert_eq!(
+        sanitize("To Rescue a Sinner Like Me | Quennie Benabaye (Cover).mp4".into()),
+        "To Rescue a Sinner Like Me _ Quennie Benabaye (Cover).mp4"
+    );
+    assert_eq!(sanitize("what? <yes> \"x\" *.mp4".into()), "what_ _yes_ _x_ _.mp4");
+    // A colon would also name an alternate data stream, not a file.
+    assert_eq!(sanitize("9:41".into()), "9_41");
+}
+
+#[test]
+fn sanitise_drops_what_windows_would_drop_silently() {
+    // Windows creates "clip.mp4" for either of these and then cannot find the
+    // name we recorded.
+    assert_eq!(sanitize("clip.mp4.".into()), "clip.mp4");
+    assert_eq!(sanitize("clip.mp4 ".into()), "clip.mp4");
+}
+
+#[test]
+fn sanitise_steps_around_the_dos_device_names() {
+    assert_eq!(sanitize("nul".into()), "_nul");
+    assert_eq!(sanitize("CON.txt".into()), "_CON.txt");
+    assert_eq!(sanitize("com9.mp4".into()), "_com9.mp4");
+    // Only the whole stem is reserved; "console" is an ordinary name.
+    assert_eq!(sanitize("console.log".into()), "console.log");
+}
+
+#[test]
+fn a_long_name_is_cut_on_a_character_and_keeps_its_extension() {
+    let out = sanitize(format!("{}.mp4", "あ".repeat(300)));
+    assert!(out.len() <= 200, "still {} bytes: {out}", out.len());
+    assert!(out.ends_with(".mp4"), "extension lost: {out}");
+    // Cutting mid-character would have panicked on the way here.
+    assert!(out.trim_end_matches(".mp4").chars().all(|c| c == 'あ'));
 }
 
 #[test]
@@ -259,104 +297,29 @@ fn a_response_already_typed_as_media_is_not_a_page() {
     job.mime = "video/mp4".into();
     assert!(!wants_ytdlp(&job));
 
-    // A manifest is a description of a stream, not the stream: yt-dlp is
-    // exactly what turns one into a file, so it must not be caught by this.
+    // A manifest is a description of a stream rather than the stream itself,
+    // and it used to go to yt-dlp for that reason. It no longer does: the
+    // stream downloader fetches the segments and remuxes them in process, so
+    // an extractor is only involved if that fails and the retry says so.
     let mut manifest = job_from_url("https://www.tiktok.com/x/playlist.m3u8");
     manifest.mime = "application/vnd.apple.mpegurl".into();
+    assert!(
+        !wants_ytdlp(&manifest),
+        "a manifest is downloaded natively now"
+    );
+
+    // Explicitly asking still wins, which is what the failure fallback and the
+    // format picker both rely on.
+    manifest.use_ytdlp = Some(true);
     assert!(wants_ytdlp(&manifest));
 }
 
-/* ------------------------------ aria2 options ---------------------------- */
-
-fn options() -> AddOptions {
-    AddOptions {
-        dir: "/tmp/dl".into(),
-        out: Some("file.iso".into()),
-        headers: vec![
-            Header { name: "Cookie".into(), value: "session=abc".into() },
-            Header { name: "User-Agent".into(), value: "Mozilla/5.0".into() },
-        ],
-        referer: Some("https://example.com/page".into()),
-        connections: 16,
-        split: 16,
-        min_split_size: "1M".into(),
-        max_speed: 0,
-        retry_limit: 5,
-        paused: false,
-        extra: Vec::new(),
-    }
-}
-
 #[test]
-fn headers_are_rendered_in_aria2_wire_format() {
-    let json = options().to_json();
-    let headers = json["header"].as_array().expect("header array");
-    assert_eq!(headers[0], "Cookie: session=abc");
-    assert_eq!(headers[1], "User-Agent: Mozilla/5.0");
-}
-
-#[test]
-fn connections_are_clamped_to_what_the_rpc_accepts() {
-    // aria2's RPC rejects >16 for this option in both addUri and
-    // changeGlobalOption, even though its command line takes 128 and --help
-    // advertises "1-*". Exceeding it fails every download, so pin the value.
-    assert_eq!(MAX_CONNECTIONS, 16);
-
-    let mut o = options();
-    o.connections = 200;
-    assert_eq!(o.to_json()["max-connection-per-server"], "16");
-
-    o.connections = 0;
-    // Zero is not a valid aria2 value; it must come back as at least one.
-    assert_eq!(o.to_json()["max-connection-per-server"], "1");
-}
-
-#[test]
-fn resume_is_requested_and_silent_truncation_is_refused() {
-    let json = options().to_json();
-    assert_eq!(json["continue"], "true");
-    // always-resume=false lets aria2 fail loudly on a server that ignores
-    // Range, rather than quietly producing a short file.
-    assert_eq!(json["always-resume"], "false");
-    assert_eq!(json["allow-overwrite"], "false");
-    assert_eq!(json["auto-file-renaming"], "true");
-}
-
-#[test]
-fn speed_limit_is_omitted_when_unlimited() {
-    assert!(options().to_json().get("max-download-limit").is_none());
-    let mut o = options();
-    o.max_speed = 512 * 1024;
-    assert_eq!(o.to_json()["max-download-limit"], "524288");
-}
-
-#[test]
-fn pause_flag_is_only_present_when_set() {
-    assert!(options().to_json().get("pause").is_none());
-    let mut o = options();
-    o.paused = true;
-    assert_eq!(o.to_json()["pause"], "true");
-}
-
-#[test]
-fn an_empty_referer_is_not_sent() {
-    let mut o = options();
-    o.referer = Some(String::new());
-    assert!(o.to_json().get("referer").is_none());
-}
-
-/* --------------------------------- misc ---------------------------------- */
-
-#[test]
-fn aria2_status_strings_map_onto_ours() {
-    assert_eq!(Status::from_aria2("active"), Status::Active);
-    assert_eq!(Status::from_aria2("waiting"), Status::Queued);
-    assert_eq!(Status::from_aria2("paused"), Status::Paused);
-    assert_eq!(Status::from_aria2("complete"), Status::Complete);
-    assert_eq!(Status::from_aria2("error"), Status::Failed);
-    assert_eq!(Status::from_aria2("removed"), Status::Removed);
-    // Anything unrecognised must not look finished.
-    assert_eq!(Status::from_aria2("something-new"), Status::Queued);
+fn a_streaming_page_is_still_not_a_manifest() {
+    // The distinction the routing turns on: a watch page has no segments to
+    // fetch and must still reach yt-dlp, even now that manifests do not.
+    let page = job_from_url("https://www.tiktok.com/@someone/video/12345");
+    assert!(wants_ytdlp(&page));
 }
 
 #[test]
@@ -385,22 +348,167 @@ fn human_bytes_reads_sensibly() {
 /* ------------------------------ control files ---------------------------- */
 
 #[test]
-fn control_file_appends_rather_than_replacing_the_extension() {
-    use mdm_core::engine::control_file;
-    use std::path::Path;
+fn a_transport_failure_is_said_in_words_a_user_can_act_on() {
+    use mdm_core::ytdlp::plain_error;
 
-    assert_eq!(
-        control_file(Path::new("/d/debian.iso")),
-        Path::new("/d/debian.iso.aria2")
+    // Verbatim from a download that failed while the resolver was down: this
+    // reached the UI as a clipped Python traceback under the progress bar.
+    let raw = "ERROR: [youtube] 9w0y22_5nTU: Unable to download API page: \
+               HTTPSConnection(host='www.youtube.com', port=443): Failed to \
+               resolve 'www.youtube.com' ([Errno 11001] getaddrinfo failed) \
+               (caused by TransportError(\"…\"))";
+    let said = plain_error(raw);
+    assert!(said.contains("www.youtube.com"), "{said}");
+    assert!(said.contains("DNS"), "{said}");
+    assert!(!said.contains("TransportError"), "{said}");
+
+    // A failure we have nothing better to say about keeps yt-dlp's own words.
+    let unknown = "ERROR: [youtube] something nobody has seen before";
+    assert_eq!(plain_error(unknown), unknown);
+}
+
+#[test]
+fn a_dropped_connection_is_transient_and_a_private_video_is_not() {
+    use mdm_core::ytdlp::is_permanent_error;
+
+    // The classification a rewritten message must not disturb: the DNS
+    // failure above has to stay retryable, or the backoff never runs.
+    assert!(!is_permanent_error("getaddrinfo failed"));
+    assert!(!is_permanent_error("Connection refused"));
+    assert!(is_permanent_error("ERROR: [youtube] xyz: Private video"));
+}
+
+/* --------------------------- pages are not files ------------------------- */
+
+#[test]
+fn a_page_response_is_recognised_from_its_failure() {
+    // The engine matches on the marker rather than on the sentence, so the
+    // wording stays free to change.
+    let msg = format!(
+        "{}: the server answered with a web page rather than a file (text/html)",
+        mdm_core::fetch::PAGE_MARKER
     );
-    // The bug this guards: with_extension would give "/d/archive.tar..aria2"
-    // for a dotted name and "/d/noext..aria2" for one with no extension.
+    assert!(mdm_core::fetch::is_page_response(&msg));
+    assert!(!mdm_core::fetch::is_page_response("connection reset by peer"));
+}
+
+#[test]
+fn a_player_page_does_not_become_a_php_download() {
+    // A player page saved 1.5 MB of HTML under a name claiming to be a PHP
+    // script. The extension is dropped so the row does not advertise one it
+    // will never have — the extractor supplies the real name later.
     assert_eq!(
-        control_file(Path::new("/d/archive.tar.gz")),
-        Path::new("/d/archive.tar.gz.aria2")
+        filename_from_url("https://site.test/view_video.php?viewkey=abc123"),
+        "view_video"
     );
+    assert_eq!(filename_from_url("https://site.test/watch.aspx?v=1"), "watch");
+
+    // A real file keeps its extension, including one that merely looks odd.
+    assert_eq!(filename_from_url("https://site.test/debian.iso"), "debian.iso");
+    assert_eq!(filename_from_url("https://site.test/a/archive.tar.gz"), "archive.tar.gz");
+    // A dotfile-shaped name has no stem to keep, so it is left alone.
+    assert_eq!(filename_from_url("https://site.test/.htm"), ".htm");
+}
+
+/* ------------------------------ request shape ---------------------------- */
+
+#[test]
+fn a_job_without_headers_still_names_itself() {
+    // The bug this pins down: a URL added by hand carried no User-Agent, and
+    // the sites that refuse an anonymous client do it by never answering — a
+    // fifteen-second "connect" failure against a server that is up.
+    let spec = mdm_core::fetch::Spec::new("https://example.test/f.bin", "/tmp");
+    let headers = mdm_core::fetch::request_headers(&spec);
+    assert!(
+        headers.contains_key("user-agent"),
+        "a bare job must still send a User-Agent"
+    );
+}
+
+#[test]
+fn a_captured_user_agent_is_never_overwritten() {
+    // The browser's own header is the better answer, and replacing it is how a
+    // working captured download would start failing.
+    let mut spec = mdm_core::fetch::Spec::new("https://example.test/f.bin", "/tmp");
+    spec.headers = vec![mdm_core::model::Header {
+        name: "User-Agent".into(),
+        value: "Firefox/from-the-browser".into(),
+    }];
+    let headers = mdm_core::fetch::request_headers(&spec);
     assert_eq!(
-        control_file(Path::new("/d/noext")),
-        Path::new("/d/noext.aria2")
+        headers.get("user-agent").unwrap(),
+        "Firefox/from-the-browser"
     );
+}
+
+/* ------------------------------ credentials ------------------------------ */
+
+fn header<'a>(job: &'a mdm_core::model::Job, name: &str) -> Option<&'a str> {
+    job.headers
+        .iter()
+        .find(|h| h.name.eq_ignore_ascii_case(name))
+        .map(|h| h.value.as_str())
+}
+
+#[test]
+fn a_password_in_a_link_moves_out_of_the_url() {
+    let job = strip_userinfo(job_from_url("https://user:s3cret@files.test/big.iso"));
+    // What gets stored, logged and shown carries no password.
+    assert_eq!(job.url, "https://files.test/big.iso");
+    // dXNlcjpzM2NyZXQ= is "user:s3cret".
+    assert_eq!(header(&job, "authorization"), Some("Basic dXNlcjpzM2NyZXQ="));
+}
+
+#[test]
+fn a_username_with_no_password_still_authenticates() {
+    // A token pasted as the username half is a real shape: "token@host".
+    let job = strip_userinfo(job_from_url("https://tok3n@files.test/big.iso"));
+    assert_eq!(job.url, "https://files.test/big.iso");
+    assert_eq!(header(&job, "authorization"), Some("Basic dG9rM246"));
+}
+
+#[test]
+fn a_link_without_credentials_is_left_exactly_as_it_was() {
+    let job = strip_userinfo(job_from_url("https://files.test/big.iso?a=b#c"));
+    assert_eq!(job.url, "https://files.test/big.iso?a=b#c");
+    assert_eq!(header(&job, "authorization"), None);
+}
+
+#[test]
+fn percent_encoded_credentials_are_decoded_before_they_are_sent() {
+    // An "@" or ":" in a password has to be escaped to fit in a URL at all.
+    let job = strip_userinfo(job_from_url("https://a%40b.test:p%3Aw@files.test/x.iso"));
+    // YUBiLnRlc3Q6cDp3 is "a@b.test:p:w".
+    assert_eq!(header(&job, "authorization"), Some("Basic YUBiLnRlc3Q6cDp3"));
+}
+
+#[test]
+fn a_configured_login_is_found_by_host_and_only_by_host() {
+    let mut settings = Settings::default();
+    settings.credentials = vec![Credential {
+        host: "Files.Test".into(),
+        username: "user".into(),
+        password: "s3cret".into(),
+    }];
+
+    // Case folds, as hostnames do.
+    let found = authorization_for("https://files.test/big.iso", &settings);
+    assert_eq!(found.map(|h| h.value), Some("Basic dXNlcjpzM2NyZXQ=".into()));
+
+    // A neighbouring host under the same suffix is a different host, and
+    // somebody else may own it.
+    assert!(authorization_for("https://evil.test/big.iso", &settings).is_none());
+    assert!(authorization_for("https://sub.files.test/big.iso", &settings).is_none());
+    assert!(authorization_for("not a url", &settings).is_none());
+}
+
+#[test]
+fn a_blank_host_matches_nothing_rather_than_everything() {
+    let mut settings = Settings::default();
+    settings.credentials = vec![Credential {
+        host: "  ".into(),
+        username: "user".into(),
+        password: "s3cret".into(),
+    }];
+    assert!(authorization_for("https://files.test/big.iso", &settings).is_none());
 }
