@@ -9,10 +9,12 @@
     },
     "linux": {
       "deb": {
+        "desktopTemplate": "../packaging/mdm.desktop.hbs",
         "postInstallScript": "linux/postinstall.sh",
         "postRemoveScript": "linux/postremove.sh"
       },
       "rpm": {
+        "desktopTemplate": "../packaging/mdm.desktop.hbs",
         "postInstallScript": "linux/postinstall.sh",
         "postRemoveScript": "linux/postremove.sh"
       }

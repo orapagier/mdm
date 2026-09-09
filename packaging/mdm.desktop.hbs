@@ -1,0 +1,24 @@
+[Desktop Entry]
+# The one desktop entry, rendered twice: Tauri's bundler fills it in for the
+# .deb, .rpm and AppImage, install.sh substitutes the same four values by hand.
+# They are one file because they were two and disagreed about the app's name.
+#
+# Exec is the only value that legitimately differs between the two -- a package
+# puts the binary on PATH, install.sh puts it in ~/.local/bin. StartupWMClass
+# takes the icon's value rather than the command's, because the bundler quotes
+# a command containing a space and a window class must not be quoted; it has to
+# equal the app id claim_desktop_identity() sets in src-tauri/src/main.rs, or a
+# taskbar shows a placeholder instead of the icon.
+Type=Application
+Version=1.0
+Name={{name}}
+GenericName=Download Manager
+Comment={{comment}}
+Exec={{exec}} %u
+Icon={{icon}}
+Terminal=false
+StartupNotify=true
+StartupWMClass={{icon}}
+Categories=Network;FileTransfer;
+Keywords=mdm;download;manager;downloader;idm;video;accelerator;
+MimeType=x-scheme-handler/mdm;
