@@ -266,6 +266,20 @@ pub struct Settings {
     /// is a real thing to want: a site can break in a new release as easily
     /// as it is fixed by one.
     pub ytdlp_auto_update: bool,
+    /// Hosts that hand out an address good for exactly one request, so
+    /// captures from them are left with the browser.
+    ///
+    /// Learned rather than configured: a capture arrives only after the
+    /// browser has already asked for the file, so a one-time address is spent
+    /// by the time MDM could fetch it and the second request gets the landing
+    /// page. The first download from such a host is lost whatever we do; this
+    /// is how the second one is not. Written by the engine when it recognises
+    /// that failure, and listed in Settings so a host that landed here by
+    /// accident can be taken out again.
+    ///
+    /// Matched like the extension's own site list: the host itself, or any
+    /// subdomain of it.
+    pub single_use_hosts: Vec<String>,
 }
 
 impl Default for Settings {
@@ -326,6 +340,7 @@ impl Default for Settings {
             ytdlp_cookies_from: "firefox".into(),
             ytdlp_extra_args: Vec::new(),
             ytdlp_auto_update: true,
+            single_use_hosts: Vec::new(),
         }
     }
 }

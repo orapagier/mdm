@@ -1225,14 +1225,22 @@ impl Engine {
 
         let permanent = crate::ytdlp::is_permanent_error(message) || spent;
         let message = &if spent {
-            let site = url::Url::parse(&d.url)
-                .ok()
-                .and_then(|u| u.host_str().map(str::to_owned))
-                .unwrap_or_else(|| "That site".to_string());
+            // Remembered, not merely reported. The first download from a host
+            // like this is lost however it is handled — the address was spent
+            // by the browser's own request, before MDM was told the download
+            // existed — so the only thing left to get right is the *next* one,
+            // and telling the user to go and edit a list in the extension made
+            // that their job. The engine knows the host, and refusing the next
+            // capture from it is enough: the extension hands a download it
+            // cannot place back to the browser, which still has an unspent
+            // click to make the request with.
+            let site = host_of(&d.url);
+            self.stop_capturing(&site).await;
+            let site = if site.is_empty() { "That site".to_string() } else { site };
             format!(
                 "{site} served this file once and now answers with a page — that \
-                 link was single-use. Add {site} under \"Sites to ignore\" in the \
-                 extension's options and download it again; the browser will save it."
+                 link was single-use. MDM will leave {site} to the browser from \
+                 now on; download it again and the browser will save it."
             )
         } else if was_page {
             // The marker exists for this branch, not for the user.
@@ -1515,6 +1523,39 @@ impl Engine {
     /* ------------------------------------------------------------------ *
      * Settings
      * ------------------------------------------------------------------ */
+
+    /// Is this URL's host one that has already proved its links are one-shot?
+    ///
+    /// Asked of a capture on its way in, before anything has been submitted:
+    /// taking such a download means cancelling the browser's request, and the
+    /// browser's request is the only one the address will answer. Refusing it
+    /// hands the download back to the browser, which is where it can still
+    /// succeed. Returns the host so the refusal can name it.
+    pub fn single_use_host(&self, url: &str) -> Option<String> {
+        single_use_match(url, &self.settings().single_use_hosts)
+    }
+
+    /// Stop capturing from a host whose addresses are good for one request.
+    ///
+    /// Additive and idempotent, and it goes through `update_settings` so it is
+    /// written to disk and reaches the open window like any other change —
+    /// this list is shown in Settings, and a host that landed on it wrongly
+    /// has to be visible before it can be taken off again.
+    async fn stop_capturing(&self, host: &str) {
+        if host.is_empty() {
+            return;
+        }
+        let host = host.to_ascii_lowercase();
+        let mut settings = self.settings();
+        if settings.single_use_hosts.iter().any(|h| host_matches(&host, h)) {
+            return;
+        }
+        log::info!("{host} serves single-use links; captures from it stay with the browser");
+        settings.single_use_hosts.push(host);
+        if let Err(e) = self.update_settings(settings).await {
+            log::warn!("could not record the single-use host: {e:#}");
+        }
+    }
 
     pub async fn update_settings(&self, new: Settings) -> Result<()> {
         crate::config::save(&new)?;
@@ -1900,6 +1941,42 @@ pub fn strip_userinfo(mut job: Job) -> Job {
     job
 }
 
+/// The host part of a URL, lowercased, or empty where there is not one.
+fn host_of(url: &str) -> String {
+    url::Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_ascii_lowercase))
+        .unwrap_or_default()
+}
+
+/// Which listed host this URL falls under, if any.
+///
+/// Free of the engine so the decision can be tested as the decision it is: a
+/// URL and a list in, a host or nothing out.
+fn single_use_match(url: &str, hosts: &[String]) -> Option<String> {
+    let host = host_of(url);
+    if host.is_empty() {
+        return None;
+    }
+    hosts
+        .iter()
+        .any(|pattern| host_matches(&host, pattern))
+        .then_some(host)
+}
+
+/// Does `host` fall under `pattern` — the host itself, or a subdomain of it?
+///
+/// Deliberately the same rule as the extension's own site list, down to the
+/// leading `*.` being optional, because the two lists are read as one thing by
+/// anyone editing them: "sites MDM leaves alone".
+fn host_matches(host: &str, pattern: &str) -> bool {
+    let pattern = pattern.trim().trim_start_matches("*.").to_ascii_lowercase();
+    if pattern.is_empty() {
+        return false;
+    }
+    host == pattern || host.ends_with(&format!(".{pattern}"))
+}
+
 /// The login configured for this URL's host, if there is one.
 ///
 /// Exact host match, deliberately. A wildcard that let `example.com` speak for
@@ -2057,7 +2134,63 @@ pub fn job_from_url(url: &str) -> Job {
 
 #[cfg(test)]
 mod tests {
-    use super::Tally;
+    use super::{single_use_match, Tally};
+
+    fn hosts(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    /// The whole point of the list: the download after the one that was lost.
+    /// A capture from a host already caught spending its own links is refused
+    /// before it can cancel the browser's copy, and the refusal names the host
+    /// so the row can say which one.
+    #[test]
+    fn a_host_that_spent_a_link_is_recognised_next_time() {
+        let listed = hosts(&["filekeeper.net"]);
+        assert_eq!(
+            single_use_match("https://filekeeper.net/download", &listed).as_deref(),
+            Some("filekeeper.net")
+        );
+        // File hosts hand the file itself to a numbered edge node, and it is
+        // the same site handing out the same one-time addresses.
+        assert_eq!(
+            single_use_match("https://dl3.filekeeper.net/get/abc", &listed).as_deref(),
+            Some("dl3.filekeeper.net")
+        );
+    }
+
+    /// Everything else still goes to MDM. A list that quietly grew to mean
+    /// "stop capturing" would be a worse bug than the one it fixes.
+    #[test]
+    fn nothing_else_is_left_to_the_browser() {
+        let listed = hosts(&["filekeeper.net"]);
+        for url in [
+            "https://example.com/big.iso",
+            // A suffix is not a subdomain: this host is somebody else's.
+            "https://notfilekeeper.net/download",
+            // Nor is the name appearing somewhere in the path.
+            "https://cdn.example.com/filekeeper.net/file.zip",
+        ] {
+            assert_eq!(single_use_match(url, &listed), None, "{url} was refused");
+        }
+        assert_eq!(single_use_match("https://filekeeper.net/x", &[]), None);
+    }
+
+    /// Written by the engine in lower case, but this list is shown in Settings
+    /// and typed into by hand, and a `*.` in front of it is how the same thing
+    /// is spelled in the extension's own site list.
+    #[test]
+    fn a_host_typed_by_hand_is_read_as_written() {
+        for pattern in ["FileKeeper.NET", " filekeeper.net ", "*.filekeeper.net"] {
+            assert_eq!(
+                single_use_match("https://filekeeper.net/download", &hosts(&[pattern])).as_deref(),
+                Some("filekeeper.net"),
+                "{pattern} matched nothing"
+            );
+        }
+        // An empty entry is a stray comma, not a wildcard.
+        assert_eq!(single_use_match("https://example.com/f", &hosts(&["", "  "])), None);
+    }
 
     /// A merged YouTube download: a big video stream, then a small audio one,
     /// each counted from zero. What the row shows must only ever climb — the

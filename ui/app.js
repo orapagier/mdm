@@ -462,6 +462,7 @@ function wireSettingsDialog() {
     $("s-maxspeed-each").value = Math.round(settings.maxSpeedPerDownload / KB);
     $("s-retries").value = settings.retryLimit;
     $("s-proxy").value = settings.proxy || "";
+    $("s-singleuse").value = (settings.singleUseHosts || []).join(", ");
     credentials = (settings.credentials || []).map((c) => ({ ...c }));
     renderCredentials();
     $("s-format").value = settings.ytdlpFormat;
@@ -507,6 +508,14 @@ function wireSettingsDialog() {
       maxSpeedPerDownload: Math.max(0, +$("s-maxspeed-each").value) * KB,
       retryLimit: clamp(+$("s-retries").value, 0, 20),
       proxy: $("s-proxy").value.trim(),
+      // Written by the engine when a host is caught spending its own links,
+      // and editable here because that is a judgement made from one failed
+      // download: a host that landed on the list wrongly has to be removable
+      // by the person it is costing, without going near a TOML file.
+      singleUseHosts: $("s-singleuse")
+        .value.split(/[\s,]+/)
+        .map((h) => h.trim().toLowerCase())
+        .filter(Boolean),
       credentials,
       ytdlpFormat: $("s-format").value.trim() || settings.ytdlpFormat,
       ytdlpCookiesFrom: $("s-cookies").value.trim(),

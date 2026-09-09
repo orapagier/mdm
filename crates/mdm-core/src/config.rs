@@ -71,6 +71,7 @@ pub fn save(settings: &Settings) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::Credential;
 
     fn with_format(format: &str) -> Settings {
         Settings { ytdlp_format: format.to_string(), ..Settings::default() }
@@ -105,6 +106,38 @@ best[vcodec!*=hev][vcodec!*=h265]/bestvideo*+bestaudio/best";
             "the format the last release saved is no longer recognised"
         );
         assert_eq!(migrate(with_format(stored)).ytdlp_format, Settings::default().ytdlp_format);
+    }
+
+    /// A learned host has to survive being written down.
+    ///
+    /// TOML has to emit every plain value before the first table, and
+    /// `credentials` is an array of tables — so a list added below it in the
+    /// struct serialises to a file that cannot be read back, or does not
+    /// serialise at all. The engine writes this list from a failed download,
+    /// where nothing is watching the result, so it would be lost in silence.
+    #[test]
+    fn a_learned_host_survives_a_save_and_a_load() {
+        let saved = Settings {
+            single_use_hosts: vec!["filekeeper.net".into()],
+            credentials: vec![Credential {
+                host: "example.com".into(),
+                username: "u".into(),
+                password: "p".into(),
+            }],
+            ..Settings::default()
+        };
+        let text = toml::to_string_pretty(&saved).expect("settings would not serialise");
+        let read: Settings = toml::from_str(&text).expect("settings would not load back");
+        assert_eq!(read.single_use_hosts, vec!["filekeeper.net".to_string()]);
+        assert_eq!(read.credentials.len(), 1);
+    }
+
+    /// A settings file written before this list existed still loads.
+    #[test]
+    fn a_config_from_before_the_list_still_loads() {
+        let read: Settings = toml::from_str("downloadDir = \"/tmp\"\n").unwrap();
+        assert!(read.single_use_hosts.is_empty());
+        assert_eq!(read.download_dir, "/tmp");
     }
 
     /// A selector someone typed is theirs, however much it resembles one of

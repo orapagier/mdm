@@ -315,6 +315,20 @@ async fn dispatch(
                 }
             };
             let url = job.url.clone();
+            // A host that has already been caught handing out one-time
+            // addresses is refused here rather than attempted and failed.
+            // Accepting is what cancels the browser's download, and the
+            // browser's request is the only one such an address will answer —
+            // so the useful thing MDM can do with this one is decline it. The
+            // extension leaves a download it was not allowed to place with the
+            // browser, which is exactly where it will work.
+            if let Some(host) = engine.single_use_host(&url) {
+                log::info!("leaving {url} to the browser: {host} serves single-use links");
+                return json!({
+                    "accepted": false,
+                    "error": format!("{host} serves single-use links — leaving this to the browser"),
+                });
+            }
             // Taking it off the browser's hands is not the same as agreeing to
             // fetch it. The row is created so the capture is not lost, but it
             // waits for the window's Start button.
