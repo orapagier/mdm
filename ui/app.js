@@ -495,6 +495,84 @@ function wireSettingsDialog() {
     if (dir) $("s-dir").value = dir;
   });
 
+  /* ---------------------------------------------------------------- *
+   * Browser extension
+   *
+   * The extension ships inside every package, and until this dialog existed
+   * nothing said where. Somebody who installed a release build had the app,
+   * the native host and no way to find the half that captures downloads short
+   * of cloning the repository -- which is exactly what a release build is for
+   * not having to do.
+   *
+   * In the toolbar rather than in Settings, because it is the first thing a
+   * new install needs, and a thing nobody can find is the problem being
+   * solved.
+   * ---------------------------------------------------------------- */
+
+  const extDialog = $("dlg-extension");
+
+  /** Filled when the dialog opens; the two buttons read it. */
+  let extensionAssets = { firefox: null, chrome: null };
+
+  function extSay(message, bad) {
+    const el = $("ext-status");
+    el.textContent = message || "";
+    el.className = bad ? "hint bad" : "hint";
+  }
+
+  $("btn-extension").addEventListener("click", async () => {
+    extSay("");
+    extensionAssets = (await invoke("extension_assets").catch(() => null)) || {
+      firefox: null,
+      chrome: null,
+    };
+    // A missing copy is stated rather than hidden. An empty row reads as
+    // something still loading; a row that says the package did not carry it is
+    // something a person can act on.
+    const missing = "not found in this install";
+    $("ext-firefox-path").textContent = extensionAssets.firefox || missing;
+    $("ext-chrome-path").textContent = extensionAssets.chrome || missing;
+    $("ext-firefox").disabled = !extensionAssets.firefox;
+    $("ext-chrome").disabled = !extensionAssets.chrome;
+    extDialog.showModal();
+  });
+
+  $("ext-firefox").addEventListener("click", async () => {
+    if (!extensionAssets.firefox) return;
+    try {
+      await invoke("install_firefox_extension", { path: extensionAssets.firefox });
+      extSay("Firefox is opening the add-on \u2014 click \u201cAdd\u201d there to finish.");
+    } catch (e) {
+      // No Firefox, or it would not start. The file is still the answer, so
+      // this puts it in front of the user rather than reporting a dead end:
+      // any browser that installs an .xpi can be pointed at it by hand.
+      await call("open_path", { path: extensionAssets.firefox, reveal: true });
+      extSay(String(e) + " \u2014 the add-on is in the folder just opened.", true);
+    }
+  });
+
+  $("ext-chrome").addEventListener("click", async () => {
+    if (!extensionAssets.chrome) return;
+    // The folder first and always, because it is the half that is certainly
+    // needed: "Load unpacked" opens a file dialog, and this folder is what the
+    // user will be picking in it. The browser is best-effort on top.
+    await call("open_path", { path: extensionAssets.chrome, reveal: false });
+    try {
+      const browserName = await invoke("open_chromium_extensions");
+      extSay(
+        browserName +
+          " is open at its extensions page. Turn on Developer mode, click " +
+          "\u201cLoad unpacked\u201d, and pick the folder that just opened."
+      );
+    } catch (e) {
+      extSay(
+        "The folder is open. In your browser go to the extensions page, turn " +
+          "on Developer mode, click \u201cLoad unpacked\u201d and pick it.",
+        true
+      );
+    }
+  });
+
   dlg.addEventListener("close", async () => {
     if (dlg.returnValue !== "ok" || !settings) return;
     const next = {

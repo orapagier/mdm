@@ -366,39 +366,72 @@ command -v gtk-update-icon-cache >/dev/null && \
 
 say "Installing desktop entry"
 mkdir -p "$APP_DIR"
-# Name is the short one on purpose: it is what the launcher shows and what
-# gets typed to find it. The long name lives in GenericName, and Keywords make
-# the app findable by what it does as well as by what it is called.
+# The same entry the .deb and .rpm install, from the same file: Tauri renders
+# packaging/mdm.desktop.hbs through Handlebars, and the three substitutions it
+# makes are simple enough to make here too. See that file for what each line is
+# for.
 #
-# StartupWMClass must equal the window's app id, which `claim_desktop_identity`
-# in src-tauri/src/main.rs sets to `mdm`. Without that pair agreeing the desktop
-# cannot tell which entry the window belongs to and shows a generic placeholder
-# in the taskbar instead of the icon above.
+# One file because it was two, and the two disagreed about what the app is
+# called: the package said `Name=My Download Manager`, this script said
+# `Name=MDM`. Both entries install and both are valid -- but a launcher matches
+# what you type against Name, so on a source install the app was not there
+# under the name the window, the README and the package all use. It looked like
+# install.sh had not installed a launcher at all, and the difference between
+# the two was reported as exactly that.
 #
-# `mdm` and not something reverse-DNS, because the .deb and .rpm carry a desktop
-# entry of their own that Tauri's bundler generates from the binary name, saying
-# `StartupWMClass=mdm`, and offers no way to set it. One app id has to satisfy
-# both entries, so it is the one that is not ours to change.
+# Exec is the one value that legitimately differs: a package puts the binary in
+# /usr/bin, this puts it in ~/.local/bin, which is not always on PATH.
 #
-# The file is named after the app id too: a Wayland compositor matches a window
-# to a desktop entry by id first and falls back to StartupWMClass, and only the
-# name gets it right without the fallback.
-cat > "$APP_DIR/mdm.desktop" <<DESKTOP
+# The file keeps the app id for its name rather than the product name the
+# bundler uses. A Wayland compositor matches a window to an entry by id first
+# and falls back to StartupWMClass, and only `mdm.desktop` gets it right
+# without needing the fallback.
+render_desktop_entry() {
+  # Values in the order the bundler supplies them: product name, short
+  # description, the command, the icon/app id. Substituted with bash rather
+  # than sed so that nothing in them needs escaping.
+  local tpl entry
+  tpl="$(cat "$REPO/packaging/mdm.desktop.hbs")"
+  entry="${tpl//\{\{name\}\}/My Download Manager}"
+  entry="${entry//\{\{comment\}\}/Accelerated download manager}"
+  entry="${entry//\{\{exec\}\}/$BIN_DIR/mdm}"
+  entry="${entry//\{\{icon\}\}/mdm}"
+  printf '%s\n' "$entry"
+}
+
+if [[ -f "$REPO/packaging/mdm.desktop.hbs" ]]; then
+  render_desktop_entry > "$APP_DIR/mdm.desktop"
+else
+  # A checkout missing the template still gets a launcher, because the entry
+  # is what makes the app findable and a missing one is silent.
+  warn "packaging/mdm.desktop.hbs is missing; writing a minimal desktop entry"
+  cat > "$APP_DIR/mdm.desktop" <<DESKTOP
 [Desktop Entry]
 Type=Application
-Name=MDM
-GenericName=My Download Manager
-Comment=My Download Manager — accelerated downloads with browser capture
+Name=My Download Manager
 Exec=$BIN_DIR/mdm %u
 Icon=mdm
 Terminal=false
-Categories=Network;FileTransfer;
-Keywords=mdm;my download manager;download;manager;downloader;idm;video;
 StartupWMClass=mdm
+Categories=Network;FileTransfer;
+Keywords=mdm;download;manager;downloader;idm;video;
 MimeType=x-scheme-handler/mdm;
 DESKTOP
+fi
+chmod 644 "$APP_DIR/mdm.desktop"
+
+# Not decoration: a launcher that indexes on a schedule shows the entry when
+# the cache says so, and this is what updates the cache now rather than at the
+# next login. `desktop-file-validate` is only ever advisory here -- an entry it
+# dislikes still works on every shell tested, and failing the install over a
+# lint would be worse than the lint.
 command -v update-desktop-database >/dev/null && \
   update-desktop-database -q "$APP_DIR" 2>/dev/null || true
+if command -v desktop-file-validate >/dev/null; then
+  desktop-file-validate "$APP_DIR/mdm.desktop" >/dev/null 2>&1 || \
+    warn "the desktop entry did not pass desktop-file-validate; the app is
+  installed and runs, but your launcher may not list it"
+fi
 
 # ------------------------------------------------- native messaging host
 
@@ -494,6 +527,25 @@ stage_extension
 
 find_signed_xpi
 
+# The Chromium copy, out of the checkout.
+#
+# `stage_extension` builds it under target/, which is the right place for a
+# build artefact and the wrong place for a file the browser is going to be
+# pointed at for as long as the extension is installed. Chromium does not copy
+# an unpacked extension anywhere -- it reads that folder every time it starts,
+# so a `cargo clean`, or a clone deleted after installing, silently disables
+# the extension. It reappears as "this extension may be corrupted" weeks later,
+# with nothing to connect it to the tidying up that caused it.
+#
+# The app looks here too, so this is also what makes the toolbar's Browser
+# extension button work on a source install: see `extension_dirs` in
+# src-tauri/src/commands.rs.
+INSTALLED_CHROME="${XDG_DATA_HOME:-$HOME/.local/share}/mdm/mdm-chrome"
+mkdir -p "$(dirname "$INSTALLED_CHROME")"
+rm -rf "$INSTALLED_CHROME"
+cp -r "$CHROME_DIR" "$INSTALLED_CHROME"
+chmod -R a+rX "$INSTALLED_CHROME"
+
 if [[ "$signed" == yes ]]; then
   # Kept out of the checkout on purpose. Firefox copies the package into the
   # profile as it installs it, but this file is what a re-install or a repaired
@@ -531,6 +583,7 @@ $(say "Installed")
   App           $BIN_DIR/mdm
   Native host   $BIN_DIR/mdm-host
 ${manifest_lines}${ext_line}
+  Chromium      $INSTALLED_CHROME
 
 ${migrated:+If you had the older "ldm" build, its binaries, launcher entry and host
 manifest have been removed and your settings and history moved across. The
@@ -538,6 +591,15 @@ extension id changed too, so remove the old temporary add-on before loading
 this one.
 
 }${ext_help}
+
+For Chrome, Brave, Edge or Vivaldi instead: open the extensions page, turn on
+Developer mode, click "Load unpacked" and pick
+
+  $INSTALLED_CHROME
+
+Or skip all of that and let the app do it: start MDM and press "Browser
+extension" in the toolbar, which finds both copies and opens each browser at
+the right place.
 
 Then start the app:  mdm
 The extension launches it automatically on the first captured download.

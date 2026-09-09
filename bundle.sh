@@ -131,6 +131,31 @@ for kind in "${kinds[@]}"; do
 done
 [[ "$built" == yes ]] || die "the bundler reported success but produced no packages"
 
+# The extension, on its own, beside the packages.
+#
+# It is inside each package already, and that covers everyone who installs one.
+# It does not cover the rest: an AppImage carries no post-install script, the
+# Windows installer is a separate build, and somebody on a distribution neither
+# package fits still needs the add-on. All of them can be sent to a release
+# asset, and none of them can be sent to a path inside an .rpm -- so the two
+# files are copied out here, ready to upload with the packages they were built
+# alongside. The signed .xpi where there is one, because an unsigned package is
+# one Firefox refuses to install.
+DIST="$TARGET_DIR/release/bundle"
+if [[ "$signed" == yes ]]; then
+  install -m644 "$SIGNED_XPI" "$DIST/mdm-firefox.xpi"
+else
+  # Named for what it is. An unsigned .xpi uploaded under the ordinary name is
+  # a release asset that fails at the last step, in Firefox, with nothing to
+  # say the file was never going to work.
+  install -m644 "$XPI" "$DIST/mdm-firefox-unsigned.xpi"
+fi
+install -m644 "$TARGET_DIR/mdm-chrome.zip" "$DIST/mdm-chrome.zip"
+for ext in "$DIST"/mdm-firefox*.xpi "$DIST/mdm-chrome.zip"; do
+  [[ -f "$ext" ]] || continue
+  printf '  %s\n  %s\n' "$ext" "$(du -h "$ext" | cut -f1)"
+done
+
 cat <<'PACKAGES'
 
 Each is one file and needs nothing beside it. Installing one puts the app, the
@@ -151,6 +176,12 @@ A Firefox or Chrome installed from Flatpak or Snap reads its manifests from
 inside its own sandbox and will not see the system ones, so those two need
 install.sh rather than a package. yt-dlp is not carried either: the app fetches
 it on first run and keeps it current.
+
+The two extension files beside them are the same add-on the packages carry,
+loose. Upload them with a release: someone who installs a package finds the
+extension behind the app's "Browser extension" button and never needs these,
+and everybody else does -- an AppImage runs no install script, and a
+distribution neither package fits has no other way to get the add-on.
 PACKAGES
 
 # The one thing about these packages that is not visible in them. glibc has no

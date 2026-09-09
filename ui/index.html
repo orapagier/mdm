@@ -11,6 +11,7 @@
 <header class="toolbar">
   <button id="btn-add" class="primary">Add URL</button>
   <button id="btn-video">Add video…</button>
+  <button id="btn-extension">Browser extension</button>
   <div class="sep"></div>
   <button id="btn-pause-all">Pause all</button>
   <button id="btn-resume-all">Resume all</button>
@@ -95,6 +96,41 @@
   </form>
 </dialog>
 
+<!-- The browser extension, and where this install put it -->
+<dialog id="dlg-extension">
+  <form method="dialog">
+    <h2>Browser extension</h2>
+    <p class="hint">This is the half that captures downloads out of the
+      browser. It is carried by every way of installing MDM — there is nothing
+      to download and nothing to build. These are the copies already on this
+      machine.</p>
+
+    <div class="ext-rows">
+      <label>Firefox
+        <span class="path" id="ext-firefox-path">—</span>
+        <button type="button" id="ext-firefox" class="primary">Install</button>
+      </label>
+      <p class="hint">Opens the add-on in Firefox. Click <b>Add</b> there and it
+        is done — it stays installed across restarts.</p>
+
+      <label>Chrome, Brave, Edge, Vivaldi
+        <span class="path" id="ext-chrome-path">—</span>
+        <button type="button" id="ext-chrome" class="primary">Install</button>
+      </label>
+      <p class="hint">Opens your browser at its extensions page and this folder
+        beside it. Chromium will not let a program add an extension on its own,
+        so the last two steps are yours: turn on <b>Developer mode</b>, then
+        <b>Load unpacked</b> and pick the folder.</p>
+    </div>
+
+    <p class="hint" id="ext-status"></p>
+
+    <menu>
+      <button value="ok" class="primary">Close</button>
+    </menu>
+  </form>
+</dialog>
+
 <!-- Settings -->
 <dialog id="dlg-settings">
   <form method="dialog">
@@ -129,7 +165,7 @@
       <label>Proxy
         <input type="text" id="s-proxy" placeholder="blank = system settings, off = go direct">
       </label>
-      <label>Sites left to the browser
+      <label>Sites MDM asks first
         <input type="text" id="s-singleuse" placeholder="filekeeper.net — hosts whose links work once">
       </label>
       <label>Default video format

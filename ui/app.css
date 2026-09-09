@@ -292,6 +292,35 @@ dialog menu {
   overflow-wrap: anywhere;
 }
 
+/* Where this install left the extension. One row per browser family: the
+   label, the path it was found at, and the button that acts on it. The path is
+   allowed to wrap and the button is not allowed to shrink, because an absolute
+   path under /usr/lib is longer than the dialog is wide. */
+.ext-rows label {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 4px 12px;
+}
+.ext-rows .path {
+  grid-column: 1;
+  color: var(--muted);
+  font-size: 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  overflow-wrap: anywhere;
+}
+.ext-rows button { grid-column: 2; grid-row: 1 / span 2; flex: none; }
+.ext-rows button:disabled { opacity: 0.5; }
+/* The instructions under each row belong to the row above them, so they sit in
+   under the label rather than starting a block of their own. */
+.ext-rows .hint { margin: 2px 0 14px; }
+
+/* A hint that is reporting something that did not work. The dialog says what
+   to do next either way -- a browser that could not be started is not a dead
+   end, it is the same two steps done by hand -- so this colours the line
+   rather than replacing it. */
+.hint.bad { color: var(--bad); }
+
 .formats, .batch-list {
   max-height: 260px;
   overflow-y: auto;

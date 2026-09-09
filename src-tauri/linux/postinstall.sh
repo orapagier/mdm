@@ -111,6 +111,39 @@ do
   install_manifest "$dir" chromium_manifest
 done
 
+# Where this package put the extension, said out loud.
+#
+# The package carries both browsers' copies, and a package manager prints
+# nothing about its own payload -- so somebody installing a release build got a
+# working app, a registered native host, and no indication that the half doing
+# the capturing was already on the machine. The app says the same thing in
+# Settings, but only after it has been opened, and the first thing anyone does
+# is look for the extension.
+EXT_DIR=""
+for candidate in \
+  "/usr/lib/My Download Manager" \
+  "/usr/lib/my-download-manager" \
+  "/usr/lib/mdm"
+do
+  if [ -f "$candidate/mdm-firefox.xpi" ] || [ -d "$candidate/mdm-chrome" ]; then
+    EXT_DIR="$candidate"
+    break
+  fi
+done
+
+if [ -n "$EXT_DIR" ]; then
+  echo "mdm: the browser extension is installed with the app --"
+  if [ -f "$EXT_DIR/mdm-firefox.xpi" ]; then
+    echo "     Firefox:  open file://$EXT_DIR/mdm-firefox.xpi and click Add"
+  fi
+  if [ -d "$EXT_DIR/mdm-chrome" ]; then
+    echo "     Chromium: chrome://extensions, Developer mode, Load unpacked,"
+    echo "               then pick $EXT_DIR/mdm-chrome"
+  fi
+  echo "     Or press \"Browser extension\" in the app, which opens each one"
+  echo "     in the right browser for you."
+fi
+
 # The launcher and its icon, so the app appears in the menu without a logout.
 # Both are optional tools; a desktop that lacks them indexes on its own.
 if command -v update-desktop-database >/dev/null 2>&1; then

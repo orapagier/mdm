@@ -50,6 +50,11 @@ pub async fn add_download(
     // behind it may only answer a request that looks like it did too.
     headers: Option<Vec<mdm_core::model::Header>>,
     referrer: Option<String>,
+    // What the response called itself, where the window saw it. A manifest is
+    // routed to the stream downloader rather than the plain fetcher, and on a
+    // CDN that serves its playlist from an opaque path the type is the only
+    // thing that says so — without it the playlist was saved as a file.
+    mime: Option<String>,
 ) -> Cmd<i64> {
     let url = url.trim().to_string();
     if url.is_empty() {
@@ -59,6 +64,7 @@ pub async fn add_download(
     job.directory = directory.filter(|d| !d.is_empty());
     job.headers = headers.unwrap_or_default();
     job.referrer = referrer.unwrap_or_default();
+    job.mime = mime.unwrap_or_default();
     // What the picker weighed the chosen formats at. yt-dlp fetches the video
     // stream and then the audio, so without this the bar is scaled to the first
     // of them and rescales downwards when the second starts.
@@ -195,6 +201,241 @@ pub async fn probe_media(
 #[tauri::command]
 pub fn ytdlp_available() -> bool {
     ytdlp::available()
+}
+
+/// Where this install put the browser extension.
+///
+/// It is carried by every way of installing MDM — the .deb and .rpm stage it
+/// under /usr/lib, the Windows installer copies it to %APPDATA%, install.sh
+/// leaves it in the data directory — and until now nothing said so anywhere.
+/// Somebody who installed from a release build got the app, got the native
+/// host, and had no way to find the half that does the capturing short of
+/// cloning the repository and building it, which is the one thing a release
+/// build exists to avoid.
+#[derive(serde::Serialize)]
+pub struct ExtensionAssets {
+    /// The signed .xpi, which Firefox installs in one click.
+    pub firefox: Option<String>,
+    /// The unpacked Chromium folder, which "Load unpacked" takes.
+    pub chrome: Option<String>,
+}
+
+/// Every place an install of any shape could have left them, in the order a
+/// real machine should be asked.
+///
+/// Listed rather than derived because there is no single answer: the bundler
+/// names the resource directory after the product, the NSIS script copies out
+/// of the install directory into %APPDATA% so an uninstall does not take the
+/// package with it, and install.sh writes the data directory because a
+/// checkout is not somewhere a file should still be needed months later.
+fn extension_dirs(app: &AppHandle) -> Vec<std::path::PathBuf> {
+    use tauri::Manager;
+    let mut dirs: Vec<std::path::PathBuf> = Vec::new();
+
+    // What the bundler staged, wherever this build actually is. First because
+    // it is the only one that is right by construction rather than by guess.
+    if let Ok(dir) = app.path().resource_dir() {
+        dirs.push(dir.clone());
+        // Tauri stages resources under `resources/` in some layouts and beside
+        // the binary in others; asking for both costs a stat.
+        dirs.push(dir.join("resources"));
+    }
+    if let Ok(dir) = app.path().app_data_dir() {
+        dirs.push(dir);
+    }
+
+    #[cfg(unix)]
+    {
+        // The package layouts. The bundler names this directory after the
+        // product, spaces and all — see the same list in linux/postinstall.sh,
+        // which has to find the native host in exactly the same way.
+        for p in [
+            "/usr/lib/My Download Manager",
+            "/usr/lib/my-download-manager",
+            "/usr/lib/mdm",
+            "/usr/libexec/mdm",
+            "/usr/share/mdm",
+        ] {
+            dirs.push(std::path::PathBuf::from(p));
+        }
+        // install.sh's, which is also where a packaged install's per-user copy
+        // would be if one is ever written.
+        if let Some(home) = std::env::var_os("HOME") {
+            let home = std::path::PathBuf::from(home);
+            dirs.push(
+                std::env::var_os("XDG_DATA_HOME")
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_else(|| home.join(".local/share"))
+                    .join("mdm"),
+            );
+        }
+    }
+
+    // The development tree, so this works before anything has been installed.
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            dirs.push(dir.to_path_buf());
+            // target/release/mdm -> target/
+            if let Some(target) = dir.parent() {
+                dirs.push(target.to_path_buf());
+            }
+        }
+    }
+    dirs
+}
+
+/// Find the extension, wherever this install left it.
+#[tauri::command]
+pub fn extension_assets(app: AppHandle) -> ExtensionAssets {
+    let dirs = extension_dirs(&app);
+    let find = |names: &[&str], want_dir: bool| -> Option<String> {
+        for dir in &dirs {
+            for name in names {
+                let p = dir.join(name);
+                let ok = if want_dir { p.is_dir() } else { p.is_file() };
+                if ok {
+                    return Some(p.to_string_lossy().into_owned());
+                }
+            }
+        }
+        None
+    };
+    ExtensionAssets {
+        // Both names, because the bundler renames the signed package as it
+        // stages it and install.sh does not.
+        firefox: find(&["mdm-firefox.xpi", "mdm-firefox-signed.xpi"], false),
+        // A folder rather than the .zip: "Load unpacked" is what Chrome, Brave,
+        // Edge and Vivaldi offer without a store listing, and it takes a
+        // directory. The .zip is for uploading to a store dashboard.
+        chrome: find(&["mdm-chrome"], true),
+    }
+}
+
+/// Hand the .xpi to Firefox, which is the click that installs it.
+///
+/// Not `xdg-open`: a .xpi has no registered handler on most desktops, so
+/// opening it lands in an archive manager or a "choose an application" dialog
+/// — the file arrives, and the one browser that could do anything with it is
+/// not offered. Firefox is named outright instead, and told to open the file
+/// as a URL, which is what makes it show its own "Add" prompt.
+///
+/// A machine without Firefox is not a failure to hide: the caller falls back
+/// to revealing the file, and the message says which browser it wanted.
+#[cfg(unix)]
+#[tauri::command]
+pub fn install_firefox_extension(path: String) -> Cmd<()> {
+    let p = std::path::PathBuf::from(&path);
+    if !p.is_file() {
+        return Err(format!("{} no longer exists", p.display()));
+    }
+    let url = format!("file://{}", p.display());
+    // Flatpak last: a native Firefox and a Flatpak one can both be present,
+    // and the native one is the one whose profile install.sh registered the
+    // native messaging host into.
+    let candidates: [(&str, Vec<String>); 4] = [
+        ("firefox", vec![url.clone()]),
+        ("firefox-esr", vec![url.clone()]),
+        ("librewolf", vec![url.clone()]),
+        (
+            "flatpak",
+            vec!["run".into(), "org.mozilla.firefox".into(), url.clone()],
+        ),
+    ];
+    for (bin, args) in candidates {
+        if std::process::Command::new(bin).args(&args).spawn().is_ok() {
+            return Ok(());
+        }
+    }
+    Err("Firefox was not found on this machine".into())
+}
+
+#[cfg(windows)]
+#[tauri::command]
+pub fn install_firefox_extension(path: String) -> Cmd<()> {
+    let p = std::path::PathBuf::from(&path);
+    if !p.is_file() {
+        return Err(format!("{} no longer exists", p.display()));
+    }
+    let url = format!("file:///{}", p.display().to_string().replace('\\', "/"));
+    for bin in [
+        r"C:\Program Files\Mozilla Firefox\firefox.exe",
+        r"C:\Program Files (x86)\Mozilla Firefox\firefox.exe",
+        "firefox.exe",
+    ] {
+        if std::process::Command::new(bin).arg(&url).spawn().is_ok() {
+            return Ok(());
+        }
+    }
+    Err("Firefox was not found on this machine".into())
+}
+
+/// Open a Chromium browser on its extensions page.
+///
+/// There is no equivalent of Firefox's one click here, and it is not an
+/// oversight: Chromium will not install an unpacked extension on anybody's
+/// say-so but the user's, which is the correct answer to a program offering to
+/// add code to your browser. "Load unpacked" is the whole of the supported
+/// path, and it needs a human at the extensions page with the folder in a file
+/// dialog.
+///
+/// So this does the half that can be automated — puts the browser on that page
+/// — and the caller opens the folder beside it, leaving the two things the
+/// user must do in front of them rather than described in a paragraph.
+///
+/// Returns the browser it opened, because the answer changes what the user is
+/// then looking at, and "Brave is open at its extensions page" is a different
+/// instruction from "Chrome is".
+#[cfg(unix)]
+#[tauri::command]
+pub fn open_chromium_extensions() -> Cmd<String> {
+    // Brave first among equals: it is the one people arrive from when Firefox
+    // is not the browser they use. Beyond that the order is arbitrary, and the
+    // first one installed wins.
+    const BROWSERS: [(&str, &str); 8] = [
+        ("brave-browser", "Brave"),
+        ("brave", "Brave"),
+        ("google-chrome", "Chrome"),
+        ("google-chrome-stable", "Chrome"),
+        ("chromium", "Chromium"),
+        ("chromium-browser", "Chromium"),
+        ("microsoft-edge", "Edge"),
+        ("vivaldi", "Vivaldi"),
+    ];
+    for (bin, name) in BROWSERS {
+        // A running browser takes the URL and opens a tab; one that is not
+        // running starts. Either way the page it lands on is the one with the
+        // "Load unpacked" button on it.
+        if std::process::Command::new(bin)
+            .arg("chrome://extensions")
+            .spawn()
+            .is_ok()
+        {
+            return Ok(name.to_string());
+        }
+    }
+    Err("no Chromium browser was found on this machine".into())
+}
+
+#[cfg(windows)]
+#[tauri::command]
+pub fn open_chromium_extensions() -> Cmd<String> {
+    const BROWSERS: [(&str, &str); 5] = [
+        (r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe", "Brave"),
+        (r"C:\Program Files\Google\Chrome\Application\chrome.exe", "Chrome"),
+        (r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe", "Chrome"),
+        (r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe", "Edge"),
+        ("chrome.exe", "Chrome"),
+    ];
+    for (bin, name) in BROWSERS {
+        if std::process::Command::new(bin)
+            .arg("chrome://extensions")
+            .spawn()
+            .is_ok()
+        {
+            return Ok(name.to_string());
+        }
+    }
+    Err("no Chromium browser was found on this machine".into())
 }
 
 /// The command that installs `package` on this machine.

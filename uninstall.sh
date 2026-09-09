@@ -159,6 +159,20 @@ if [[ -e "$DATA_DIR/mdm-firefox.xpi" ]]; then
   removed+=("$DATA_DIR/mdm-firefox.xpi")
 fi
 
+# The Chromium copy, for the same reason. It matters more than the .xpi does:
+# Firefox copies an add-on into the profile as it installs it, so removing this
+# file takes nothing away from a running browser -- but Chromium reads an
+# unpacked extension's folder every time it starts. So this one is still in use
+# by whatever browser it was loaded into, and leaving it would leave an
+# extension that outlives the app it talks to.
+if [[ -d "$DATA_DIR/mdm-chrome" ]]; then
+  rm -rf "$DATA_DIR/mdm-chrome"
+  removed+=("$DATA_DIR/mdm-chrome")
+  warn "if you loaded the extension into a Chromium browser, remove it there too
+  — it was loaded from the folder just deleted, and the browser will report it
+  as missing or corrupted until you do."
+fi
+
 # ----------------------------------------------------------------- user data
 
 if [[ "$PURGE" == yes ]]; then
