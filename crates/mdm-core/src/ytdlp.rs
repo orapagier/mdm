@@ -176,6 +176,102 @@ fn apply_cookies(cmd: &mut Command, cookies_from: Option<&str>) {
     }
 }
 
+/// Is this the header carrying the browser's session?
+fn is_cookie_header(header: &crate::model::Header) -> bool {
+    header.name.eq_ignore_ascii_case("cookie")
+}
+
+/// The jar's text: one cookie per line, or `None` when there is none to write.
+///
+/// Split out from the writing so the format itself — which a loader will
+/// either accept whole or reject whole — can be pinned down by a test.
+fn cookie_jar(url: &str, headers: &[crate::model::Header]) -> Option<String> {
+    let host = url::Url::parse(url).ok()?.host_str()?.to_owned();
+
+    let mut jar = String::from("# Netscape HTTP Cookie File\n");
+    let mut written = 0usize;
+    for header in headers.iter().filter(|h| is_cookie_header(h)) {
+        for pair in header.value.split(';') {
+            let Some((name, value)) = pair.split_once('=') else { continue };
+            let (name, value) = (name.trim(), value.trim());
+            // The format is one cookie per line, fields split on tabs, so a
+            // tab or a newline inside one would end the field early and shift
+            // every field after it. Nothing legitimate contains either.
+            if name.is_empty() || [name, value].iter().any(|f| f.contains(['\t', '\n', '\r'])) {
+                continue;
+            }
+            // domain, include_subdomains, path, secure, expiry, name, value.
+            //
+            // Host-only and path-wide: the narrowest scope that still sends
+            // everything the browser sent with the request we captured.
+            // Not marked secure — the header was sent whatever the scheme,
+            // and a cookie silently dropped is worse than one sent in the
+            // clear to a server that already had it.
+            //
+            // Dated to 2038 rather than the 0 that means "session cookie":
+            // whether a jar keeps an expired entry is a flag on the loader,
+            // and this file outlives nothing but the run that writes it.
+            jar.push_str(&format!("{host}\tFALSE\t/\tFALSE\t2147483647\t{name}\t{value}\n"));
+            written += 1;
+        }
+    }
+    (written > 0).then_some(jar)
+}
+
+/// Write the captured `Cookie:` header where yt-dlp will read it as cookies.
+///
+/// Handed over as `--add-header Cookie: ...` a session is a header like any
+/// other, and yt-dlp says so on every run that carries one:
+///
+/// > Deprecated Feature: Passing cookies as a header is a potential security
+/// > risk; they will be scoped to the domain of the downloaded urls. Please
+/// > consider loading cookies from a file or browser instead.
+///
+/// It prints that before extraction begins, so it is already sitting in the
+/// tail of stderr when a failure arrives, and the tail is appended to the
+/// summary as the explanation for it. That is how a site yt-dlp simply has no
+/// extractor for reached the user as `Unsupported URL: https://...: Deprecated
+/// Feature: Passing cookies as a header is a potential s...` — the real cause,
+/// a colon, and then a remark about MDM's own command line standing where the
+/// reason should be and filling the rest of the strip. Keeping advice out of
+/// that tail is [`is_advisory`]'s job; this is the half that stops it being
+/// printed at all.
+///
+/// The scope it warns about is the other half. As a header, where the session
+/// ends up is yt-dlp's inference — "scoped to the domain of the downloaded
+/// urls", by its own account, which for a job whose video and audio come off
+/// different hosts is not one domain, and need not be the one the browser
+/// issued them for. A jar states the scope rather than leaving it to be
+/// worked out: this host, and nowhere else.
+///
+/// `None` when there is no session to write or the file could not be written,
+/// and the caller then falls back to the header: a member-only download that
+/// prints a warning is worth more than one that cannot authenticate at all.
+fn write_cookie_jar(url: &str, headers: &[crate::model::Header]) -> Option<std::path::PathBuf> {
+    let jar = cookie_jar(url, headers)?;
+    let path = crate::paths::runtime_dir()
+        .join("cookies")
+        .join(format!("{}.txt", token()));
+    let dir = path.parent()?;
+    // Credentials, and with `--cookies-from-browser` also in play yt-dlp
+    // writes the browser's own jar back here when it exits. The runtime
+    // directory is already the user's alone; the file says so too.
+    if let Err(e) = std::fs::create_dir_all(dir) {
+        log::warn!("could not create the cookie directory: {e}");
+        return None;
+    }
+    if let Err(e) = std::fs::write(&path, &jar) {
+        log::warn!("could not write the cookie jar: {e}");
+        return None;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
+    Some(path)
+}
+
 /// JavaScript runtimes yt-dlp can drive, in its own order of preference,
 /// paired with the name each one's binary actually has on disk.
 const JS_RUNTIMES: &[(&str, &str)] = &[
@@ -417,6 +513,29 @@ pub fn looks_out_of_date(message: &str) -> bool {
         || lower.contains("signature extraction failed")
         || lower.contains("please report this issue")
         || lower.contains("update to the latest version")
+}
+
+/// Is this stderr line advice about the run rather than a fact about the
+/// failure?
+///
+/// The tail of stderr is kept so that a bare `ERROR: ...` summary can be shown
+/// with the diagnostic that explains it. Advice is not that: it is printed
+/// before the run gets anywhere near failing, and it is about how MDM invoked
+/// yt-dlp rather than about the download. Appended to a summary it is read as
+/// the reason for it, and it takes the room the reason would have had — a
+/// site with no extractor reached the user as "Unsupported URL: https://...:
+/// Deprecated Feature: Passing cookies as a header is a potential s...", where
+/// everything after the first colon is a note to us, clipped, in the one line
+/// the user gets.
+fn is_advisory(line: &str) -> bool {
+    const ADVICE: &[&str] = &[
+        "warning:",
+        "deprecated feature:",
+        "deprecationwarning:",
+        "[debug]",
+    ];
+    let lower = line.trim_start().to_lowercase();
+    ADVICE.iter().any(|a| lower.starts_with(a))
 }
 
 /// Does this failure mean the player challenge went unsolved?
@@ -982,11 +1101,16 @@ const TAG: &str = "@MDM@";
 /// then instantly "done" actually was. `--print-to-file` asks for the exact
 /// same values without touching stdout at all.
 fn print_file_paths() -> (std::path::PathBuf, std::path::PathBuf) {
-    let mut buf = [0u8; 8];
-    let _ = getrandom::fill(&mut buf);
-    let token: String = buf.iter().map(|b| format!("{b:02x}")).collect();
+    let token = token();
     let dir = crate::paths::runtime_dir().join("print");
     (dir.join(format!("{token}.name.txt")), dir.join(format!("{token}.file.txt")))
+}
+
+/// A name no concurrent run can collide with.
+fn token() -> String {
+    let mut buf = [0u8; 8];
+    let _ = getrandom::fill(&mut buf);
+    buf.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 pub struct YtDlpHandle {
@@ -1120,9 +1244,15 @@ pub async fn download(
         cmd.arg("--load-info-json").arg(path);
     }
 
-    for h in headers {
-        // Cookies and Referer are what make member-only or hotlink-protected
-        // media resolvable at all.
+    // Cookies and Referer are what make member-only or hotlink-protected
+    // media resolvable at all. The session goes in a jar rather than a header
+    // — see `write_cookie_jar` — and only falls back to the header when there
+    // is no jar to point at.
+    let jar = write_cookie_jar(url, headers);
+    if let Some(path) = &jar {
+        cmd.arg("--cookies").arg(path);
+    }
+    for h in headers.iter().filter(|h| jar.is_none() || !is_cookie_header(h)) {
         cmd.arg("--add-header").arg(h.to_arg());
     }
 
@@ -1178,7 +1308,7 @@ pub async fn download(
                     continue;
                 }
                 let trimmed = line.trim();
-                if !trimmed.is_empty() {
+                if !trimmed.is_empty() && !is_advisory(trimmed) {
                     if recent.len() == recent.capacity() {
                         recent.pop_front();
                     }
@@ -1266,6 +1396,11 @@ pub async fn download(
         }
         let _ = tokio::fs::remove_file(&name_file).await;
         let _ = tokio::fs::remove_file(&file_file).await;
+        // The session, and whatever yt-dlp merged into it from the browser on
+        // its way out. It exists for the length of one run and no longer.
+        if let Some(jar) = &jar {
+            let _ = tokio::fs::remove_file(jar).await;
+        }
     });
 
     Ok(YtDlpHandle { child, last_error })
@@ -1324,6 +1459,25 @@ fn failing_host(message: &str) -> Option<String> {
     (!host.is_empty()).then(|| host.to_owned())
 }
 
+/// The host of the first address a message quotes.
+///
+/// yt-dlp names what it could not handle by printing the URL back in full,
+/// and in a one-line strip under a progress bar that is mostly path. The host
+/// is the part that says which site, and it is the part worth the room.
+fn named_host(message: &str) -> Option<String> {
+    let start = ["https://", "http://"]
+        .iter()
+        .filter_map(|scheme| message.find(scheme))
+        .min()?;
+    let rest = &message[start..];
+    let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+    let host = url::Url::parse(rest[..end].trim_end_matches([',', '.', ';', ':']))
+        .ok()?
+        .host_str()?
+        .to_owned();
+    Some(host)
+}
+
 /// Say a failure the way someone who did not write yt-dlp would say it.
 ///
 /// The tool reports transport trouble as the Python exception it caught, so a
@@ -1341,6 +1495,21 @@ pub fn plain_error(message: &str) -> String {
     let site = failing_host(message)
         .map(|h| format!(" {h}"))
         .unwrap_or_default();
+
+    // "Unsupported URL" means no extractor claims this address — and yt-dlp
+    // says it by quoting the whole address back, which is the half the user
+    // already has. A row only reaches the extractor at all when our own
+    // fetcher found a page where a file should have been, so both tools are
+    // now out of ideas, and saying which one gave up on what is less use than
+    // saying what is left to try: the page itself, which the browser can open
+    // and which has the real link somewhere on it.
+    if lower.contains("unsupported url") {
+        let who = named_host(message).unwrap_or_else(|| "this site".to_string());
+        return format!(
+            "No extractor for {who} — open the page in your browser and start \
+             the download from the link on it."
+        );
+    }
 
     const DNS: &[&str] = &[
         "getaddrinfo failed",
@@ -1460,6 +1629,91 @@ mod tests {
 
     fn fmt(json: &str) -> Option<Format> {
         parse_format(&serde_json::from_str(json).unwrap())
+    }
+
+    fn header(name: &str, value: &str) -> crate::model::Header {
+        crate::model::Header { name: name.into(), value: value.into() }
+    }
+
+    /// The whole point of the jar is that yt-dlp reads it without complaining,
+    /// and a loader accepts the format whole or not at all: the magic first
+    /// line, seven tab-separated fields, one cookie per line.
+    #[test]
+    fn the_session_is_written_as_a_jar_a_loader_will_take() {
+        let jar = cookie_jar(
+            "https://filekeeper.net/download",
+            &[
+                header("Referer", "https://filekeeper.net/"),
+                // A real session: two cookies, and a value that ends in the
+                // padding `=` of base64 — splitting on the wrong `=` would
+                // truncate it.
+                header("Cookie", "sess=abc123; token=eyJhbGciOi=="),
+            ],
+        )
+        .expect("a Cookie header is a jar");
+
+        let mut lines = jar.lines();
+        assert_eq!(
+            lines.next(),
+            Some("# Netscape HTTP Cookie File"),
+            "without the magic line the whole file is rejected"
+        );
+        assert_eq!(
+            lines.next(),
+            Some("filekeeper.net\tFALSE\t/\tFALSE\t2147483647\tsess\tabc123")
+        );
+        assert_eq!(
+            lines.next(),
+            Some("filekeeper.net\tFALSE\t/\tFALSE\t2147483647\ttoken\teyJhbGciOi=="),
+            "the value was split on its own padding"
+        );
+        assert_eq!(lines.next(), None, "Referer is not a cookie");
+    }
+
+    /// Nothing to scope a cookie to, and nothing to say.
+    #[test]
+    fn a_request_with_no_session_gets_no_jar() {
+        assert!(cookie_jar("https://example.com/f.mkv", &[header("Referer", "https://x/")]).is_none());
+        assert!(cookie_jar("https://example.com/f.mkv", &[]).is_none());
+        // A header that is present but empty is still no session.
+        assert!(cookie_jar("https://example.com/f.mkv", &[header("Cookie", " ")]).is_none());
+    }
+
+    /// yt-dlp prints its deprecation notice before extraction even starts, so
+    /// it is always sitting in the tail of stderr when something later fails.
+    /// Appended to the summary line it becomes the cause the user is shown —
+    /// this is the download in the bug report, verbatim:
+    ///
+    /// > Unsupported URL: https://filekeeper.net/download: Deprecated Feature:
+    /// > Passing cookies as a header is a potential security ris...
+    #[test]
+    fn advice_is_never_reported_as_the_cause() {
+        assert!(is_advisory(
+            "Deprecated Feature: Passing cookies as a header is a potential \
+             security risk; they will be scoped to the domain of the downloaded urls."
+        ));
+        assert!(is_advisory("WARNING: [generic] Falling back on generic information extractor"));
+        assert!(is_advisory("[debug] Command-line config: ['--no-warnings']"));
+
+        // What the tail exists for: the downloader's own diagnostic, which is
+        // more specific than the summary that follows it.
+        assert!(!is_advisory("ERROR: unable to download video data: HTTP Error 403: Forbidden"));
+        assert!(!is_advisory("[download] Got error: The read operation timed out"));
+    }
+
+    /// "Unsupported URL" is yt-dlp quoting back the address it was given.
+    /// A row only reaches yt-dlp when our own fetcher found a page, so at this
+    /// point both tools are out of ideas and the message has to say what is
+    /// left to do rather than which tool gave up.
+    #[test]
+    fn an_unsupported_url_names_the_site_and_a_way_forward() {
+        let said = plain_error("Unsupported URL: https://filekeeper.net/download");
+        assert!(said.contains("filekeeper.net"), "{said}");
+        assert!(said.contains("browser"), "{said}");
+        assert!(!said.contains("http"), "the URL is what the user already had: {said}");
+
+        // Nothing to name is not a reason to say nothing.
+        assert!(plain_error("ERROR: Unsupported URL: rtmp://x/y").contains("this site"));
     }
 
     #[test]
