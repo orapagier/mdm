@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Download engine, aria2 supervision and browser IPC for MDM"
+description = "Download engine, stream remuxing and browser IPC for MDM"
 
 [dependencies]
 anyhow = "1"
@@ -39,7 +39,7 @@ percent-encoding = "2"
 # without a crate.
 quick-xml = "0.41"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
-# Cross-platform CSPRNG, used for the aria2 RPC secret on every OS.
+# Cross-platform CSPRNG, used to name yt-dlp's --print-to-file files.
 getrandom = "0.3"
 
 [target.'cfg(unix)'.dependencies]

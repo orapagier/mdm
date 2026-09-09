@@ -14,8 +14,9 @@ use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::time::Duration;
 use tokio::sync::{broadcast, mpsc};
 
-/// How often the engine reconciles with aria2. Fast enough that the progress
-/// bar looks continuous, slow enough that polling costs nothing measurable.
+/// How often the engine reconciles with its downloaders. Fast enough that the
+/// progress bar looks continuous, slow enough that polling costs nothing
+/// measurable.
 const POLL_INTERVAL: Duration = Duration::from_millis(700);
 
 /// Everything the UI needs for one repaint.
@@ -28,9 +29,6 @@ pub struct Snapshot {
     pub queued: i64,
 }
 
-/// Live state for a yt-dlp download, which bypasses aria2's RPC entirely.
-/// A download the in-process fetcher owns.
-///
 /// Holds a row's dispatch claim, and gives it back however the dispatch
 /// ends — including the paths that return early or fail, which is most of
 /// them. A claim left behind would park that row for the life of the
@@ -137,8 +135,9 @@ struct YtState {
     title: Option<String>,
     /// Whether that title has already been written to the database.
     title_applied: bool,
-    /// Connections aria2 reports for this job, so a streamed download can say
-    /// what it is really doing instead of claiming a single connection.
+    /// Connections the downloader reports for this job. yt-dlp says nothing
+    /// about its own, so this stays 0 and the row shows no count rather than
+    /// inventing one; it is the fetcher that has a real number to give.
     connections: i64,
     /// Set when *we* killed yt-dlp. It has no pause, so pausing means killing
     /// it — and without this flag the exit reads as a crash, gets retried, and
@@ -266,9 +265,10 @@ impl Engine {
         // credential this app handles already lives, and the URL is kept and
         // shown without it.
         let job = strip_userinfo(job);
-        // Clicking the same link twice must not start a rival download. aria2
-        // would resolve the filename collision by writing "file.1.iso", which
-        // is how you end up with one finished copy and one abandoned stub.
+        // Clicking the same link twice must not start a rival download: two
+        // of them racing for one name, and settling it by numbering the
+        // second, is how you end up with one finished copy and one abandoned
+        // stub.
         //
         // Same *target*, not same page: asking for the audio track of a video
         // that is downloading is asking for another file, and answering it
@@ -490,7 +490,7 @@ impl Engine {
         }))
     }
 
-    /// Hand a download to aria2 (or yt-dlp) and record the resulting handle.
+    /// Hand a download to the fetcher (or yt-dlp) and record the resulting handle.
     async fn dispatch(&self, d: &Download, job: &Job) -> Result<()> {
         // Whoever holds the claim is already starting this one.
         if !self.claimed.lock().unwrap().insert(d.id) {
@@ -526,9 +526,9 @@ impl Engine {
         let settings = self.settings();
 
         // A manifest is not a file. HLS and DASH name hundreds of segments,
-        // often with the picture and the sound in separate sets, and neither
-        // aria2 nor the plain fetcher can make a video out of that — so this
-        // is decided before the backend question, not after it.
+        // often with the picture and the sound in separate sets, and the
+        // plain fetcher cannot make a video out of that — so this is decided
+        // before the backend question, not after it.
         if crate::stream::looks_like_manifest(&d.url, &d.mime) {
             return self.dispatch_fetch(d, &settings, Fetcher::Segmented).await;
         }
@@ -1369,7 +1369,7 @@ impl Engine {
 
     /// Point a download that has not started yet at a different folder or name.
     ///
-    /// Only before the first byte: once aria2 or yt-dlp owns a partial file,
+    /// Only before the first byte: once a downloader owns a partial file,
     /// moving the target underneath it would orphan what is already written.
     pub fn set_target(
         &self,
@@ -1972,7 +1972,7 @@ pub fn queue_open_at(q: &Queue, minute: u16, weekday: u8) -> bool {
 }
 
 
-/// Whether yt-dlp belongs between this job and aria2.
+/// Whether yt-dlp belongs between this job and the fetcher.
 ///
 /// The host is consulted only when nobody has looked. A caller that has
 /// already tried to read a page out of this URL holds the better answer, and
@@ -1980,7 +1980,7 @@ pub fn queue_open_at(q: &Queue, minute: u16, weekday: u8) -> bool {
 /// picker exhausts every page it can find, gives up, offers the file the
 /// player is using — and that file comes off the site's own CDN, so
 /// `v16-webapp.tiktok.com` read as "a TikTok page" and an extractor was put in
-/// front of an mp4 aria2 could simply have fetched.
+/// front of an mp4 the fetcher could simply have taken.
 ///
 /// Where nobody has an opinion the type still settles it before the host does:
 /// a response the browser has already called video or audio is the file, and

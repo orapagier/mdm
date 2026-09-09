@@ -276,7 +276,7 @@ fn a_caller_that_has_already_looked_is_not_overruled() {
     // The failure this is here for: the picker resolved nothing on TikTok and
     // offered the file the player was using, which lives on TikTok's own CDN.
     // Guessing from the host put yt-dlp in front of an mp4, and the download
-    // died as "aria2c exited with code 16".
+    // died, in the downloader of the day, as "exited with code 16".
     let cdn = "https://v16-webapp.tiktok.com/ad2adb4e/6a9b818c/video/tos/alisg/tos-alisg-pv-0037/02ea";
     assert!(wants_ytdlp(&job_from_url(cdn)), "the host alone still reads as TikTok");
     assert!(!wants_ytdlp(&settled_media(cdn)), "an answer given outright must stand");

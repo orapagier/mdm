@@ -144,9 +144,10 @@ pub struct Progress {
     pub downloaded: i64,
     pub total: i64,
     pub speed: i64,
-    /// How many connections aria2 currently has open. Reported rather than
-    /// assumed: a streamed download is segmented exactly like any other, and
-    /// claiming "1" made it look like it was not.
+    /// How many connections the download has open. yt-dlp reports none of its
+    /// own, so everything parsed here carries 0; the field is kept so a
+    /// streamed download is described the same way as any other, and so the
+    /// row shows no count rather than claiming a single connection.
     pub connections: i64,
 }
 
@@ -1009,11 +1010,11 @@ fn literal(name: &str) -> String {
 ///
 /// Its CDN (googlevideo.com) hands progressive formats out from signed,
 /// per-request URLs, and answers more than one simultaneous range request
-/// against the same signed URL with a response aria2 cannot parse — not a
-/// clean 403, but a malformed status line, which aria2 reports as exit 22
-/// ("HTTP response header was bad or unexpected") rather than as a rejected
-/// request. yt-dlp's own downloader never trips this because it never
-/// splits a file into parallel ranged connections in the first place.
+/// against the same signed URL with a response no client can parse — not a
+/// clean 403, but a malformed status line, which reads as a transport fault
+/// rather than as a rejected request. Splitting a file into parallel ranged
+/// connections is exactly what our fetcher does, so it walks straight into
+/// this; yt-dlp's own downloader never trips it, because it never splits.
 fn is_youtube(url: &str) -> bool {
     let Ok(parsed) = url::Url::parse(url) else {
         return false;
@@ -1029,8 +1030,8 @@ fn is_youtube(url: &str) -> bool {
 
 /// Start a yt-dlp download, streaming progress over `tx`.
 ///
-/// `connections` is passed through to aria2 so streamed fragments get the same
-/// parallelism as ordinary files.
+/// `connections` becomes `--concurrent-fragments`, so streamed fragments get
+/// the same parallelism as ordinary files.
 pub async fn download(
     url: &str,
     dir: &Path,
@@ -1146,14 +1147,13 @@ pub async fn download(
         let sink = last_error.clone();
         tokio::spawn(async move {
             let mut lines = BufReader::new(stderr).lines();
-            // When an external downloader (aria2c) fails, yt-dlp dumps its
-            // whole captured stderr verbatim ahead of its own one-line
-            // "ERROR: aria2c exited with code N" summary — aria2's own
-            // `[ERROR]`/`[WARN]` lines carry the actual reason (a bad status
-            // line, a redirect, a timeout) but never contain the literal
-            // "ERROR:" our filter used to require, so they were read and then
-            // silently dropped. Keeping the tail of everything printed
-            // means that reason survives into the message the UI shows.
+            // yt-dlp puts the reason and the summary on different lines: the
+            // detail it captured comes out verbatim, and only the one-line
+            // "ERROR: ..." that follows carries the marker a filter can match
+            // on. Anything that explained *why* was therefore read and then
+            // silently dropped — which is how a failure reached the UI as a
+            // bare exit status. Keeping the tail of everything printed means
+            // the reason survives into the message the user is shown.
             let mut recent: std::collections::VecDeque<String> = std::collections::VecDeque::with_capacity(16);
             while let Ok(Some(line)) = lines.next_line().await {
                 if line.contains("ERROR:") {
@@ -1306,15 +1306,16 @@ fn parse_progress(s: &str) -> Option<Progress> {
         downloaded,
         total: if total > 0 { total } else { estimate },
         speed: speed.max(0),
-        // yt-dlp says nothing about connections; aria2's own readout does.
+        // yt-dlp says nothing about connections, and there is no second
+        // downloader underneath it to ask.
         connections: 0,
     })
 }
 
 /// The host a transport error was complaining about, if it named one.
 ///
-/// Python spells it `host='www.youtube.com'`; aria2 and curl put it in the URL
-/// instead. Only the name is wanted — a message that says which site could not
+/// Python spells it `host='www.youtube.com'`; curl and its kind put it in the
+/// URL instead. Only the name is wanted — a message that says which site could
 /// be reached is the difference between "the app is broken" and "my connection
 /// dropped".
 fn failing_host(message: &str) -> Option<String> {
@@ -1449,7 +1450,7 @@ pub fn is_media_response(mime: &str) -> bool {
 /* ---------------------------------------------------------------------- *
  * Unit tests
  *
- * The aria2 readout is parsed rather than structured data, and it is the only
+ * yt-dlp's readout is parsed rather than structured data, and it is the only
  * progress a yt-dlp download reports, so its shapes are pinned down here.
  * ---------------------------------------------------------------------- */
 

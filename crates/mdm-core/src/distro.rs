@@ -6,9 +6,9 @@
 //! for a package manager they do not have, instead of at the dependency they
 //! are actually missing.
 //!
-//! Only the *command* is guessed. The three packages MDM ever names — aria2,
-//! yt-dlp, nodejs — are spelled the same in every family's repositories, so
-//! there is no name table to drift out of date.
+//! Only the *command* is guessed. The two packages MDM ever names — yt-dlp
+//! and nodejs — are spelled the same in every family's repositories, so there
+//! is no name table to drift out of date.
 
 use std::sync::OnceLock;
 
@@ -110,8 +110,8 @@ fn family_of(id: &str) -> Option<PackageManager> {
 }
 
 /// winget identifies packages by publisher-qualified id, not the plain name
-/// every Linux family happens to share. Only the three packages MDM ever
-/// names (see the module doc) need an entry.
+/// every Linux family happens to share. Only the two packages MDM ever names
+/// (see the module doc) need an entry.
 fn winget_id(package: &str) -> &str {
     match package {
         "yt-dlp" => "yt-dlp.yt-dlp",
@@ -120,9 +120,9 @@ fn winget_id(package: &str) -> &str {
     }
 }
 
-/// How to install `package` here — `sudo apt install aria2` on Debian,
-/// `sudo dnf install aria2` on Fedora, `winget install --id aria2.aria2` on
-/// Windows.
+/// How to install `package` here — `sudo apt install yt-dlp` on Debian,
+/// `sudo dnf install yt-dlp` on Fedora, `winget install --id yt-dlp.yt-dlp`
+/// on Windows.
 ///
 /// When the family is unknown the package is still named, because the name is
 /// the part the user cannot look up on their own.
