@@ -58,6 +58,10 @@ enum Fetcher {
     /// ordinary downloader and then merged into one MP4 in this process.
     /// This is the path that needs no ffmpeg.
     Merged(Vec<crate::stream::Stream>),
+    /// A connection already open, because the address will not answer twice.
+    /// Boxed because a response is large next to the other variants and this
+    /// is the rare one. See [`Engine::preempt`].
+    Held(Box<(reqwest::Response, fetch::Probe)>),
 }
 
 /// Deliberately shaped like [`YtState`]: both are engines the poll loop has to
@@ -605,12 +609,24 @@ impl Engine {
 
         let (tx, mut rx) = mpsc::channel(64);
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let task = match &how {
+        // Named before it is spent: `Held` carries the open response into the
+        // task, so `how` cannot be borrowed again for the log line below.
+        let label = match &how {
+            Fetcher::Segmented => "stream downloader".to_string(),
+            Fetcher::Merged(streams) => format!("native merge of {} stream(s)", streams.len()),
+            Fetcher::Direct => "built-in fetcher".to_string(),
+            Fetcher::Held(_) => "the request the browser was about to make".to_string(),
+        };
+        let task = match how {
             Fetcher::Segmented => tokio::spawn(crate::stream::download(spec, tx, stop.clone())),
             Fetcher::Merged(streams) => {
-                tokio::spawn(crate::stream::merge(spec, streams.clone(), tx, stop.clone()))
+                tokio::spawn(crate::stream::merge(spec, streams, tx, stop.clone()))
             }
             Fetcher::Direct => tokio::spawn(fetch::download(spec, tx, stop.clone())),
+            Fetcher::Held(held) => {
+                let (response, probe) = *held;
+                tokio::spawn(fetch::download_open(spec, response, probe, tx, stop.clone()))
+            }
         };
 
         self.fetch_jobs.lock().unwrap().insert(
@@ -627,16 +643,7 @@ impl Engine {
             },
         );
         self.store.set_status(d.id, Status::Active, None)?;
-        log::info!(
-            "#{} -> {} ({})",
-            d.id,
-            match &how {
-                Fetcher::Segmented => "stream downloader".to_string(),
-                Fetcher::Merged(streams) => format!("native merge of {} stream(s)", streams.len()),
-                Fetcher::Direct => "built-in fetcher".to_string(),
-            },
-            d.filename
-        );
+        log::info!("#{} -> {} ({})", d.id, label, d.filename);
 
         // Fold the fetcher's events into the same state the poll loop reads.
         let id = d.id;
@@ -1239,8 +1246,9 @@ impl Engine {
             let site = if site.is_empty() { "That site".to_string() } else { site };
             format!(
                 "{site} served this file once and now answers with a page — that \
-                 link was single-use. MDM will leave {site} to the browser from \
-                 now on; download it again and the browser will save it."
+                 link was single-use. MDM will ask {site} before the browser does \
+                 from now on, so the next link is not spent before it can be \
+                 used; download it again."
             )
         } else if was_page {
             // The marker exists for this branch, not for the user.
@@ -1526,16 +1534,99 @@ impl Engine {
 
     /// Is this URL's host one that has already proved its links are one-shot?
     ///
-    /// Asked of a capture on its way in, before anything has been submitted:
-    /// taking such a download means cancelling the browser's request, and the
-    /// browser's request is the only one the address will answer. Refusing it
-    /// hands the download back to the browser, which is where it can still
-    /// succeed. Returns the host so the refusal can name it.
+    /// Asked of an ordinary capture on its way in. By then the browser has
+    /// made the request, so the address has already been answered once and
+    /// MDM's own would get the landing page; refusing hands the download back
+    /// to the browser, which is where it can still succeed. Returns the host
+    /// so the refusal can name it.
+    ///
+    /// A *pre-empted* capture is the opposite case and never asks this: there
+    /// the request has not been made yet, and the same list is what says to
+    /// make it here rather than let the browser spend it. See [`Self::preempt`].
     pub fn single_use_host(&self, url: &str) -> Option<String> {
         single_use_match(url, &self.settings().single_use_hosts)
     }
 
-    /// Stop capturing from a host whose addresses are good for one request.
+    /// Take a download the browser has not asked for yet.
+    ///
+    /// The ordinary capture watches a response go by and then asks for the
+    /// same file again. On a host that spends its links that second request is
+    /// the landing page, which is why those hosts end up on
+    /// `single_use_hosts` and their downloads are left to the browser. This is
+    /// the way back in: the extension holds the request *before* it is sent
+    /// and asks here, so the one answer the address has is ours.
+    ///
+    /// Which means this has to decide, from that single response, something
+    /// the extension could not know when it held the request: whether the
+    /// address was a download at all. A file host's own pages sit on the same
+    /// host as its links, and cancelling a click on one of those would leave
+    /// the tab showing nothing. So a page comes back as `Ok(None)` — the
+    /// browser is still holding its request and goes ahead with it — and
+    /// anything else keeps the connection and becomes a download on it.
+    ///
+    /// Nothing about this is a guess that could cost the user the file: every
+    /// answer other than `Ok(Some)` leaves the browser exactly where it was.
+    pub async fn preempt(&self, mut job: Job) -> Result<Option<i64>> {
+        let settings = self.settings();
+        let mut spec = fetch::Spec::new(job.url.clone(), PathBuf::new());
+        spec.headers = job.headers.clone();
+        spec.referrer = Some(job.referrer.clone()).filter(|r| !r.is_empty());
+        spec.proxy = settings.proxy.clone();
+        if let Some(header) = authorization_for(&job.url, &settings) {
+            if !spec.headers.iter().any(|h| h.name.eq_ignore_ascii_case("authorization")) {
+                spec.headers.push(header);
+            }
+        }
+
+        let Some((response, probe)) = fetch::open(&spec).await? else {
+            log::info!("{} is a page; letting the browser have it", job.url);
+            return Ok(None);
+        };
+
+        // The extension saw no response — it held the request before one
+        // existed — so everything that names and sizes this download comes off
+        // the headers in hand.
+        if job.filename.trim().is_empty() {
+            job.filename = probe.filename.clone();
+        }
+        if job.size < 0 {
+            job.size = probe.size.map(|s| s as i64).unwrap_or(-1);
+        }
+        if job.mime.trim().is_empty() {
+            job.mime = probe.mime.clone();
+        }
+        // Not a page to extract from, whatever the host looks like: the file
+        // is on the end of a connection that is already open, and putting an
+        // extractor in front of it would ask the address a second question it
+        // has no answer left for.
+        job.use_ytdlp = Some(false);
+        // The row is made before a byte is written, but it is not left waiting
+        // for a Start button the way an ordinary capture is: the connection is
+        // open and the server is not going to hold it while somebody decides.
+        job.start_paused = true;
+        let id = self.submit(job).await?;
+        let Some(d) = self.download(id) else {
+            bail!("the row for this capture went missing before it could start");
+        };
+        // `submit` hands back an existing row for a URL already being fetched.
+        // Starting a second fetcher on it would write two copies into one
+        // file, so the response is dropped instead and the running one stands.
+        if d.status == Status::Active {
+            log::info!("#{id} is already running; dropping the held connection");
+            return Ok(Some(id));
+        }
+        self.dispatch_fetch(&d, &settings, Fetcher::Held(Box::new((response, probe))))
+            .await?;
+        Ok(Some(id))
+    }
+
+    /// Record a host whose addresses are good for one request.
+    ///
+    /// What the entry means depends on when it is read. To an ordinary capture
+    /// it says "leave this one alone" — the link is already spent. To the
+    /// extension it says the opposite: hold the *next* request to this host
+    /// before the browser sends it, and let MDM make it. Both readings come
+    /// from the same fact, which is why they come from the same list.
     ///
     /// Additive and idempotent, and it goes through `update_settings` so it is
     /// written to disk and reaches the open window like any other change —

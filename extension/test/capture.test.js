@@ -32,6 +32,9 @@ const {
   mirrorsOf,
   decodeDataUrl,
   withoutByteRange,
+  preemptable,
+  isManifest,
+  isFragment,
 } = context;
 
 const CFG = {
@@ -557,6 +560,108 @@ check("a URL naming no range is returned exactly as it stands", () => {
 check("something that is not a URL at all is left alone", () => {
   assert.strictEqual(withoutByteRange("blob:nonsense"), "blob:nonsense");
   assert.strictEqual(withoutByteRange(""), "");
+});
+
+/* ------------------------------------------------------------------ *
+ * Going first on a host that spends its links
+ * ------------------------------------------------------------------ */
+
+/** What the app has caught out. */
+const SPENDS = ["filekeeper.net"];
+
+/** The shape the blocking listener hands to the decision. */
+const asking = (over = {}) => ({
+  method: "GET",
+  url: "https://filekeeper.net/d/9f21c0",
+  type: "main_frame",
+  ...over,
+});
+
+check("a request to a host that answers once is taken before the browser", () => {
+  const v = preemptable(asking(), CFG, fresh(), SPENDS);
+  assert.strictEqual(v.capture, true, v.reason);
+});
+
+check("a subdomain of a listed host counts as the host", () => {
+  // These sites hand the file off to a numbered edge node, which is exactly
+  // the request that must not reach the browser first.
+  const url = "https://dl3.filekeeper.net/get/9f21c0";
+  assert.strictEqual(preemptable(asking({ url }), CFG, fresh(), SPENDS).capture, true);
+});
+
+check("every other host is left to the ordinary capture", () => {
+  // Nothing is gained by going first where the address answers twice, and a
+  // great deal is known by waiting: the type, the size, the mirrors.
+  const url = "https://releases.example.com/tool-1.0.tar.gz";
+  const v = preemptable(asking({ url }), CFG, fresh(), SPENDS);
+  assert.strictEqual(v.capture, false);
+  assert.match(v.reason, /answers more than once/);
+});
+
+check("with no list at all nothing is held", () => {
+  assert.strictEqual(preemptable(asking(), CFG, fresh(), []).capture, false);
+  assert.strictEqual(preemptable(asking(), CFG, fresh(), undefined).capture, false);
+});
+
+check("a POST is never held, because nothing could put it back", () => {
+  const v = preemptable(asking({ method: "POST" }), CFG, fresh(), SPENDS);
+  assert.strictEqual(v.capture, false);
+  assert.match(v.reason, /non-GET/);
+});
+
+check("the page's own furniture is not held", () => {
+  // Only the types a download arrives as. Holding the stylesheet of a file
+  // host's landing page would ask MDM about every asset on it.
+  for (const type of ["image", "script", "stylesheet", "xmlhttprequest", "media"]) {
+    assert.strictEqual(
+      preemptable(asking({ type }), CFG, fresh(), SPENDS).capture,
+      false,
+      type + " was held"
+    );
+  }
+});
+
+check("a site the user excluded is excluded here too", () => {
+  const cfg = { ...CFG, blockedSites: ["filekeeper.net"] };
+  assert.strictEqual(preemptable(asking(), cfg, fresh(), SPENDS).capture, false);
+});
+
+check("a download handed back to the browser is not taken again", () => {
+  const state = fresh();
+  state.bypass.add(asking().url);
+  assert.strictEqual(preemptable(asking(), CFG, state, SPENDS).capture, false);
+  // Consumed, like every other bypass: the next request is MDM's again.
+  assert.strictEqual(preemptable(asking(), CFG, state, SPENDS).capture, true);
+});
+
+check("nothing is held while the extension is switched off", () => {
+  const cfg = { ...CFG, enabled: false };
+  assert.strictEqual(preemptable(asking(), cfg, fresh(), SPENDS).capture, false);
+});
+
+/* ------------------------------------------------------------------ *
+ * Telling a stream from a slice of one
+ * ------------------------------------------------------------------ */
+
+check("a manifest is recognised by its type as well as its address", () => {
+  assert.ok(isManifest("https://cdn.test/hls/index.m3u8?t=1", ""));
+  assert.ok(isManifest("https://cdn.test/hls/master.mpd", ""));
+  // The address says nothing; the type says everything.
+  assert.ok(isManifest("https://cdn.test/a1b2c3", "application/vnd.apple.mpegurl"));
+  assert.ok(!isManifest("https://cdn.test/movie.mp4", "video/mp4"));
+});
+
+check("an HLS segment is a slice, however its address is spelled", () => {
+  // The one from the bug report: a token for a path, and only `video/mp2t`
+  // to say that six seconds of film is all this is.
+  assert.ok(isFragment("https://100.wowstreamingsofast.lol/99rR47vp5TC", "video/mp2t"));
+  assert.ok(isFragment("https://cdn.test/seg-00042.ts", ""));
+  assert.ok(isFragment("https://cdn.test/chunk.m4s", ""));
+
+  // And the things that are not slices.
+  assert.ok(!isFragment("https://cdn.test/hls/index.m3u8", "application/x-mpegurl"));
+  assert.ok(!isFragment("https://cdn.test/movie.mp4", "video/mp4"));
+  assert.ok(!isFragment("https://cdn.test/movie.mkv", ""));
 });
 
 /* ---------------- report ---------------- */

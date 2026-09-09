@@ -329,6 +329,211 @@ function buildJob(req, details, headers, reason) {
 }
 
 /* ------------------------------------------------------------------ *
+ * Net 0 — before the browser asks
+ *
+ * Every other net in this file watches a response and then asks the server for
+ * the same file again. Some file hosts will not answer twice: the address is
+ * good for one request, and the browser has already spent it by the time
+ * anything here can act. Those downloads were handed back to the browser and
+ * the host recorded, which is honest but is not what a download manager is
+ * for.
+ *
+ * This is the one net that acts *before* the request goes out, so MDM makes
+ * the request the browser was about to. Only on the hosts the app has been
+ * caught out by, because it is the expensive net: it cannot know whether an
+ * address is a download until something asks, so the request is held while
+ * MDM asks, and a page comes straight back to the browser that was holding it.
+ *
+ * Firefox only, and structurally so: holding a request open is exactly what
+ * Manifest V3 took away from Chromium, and there is nothing to hold one with.
+ * ------------------------------------------------------------------ */
+
+/**
+ * Hosts the app has found serving links that answer once.
+ *
+ * The app's list, not ours — it is the app that discovers them, by watching a
+ * capture fail — and it is read rather than written here.
+ */
+let singleUseHosts = [];
+
+/** Whether the blocking listener below is currently registered. */
+let preempting = false;
+
+/**
+ * Take the app's list, and put the listener up or down to match.
+ *
+ * A blocking listener on every request is not a small thing to add — it makes
+ * the browser wait on this script before it opens a socket — and for anyone
+ * who has never met a host like this there would be nothing behind the wait.
+ * So it exists only while there is a host to use it on, which for most people
+ * is never.
+ */
+function learnSingleUse(hosts) {
+  singleUseHosts = Array.isArray(hosts) ? hosts : [];
+  publishSingleUse();
+  const wanted = CAN_BLOCK && singleUseHosts.length > 0;
+  if (wanted === preempting) return;
+  if (wanted) {
+    browser.webRequest.onBeforeRequest.addListener(
+      holdForMdm,
+      { urls: ["<all_urls>"], types: FILTER_TYPES },
+      ["blocking"]
+    );
+  } else {
+    browser.webRequest.onBeforeRequest.removeListener(holdForMdm);
+  }
+  preempting = wanted;
+}
+
+/**
+ * Hand the list to the content scripts, for the browser that cannot hold a
+ * request.
+ *
+ * src/content/preempt.js catches the *click* instead, which is the only way in
+ * front of a request Manifest V3 left standing — and it has to decide whether
+ * to cancel that click synchronously, so it cannot ask us and must already
+ * know. Storage rather than a message for exactly that reason.
+ *
+ * Written on Firefox too, where nothing reads it: the two builds share this
+ * file, and a branch here would be a branch that only ever runs on one of them
+ * and so only ever gets tested on one of them.
+ */
+let publishedSingleUse = "";
+function publishSingleUse() {
+  const next = singleUseHosts.join("\n");
+  // Compared before writing, because this runs on every ping and every
+  // navigation, and a storage write fires storage.onChanged in every content
+  // script in every frame in every tab.
+  if (next === publishedSingleUse) return;
+  publishedSingleUse = next;
+  browser.storage.local.set({ singleUseHosts }).catch(() => {});
+}
+
+/** How often to ask for it again, at most. */
+const SINGLE_USE_REFRESH_MS = 30_000;
+let singleUseAskedAt = 0;
+
+/**
+ * Has the app answered this session?
+ *
+ * The gate on asking it anything the user did not ask for. A message to the
+ * native host is not free when MDM is closed: the host answers by *starting*
+ * it, and waits up to fifteen seconds for the socket while every message
+ * behind it queues. That is the right trade for a download somebody clicked
+ * on, and quite the wrong one for a page load — a browser session spent with
+ * MDM deliberately closed would keep dragging it back, a page at a time.
+ *
+ * Set by the pong the port opens with, and cleared when the host says the app
+ * has gone. So the refresh below rides on a connection that already exists,
+ * and never creates one.
+ */
+let appAnswered = false;
+
+/**
+ * Catch up with the app's list.
+ *
+ * The app learns a host the moment a capture from it fails, and the download
+ * after that one is the first that can be saved — so a list fetched only at
+ * startup would be a version behind for the whole session. Asked on
+ * navigation, which is the event just before somebody presses a download
+ * button, and throttled because navigation is not rare.
+ */
+async function refreshSingleUse(force = false) {
+  if (!appAnswered) return;
+  const now = Date.now();
+  if (!force && now - singleUseAskedAt < SINGLE_USE_REFRESH_MS) return;
+  singleUseAskedAt = now;
+  try {
+    const reply = await Native.request({ type: "ping" }, 2000);
+    if (reply && Array.isArray(reply.singleUseHosts)) learnSingleUse(reply.singleUseHosts);
+  } catch (e) {
+    // The app is not there. Nothing to pre-empt for, and the ordinary nets
+    // fail open the same way.
+  }
+}
+
+/**
+ * Is MDM running — and, while we are asking, what does it know?
+ *
+ * The same message either way, because the app answers a ping with its state
+ * and there is no sense in sending two. This is what the popup asks with.
+ */
+async function askApp() {
+  singleUseAskedAt = Date.now();
+  try {
+    const reply = await Native.request({ type: "ping" }, 1500);
+    if (reply && Array.isArray(reply.singleUseHosts)) learnSingleUse(reply.singleUseHosts);
+    appAnswered = !!(reply && reply.ok);
+    return appAnswered;
+  } catch {
+    return false;
+  }
+}
+
+/** Long enough for the app to make a request and read its headers. */
+const PREEMPT_TIMEOUT_MS = 10_000;
+
+/**
+ * Ask MDM to make this request instead of the browser.
+ *
+ * Returns what the blocking listener should do: cancel only where MDM says it
+ * has the file. Everything else — a page, a refusal, a timeout, an app that is
+ * not running — leaves the request exactly as it was, which is the same
+ * failing open every other net here does.
+ */
+async function preempt(details) {
+  const referrer = details.documentUrl || details.originUrl || "";
+  const job = {
+    url: details.url,
+    // Deliberately unnamed. Nothing has asked the server yet, so the only name
+    // available here is whatever the address happens to end in — a token, on
+    // the hosts this net exists for — and the app is about to be handed a
+    // Content-Disposition that actually says.
+    filename: "",
+    size: -1,
+    mime: "",
+    mirrors: [],
+    headers: await headersForUrl(details.url, referrer, details.cookieStoreId),
+    referrer,
+    cookieStoreId: details.cookieStoreId || "",
+    tabId: details.tabId ?? -1,
+    reason: "single-use host",
+    source: "preempt",
+  };
+  const reply = await Native.request({ type: "preempt", job }, PREEMPT_TIMEOUT_MS);
+  if (!reply || !reply.accepted) return {};
+  markCaptured(details.url);
+  return { cancel: true };
+}
+
+/**
+ * The blocking listener itself, named so it can be taken down again.
+ *
+ * Registered by `learnSingleUse` and only while there is something for it to
+ * do; see the note there.
+ */
+function holdForMdm(details) {
+  // A flag rather than an await, for the same reason net 1 uses one: this
+  // listener is blocking, and every request on the page would wait behind a
+  // storage read.
+  if (!settingsLoaded) return {};
+
+  const verdict = preemptable(
+    { method: details.method, url: details.url, type: details.type },
+    cfg,
+    state,
+    singleUseHosts
+  );
+  if (!verdict.capture) return {};
+  if (claimCapture(details.url)) return {};
+
+  return preempt(details).catch((e) => {
+    console.warn("[mdm] could not take it before the browser:", e.message);
+    return {};
+  });
+}
+
+/* ------------------------------------------------------------------ *
  * Net 2 — downloads API backstop
  *
  * Catches whatever slipped past net 1: "Save Link As", downloads started by
@@ -923,10 +1128,33 @@ async function headersForUrl(url, referrer, storeId) {
  * Media sniffer (non-blocking)
  * ------------------------------------------------------------------ */
 
-const STREAM_HINT = /\.(m3u8|mpd)(\?|$)/i;
-
 /** How many media responses to remember per tab, newest kept. */
 const MAX_SNIFFED = 50;
+
+/**
+ * Make room in a tab's media — the oldest first, but never a manifest while
+ * there is a fragment to drop instead.
+ *
+ * Age is the wrong measure for a stream. The manifest is fetched once, before
+ * the first frame, so it is always the oldest thing here; the pieces it lists
+ * arrive every few seconds for as long as anyone watches. Fifty slots is about
+ * five minutes of playback, after which the oldest-out rule had thrown away
+ * the one entry that describes the whole video and kept fifty slices of it.
+ * Press Download at six minutes in and the best thing left to offer was a
+ * six-second fragment, which downloaded completely, weighed 1.6 MB and would
+ * not open in anything.
+ */
+function makeRoom(m) {
+  for (const [url, item] of m) {
+    if (item.kind !== "stream") {
+      m.delete(url);
+      return;
+    }
+  }
+  // Nothing but manifests: a page with more streams than slots, where the
+  // oldest is the fairest thing to lose after all.
+  m.delete(m.keys().next().value);
+}
 
 browser.webRequest.onHeadersReceived.addListener(
   async (details) => {
@@ -934,11 +1162,7 @@ browser.webRequest.onHeadersReceived.addListener(
     if (!cfg.sniffMedia || details.tabId < 0) return;
     const headers = headerMap(details.responseHeaders);
     const mime = mimeOf(headers);
-    const isStream =
-      STREAM_HINT.test(details.url) ||
-      mime === "application/vnd.apple.mpegurl" ||
-      mime === "application/x-mpegurl" ||
-      mime === "application/dash+xml";
+    const isStream = isManifest(details.url, mime);
     const isMedia = mime.startsWith("video/") || mime.startsWith("audio/");
     if (!isStream && !isMedia) return;
 
@@ -950,7 +1174,7 @@ browser.webRequest.onHeadersReceived.addListener(
     // scroll far enough down a feed and the fifty slots are full of videos
     // already gone by, the one on screen is never recorded, and the button has
     // nothing to offer for it.
-    while (m.size >= MAX_SNIFFED) m.delete(m.keys().next().value);
+    while (m.size >= MAX_SNIFFED) makeRoom(m);
     m.set(details.url, {
       url: details.url,
       mime,
@@ -983,6 +1207,10 @@ browser.webNavigation.onCommitted.addListener(({ tabId, frameId }) => {
   if (frameId !== 0) return;
   tabMedia.delete(tabId);
   updateBadge();
+  // A page load is the moment before a download button is pressed, which
+  // makes it the last useful moment to find out whether this site is one MDM
+  // has to go first on. Throttled inside; see refreshSingleUse.
+  refreshSingleUse();
 });
 
 /* ------------------------------------------------------------------ *
@@ -1197,8 +1425,16 @@ async function grabVideo(msg, tabId) {
   if (excluded(host) || excluded(hostOf(msg.topUrl || ""))) {
     return { ok: false, error: "site excluded" };
   }
-  if (!Native.isAvailable()) {
-    Native.connect();
+  // Brought up and waited for, the way every other capture path does it,
+  // rather than asked of the port as it stands. `isAvailable()` is false for
+  // the whole window between a port dropping and its reconnect landing — a
+  // service worker Chromium has just restarted, an app restarted underneath
+  // one — and the old check reported the app missing throughout it while
+  // opening the port on its way out. The click that asked the question was
+  // spent proving the port could be opened; only the one after it worked,
+  // which is why the popup could say "connected" and this could say the app
+  // was not there, in that order, about the same running app.
+  if (!(await ensureNative())) {
     return { ok: false, error: "MDM is not running" };
   }
 
@@ -1235,7 +1471,13 @@ async function grabVideo(msg, tabId) {
         // and it is the one thing yt-dlp cannot work around.
         candidates: await videoCandidates(msg, tabId),
       },
-      5000
+      // Long enough to cover a cold start. The port opens optimistically, so
+      // nothing above here has established that the app is running, and the
+      // native host answers only once it has launched the app and waited for
+      // its socket — up to fifteen seconds. A shorter deadline reports a
+      // timeout about an app that is in the middle of starting, and the
+      // window it opens arrives to a button that has already given up.
+      20000
     );
     return reply && reply.accepted
       ? { ok: true, mode: "ytdlp" }
@@ -1297,7 +1539,10 @@ async function videoCandidates(msg, tabId) {
       url,
       kind,
       mime,
-      stream,
+      // A manifest is a manifest wherever it was found. Only the sniffer used
+      // to say so, which left the one a page names in its own metadata ranked
+      // below the fragments the player had fetched of it.
+      stream: stream || (kind === "media" && isManifest(url, mime)),
       origin,
       videoId: facts.videoId,
       post: postOf(facts.videoId, origin),
@@ -1306,8 +1551,11 @@ async function videoCandidates(msg, tabId) {
       // Facebook labels its audio track `video/mp4` and says `_audio` in the
       // URL, and an ordinary site does the reverse.
       audioOnly: facts.audioOnly || /^audio\//i.test(mime || ""),
-      // Half of a DASH pair. Complete as a download and useless as a video.
-      partial: facts.partial || facts.audioOnly,
+      // Half of a DASH pair, or one slice of an HLS one. Complete as a
+      // download and useless as a video either way: a fragment saved on its
+      // own is a few seconds out of the middle of a film, with none of the
+      // headers a player needs to make sense of it.
+      partial: facts.partial || facts.audioOnly || isFragment(url, mime),
       headers: [],
       referrer: "",
     });
@@ -1461,7 +1709,7 @@ browser.runtime.onMessage.addListener(async (msg, sender) => {
         // Asked of the app rather than of the port. A port is opened
         // optimistically and, on a worker this popup has only just started,
         // may not be open at all yet — neither says whether MDM is running.
-        connected: await Native.ping(),
+        connected: await askApp(),
         media: [...(tabMedia.get(msg.tabId)?.values() ?? [])],
       };
     case "setSettings":
@@ -1487,6 +1735,34 @@ browser.runtime.onMessage.addListener(async (msg, sender) => {
         },
         sender.tab?.id ?? msg.tabId ?? -1
       );
+    case "preemptClick": {
+      // The click net's half of net 0 — src/content/preempt.js has already
+      // cancelled the click, so this decides whether the browser is sent after
+      // the link anyway. Everything but a plain "yes, MDM has it" is a no, and
+      // a no is the click going through as if none of this had happened.
+      await settingsReady;
+      const details = {
+        url: msg.url,
+        method: "GET",
+        // The click net only ever catches a navigation, and says so rather
+        // than leaving `preemptable` to guess from an address.
+        type: "main_frame",
+        documentUrl: msg.pageUrl || sender.tab?.url || "",
+        tabId: sender.tab?.id ?? -1,
+        cookieStoreId: sender.tab?.cookieStoreId || "",
+      };
+      const verdict = preemptable(details, cfg, state, singleUseHosts);
+      if (!verdict.capture) return { accepted: false, reason: verdict.reason };
+      if (claimCapture(details.url)) return { accepted: false, reason: "already captured" };
+      if (!(await ensureNative())) return { accepted: false, reason: "MDM is not running" };
+      try {
+        const taken = await preempt(details);
+        return { accepted: !!taken.cancel };
+      } catch (e) {
+        console.warn("[mdm] could not take the click before the browser:", e.message);
+        return { accepted: false, reason: e.message };
+      }
+    }
     case "openApp":
       Native.post({ type: "focus" });
       return { ok: true };
@@ -1496,7 +1772,18 @@ browser.runtime.onMessage.addListener(async (msg, sender) => {
 });
 
 Native.onMessage((msg) => {
-  if (msg && msg.type === "hostState") updateBadge();
+  if (!msg) return;
+  if (msg.type === "hostState") {
+    appAnswered = !!msg.connected;
+    updateBadge();
+  }
+  // The answer to the `hello` the port opens with, which is the first chance
+  // there is to learn which hosts MDM has to go first on.
+  if (msg.type === "pong") {
+    appAnswered = true;
+    singleUseAskedAt = Date.now();
+    if (Array.isArray(msg.singleUseHosts)) learnSingleUse(msg.singleUseHosts);
+  }
 });
 
 /* ------------------------------------------------------------------ *

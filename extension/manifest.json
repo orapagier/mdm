@@ -67,7 +67,8 @@
       ],
       "js": [
         "src/polyfill.js",
-        "src/content/blob.js"
+        "src/content/blob.js",
+        "src/content/preempt.js"
       ],
       "run_at": "document_start",
       "all_frames": true

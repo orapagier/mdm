@@ -77,6 +77,16 @@ pub struct Candidate {
     /// is the difference between a download and a disappointment.
     #[serde(default)]
     pub partial: bool,
+    /// A manifest: the whole stream written down, rather than a file.
+    ///
+    /// Carried rather than re-derived in the window, because the window only
+    /// has the address and the address is not always enough. A CDN is under no
+    /// obligation to end a playlist in `.m3u8` — the one this was written
+    /// against serves both its manifest and its segments from paths that are
+    /// nothing but a token, and only `Content-Type` tells them apart. The
+    /// extension has the response; the window does not, so it is told.
+    #[serde(default)]
+    pub stream: bool,
     /// Which post this file belongs to, as far as the extension could tell.
     ///
     /// "this" is the post the button was pressed on, "other" a neighbour in
@@ -301,7 +311,77 @@ async fn dispatch(
     ui: &mpsc::Sender<UiRequest>,
 ) -> Value {
     match msg.get("type").and_then(Value::as_str).unwrap_or("") {
-        "hello" | "ping" => json!({ "type": "pong", "ok": true }),
+        // The list travels with every pong because it is what tells the
+        // extension which hosts to hold a request on — see the `preempt`
+        // branch below. Sent unasked rather than fetched: the extension asks
+        // this question once per connection anyway, and a list it has not got
+        // is a download that goes to the browser.
+        "hello" | "ping" => json!({
+            "type": "pong",
+            "ok": true,
+            "singleUseHosts": engine.settings().single_use_hosts,
+        }),
+
+        // A request the browser is holding, not one it has made.
+        //
+        // The whole of the difference from "download" is timing, and timing is
+        // the whole of the problem: by the time an ordinary capture can act,
+        // the browser has already asked the server for the file, and a host
+        // that spends its links has nothing left to give. Here nothing has
+        // been asked yet, so MDM makes the one request there is.
+        //
+        // Answered from what came back rather than from the address, because
+        // the extension held this request without knowing whether it was a
+        // download: `accepted:false` means "a page — go ahead", and the
+        // browser's own request, still held, proceeds as though none of this
+        // happened.
+        "preempt" => {
+            let Some(payload) = msg.get("job") else {
+                return json!({ "accepted": false, "error": "no job in request" });
+            };
+            let job: Job = match serde_json::from_value(payload.clone()) {
+                Ok(j) => j,
+                Err(e) => {
+                    log::warn!("bad job payload: {e}");
+                    return json!({ "accepted": false, "error": e.to_string() });
+                }
+            };
+            let url = job.url.clone();
+            // The browser is blocked on this answer and the native host stops
+            // waiting after ten seconds, so a server that will not answer must
+            // not be allowed to hold up the click. Giving up here costs
+            // nothing that was not already lost: a server that has sent no
+            // headers has served nothing.
+            let taken = tokio::time::timeout(
+                std::time::Duration::from_secs(8),
+                engine.preempt(job),
+            )
+            .await;
+            match taken {
+                Ok(Ok(Some(id))) => {
+                    // Brought forward rather than offered. An ordinary capture
+                    // opens a window with a Start button because nothing has
+                    // been fetched yet; this one is already running — the
+                    // response it is being written from is the reason the
+                    // browser's request was cancelled — so there is nothing
+                    // left to decide, and the only thing missing is somewhere
+                    // to watch it. The browser shows nothing at all for a
+                    // cancelled request, so without this the click would look
+                    // like it had done nothing.
+                    let _ = ui.send(UiRequest::Focus).await;
+                    json!({ "accepted": true, "downloadId": id })
+                }
+                Ok(Ok(None)) => json!({ "accepted": false, "error": "that address is a page" }),
+                Ok(Err(e)) => {
+                    log::warn!("could not take {url} before the browser: {e:#}");
+                    json!({ "accepted": false, "error": format!("{e:#}") })
+                }
+                Err(_) => {
+                    log::warn!("{url} did not answer in time; leaving it to the browser");
+                    json!({ "accepted": false, "error": "the server did not answer in time" })
+                }
+            }
+        }
 
         "download" => {
             let Some(payload) = msg.get("job") else {
@@ -322,12 +402,23 @@ async fn dispatch(
             // so the useful thing MDM can do with this one is decline it. The
             // extension leaves a download it was not allowed to place with the
             // browser, which is exactly where it will work.
-            if let Some(host) = engine.single_use_host(&url) {
-                log::info!("leaving {url} to the browser: {host} serves single-use links");
-                return json!({
-                    "accepted": false,
-                    "error": format!("{host} serves single-use links — leaving this to the browser"),
-                });
+            //
+            // Only where the browser has in fact already asked, which is what
+            // `spends_the_link` reads off the job. A link the user right-clicked
+            // has not been requested by anything, so MDM's request is the first
+            // one and the refusal would be turning down the one job on such a
+            // host it can actually do — the whole reason the address is
+            // single-use is that whoever asks first gets the file.
+            if job.spends_the_link() {
+                if let Some(host) = engine.single_use_host(&url) {
+                    log::info!("leaving {url} to the browser: {host} serves single-use links");
+                    return json!({
+                        "accepted": false,
+                        "error": format!(
+                            "{host} serves single-use links — leaving this to the browser"
+                        ),
+                    });
+                }
             }
             // Taking it off the browser's hands is not the same as agreeing to
             // fetch it. The row is created so the capture is not lost, but it

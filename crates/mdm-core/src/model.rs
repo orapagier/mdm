@@ -74,6 +74,33 @@ pub struct Job {
     pub data: Option<String>,
 }
 
+impl Job {
+    /// Has the browser already made this request?
+    ///
+    /// Only the capture nets watch a response go past; by the time one of them
+    /// hands a job over, the address has been asked and answered once. That is
+    /// what makes a single-use link unusable to MDM — its one answer is spent —
+    /// and it is the whole basis for refusing those.
+    ///
+    /// The other sources have spent nothing. A right-clicked link, a link
+    /// picked out of a page, an address pasted into the window: nothing has
+    /// requested any of them, so MDM's request is the first and the file is
+    /// there to be had. Refusing those was refusing the one case on such a host
+    /// that works.
+    ///
+    /// Unknown sources count as spent, so a net added later is refused until
+    /// somebody decides otherwise rather than quietly cancelling a browser
+    /// download that cannot be replaced.
+    ///
+    /// * `menu` — right-click ▸ Download with MDM, on a link nothing has followed
+    /// * `cli`  — an address on the command line, or an `mdm:` link
+    /// * `ui`   — pasted into the window
+    /// * `preempt` — the request MDM makes *instead of* the browser's
+    pub fn spends_the_link(&self) -> bool {
+        !matches!(self.source.as_str(), "menu" | "cli" | "ui" | "preempt")
+    }
+}
+
 fn unknown_size() -> i64 {
     -1
 }
@@ -369,5 +396,50 @@ impl Default for Queue {
             days: Vec::new(),
             max_concurrent: 4,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Job;
+
+    /// Built the way one actually arrives — out of the extension's JSON —
+    /// rather than by naming fields, so a job the nets could really send is
+    /// what gets asked.
+    fn from(source: &str) -> Job {
+        serde_json::from_value(serde_json::json!({
+            "url": "https://filekeeper.net/get/abc",
+            "source": source,
+        }))
+        .expect("a job with a url and a source is a valid job")
+    }
+
+    /// The nets watch a response go past, so by the time they hand a job over
+    /// the address has been asked and answered. Those are the ones a
+    /// single-use host has to be refused for.
+    #[test]
+    fn a_capture_has_already_spent_the_link() {
+        for source in ["webRequest", "downloads", "blob", "data"] {
+            assert!(from(source).spends_the_link(), "{source} was treated as unspent");
+        }
+    }
+
+    /// Nothing has requested a right-clicked link, so MDM's request is the
+    /// first one and the file is there to be had. Refusing these was refusing
+    /// the one thing that works on such a host.
+    #[test]
+    fn a_link_nothing_has_followed_is_still_good() {
+        for source in ["menu", "cli", "ui", "preempt"] {
+            assert!(!from(source).spends_the_link(), "{source} was treated as spent");
+        }
+    }
+
+    /// A net added later is refused until somebody decides otherwise: the cost
+    /// of guessing wrong one way is a download that could have been faster,
+    /// and the other way is a download that is gone.
+    #[test]
+    fn an_unknown_source_is_assumed_to_have_asked() {
+        assert!(from("").spends_the_link());
+        assert!(from("something-added-in-2027").spends_the_link());
     }
 }

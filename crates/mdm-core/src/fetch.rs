@@ -1082,6 +1082,206 @@ pub async fn is_page(
     Ok(is_html(&probe.mime) && !looks_like_html_filename(name))
 }
 
+/// Make the one request an address may be good for, and keep what it opened.
+///
+/// Some file hosts hand out a link that answers exactly once: serve it, and
+/// every later request for it gets the landing page instead. The ordinary
+/// capture cannot work on those, because it only learns a download exists once
+/// the browser has already spent the link asking for it — which is why the
+/// browser gets those downloads and MDM records the host and stays out of the
+/// way. `Engine::preempt` is the other side of that: the request is held
+/// before the browser sends it and made from here instead, so the one answer
+/// the address has left comes to us.
+///
+/// One request, and not a byte more. No `Range` probe, because that is a
+/// request; no second connection, for the same reason. The whole of what a
+/// probe would have told us is read off these headers.
+///
+/// `Ok(None)` is "that address is a page". The browser is still holding its
+/// request and can have it after all: a page is not spent by being read, so
+/// nothing has been lost by looking.
+pub async fn open(spec: &Spec) -> Result<Option<(reqwest::Response, Probe)>> {
+    let client = client(spec).await?;
+    let response = client
+        .get(&spec.url)
+        .send()
+        .await
+        .with_context(|| format!("requesting {}", spec.url))?;
+
+    let status = response.status();
+    if !status.is_success() {
+        bail!("{} answered {status}", spec.url);
+    }
+
+    let final_url = response.url().to_string();
+    let headers = response.headers();
+    let mime = headers
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_owned();
+    let size = headers
+        .get(reqwest::header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u64>().ok());
+    let disposition = headers
+        .get(reqwest::header::CONTENT_DISPOSITION)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+    let validator = headers
+        .get(reqwest::header::ETAG)
+        .or_else(|| headers.get(reqwest::header::LAST_MODIFIED))
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+    let filename = disposition
+        .as_deref()
+        .and_then(filename_from_disposition)
+        .unwrap_or_else(|| crate::engine::filename_from_url(&final_url));
+
+    if answered_with_a_page(&mime, disposition.as_deref()) {
+        return Ok(None);
+    }
+
+    // `resumable` stays false whatever the server would have allowed: this is
+    // the one request there is, so there is nothing to resume into and nothing
+    // to split.
+    let probe = Probe { url: final_url, size, resumable: false, filename, mime, validator };
+    Ok(Some((response, probe)))
+}
+
+/// Is this response the site's own page rather than the file behind it?
+///
+/// The question [`open`] has to answer from one set of headers, and the only
+/// judgement in that whole function — so it is here, where it can be tested
+/// as the judgement it is.
+///
+/// "Save this" outranks the type. A server that sent `Content-Disposition:
+/// attachment` has said what its response is for, and a fair number of file
+/// hosts label the bytes `text/html` on the way out anyway; refusing on the
+/// type alone would hand exactly those downloads back to the browser, which is
+/// the one thing pre-emption exists to stop.
+fn answered_with_a_page(mime: &str, disposition: Option<&str>) -> bool {
+    let attachment = disposition
+        .map(|d| d.trim_start().to_ascii_lowercase().starts_with("attachment"))
+        .unwrap_or(false);
+    !attachment && is_html(mime)
+}
+
+/// Write out a file whose connection is already open — see [`open`].
+///
+/// The segmented path in [`download`] and everything it rests on assumes an
+/// address that answers as often as it is asked. This one cannot: there is a
+/// single response, it is already in hand, and when it ends the download is
+/// over one way or the other. So no state file is written and no resume is
+/// offered — a link that is spent cannot be picked up again, and pretending
+/// otherwise would only turn a lost download into a stuck one.
+pub async fn download_open(
+    spec: Spec,
+    response: reqwest::Response,
+    probe: Probe,
+    tx: tokio::sync::mpsc::Sender<Event>,
+    stop: Arc<AtomicBool>,
+) -> Result<PathBuf> {
+    let _ = tx.send(Event::Probed(probe.clone())).await;
+
+    let name = spec
+        .filename
+        .clone()
+        .filter(|n| !n.trim().is_empty())
+        .unwrap_or_else(|| probe.filename.clone());
+
+    std::fs::create_dir_all(&spec.dir)
+        .with_context(|| format!("creating {}", spec.dir.display()))?;
+    if let Some(size) = probe.size {
+        check_space(&spec.dir, size)?;
+    }
+    let target = spec.dir.join(crate::engine::sanitize(name));
+    let part = PathBuf::from({
+        let mut p = target.as_os_str().to_owned();
+        p.push(PART_SUFFIX);
+        p
+    });
+
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&part)
+        .with_context(|| format!("opening {}", part.display()))?;
+    // Nothing is resumed here, so whatever an earlier attempt left is not ours
+    // to write around.
+    file.set_len(0).ok();
+
+    let shared = Arc::new(Shared {
+        work: Work::new(VecDeque::new(), Vec::new()),
+        counters: Counters {
+            received: AtomicU64::new(0),
+            // One, and it is already talking to the server.
+            active: AtomicU64::new(1),
+        },
+        stop: stop.clone(),
+        file,
+        limiter: (spec.max_speed > 0).then(|| Limiter::new(spec.max_speed)),
+        pushback: AtomicBool::new(false),
+    });
+
+    // The claim `conduct` would have dealt out, dealt by hand: the whole file,
+    // to the one connection there is. `u64::MAX` is the same open-ended end a
+    // range-less response gets in [`download`] — the stream is finished when
+    // it stops, not at a boundary anybody knew in advance.
+    let claim = &shared.work.claims[0];
+    claim.cursor.store(0, Ordering::Release);
+    claim.end.store(u64::MAX, Ordering::Release);
+    claim.live.store(true, Ordering::Release);
+
+    let reporter = tokio::spawn(report(
+        shared.clone(),
+        tx.clone(),
+        probe.size,
+        0,
+        part.clone(),
+        // The size is kept for the progress bar and taken off the copy the
+        // checkpoint is written from, which is how `save_state` is told there
+        // is nothing to write: a state file here would describe a resume that
+        // cannot happen, and would be read by one that then asks the spent
+        // address for the rest of the file.
+        Probe { size: None, ..probe.clone() },
+        stop.clone(),
+    ));
+    let outcome = drain(&shared, response, 0, false).await;
+    reporter.abort();
+    claim.live.store(false, Ordering::Release);
+    outcome?;
+
+    if stop.load(Ordering::Relaxed) {
+        // Said plainly rather than left as a partial file with a state beside
+        // it: pausing this is losing it, because the address will not answer a
+        // second time.
+        bail!("stopped — this link answers once, so there is nothing to resume");
+    }
+
+    shared.file.sync_all().ok();
+    if let Some(expected) = &spec.expected_sha256 {
+        verify(&part, expected)?;
+    }
+    std::fs::rename(&part, &target)
+        .with_context(|| format!("renaming {} into place", part.display()))?;
+    let _ = std::fs::remove_file(state_path(&part));
+
+    let received = shared.counters.received.load(Ordering::Relaxed);
+    let _ = tx
+        .send(Event::Progress(Progress {
+            downloaded: received,
+            total: probe.size,
+            speed: 0,
+            connections: 0,
+        }))
+        .await;
+    let _ = tx.send(Event::Done(target.clone())).await;
+    Ok(target)
+}
+
 /// Fetch `spec` into its directory, reporting as it goes.
 ///
 /// `stop` ends every connection at the next chunk boundary and leaves the
@@ -1756,6 +1956,35 @@ mod tests {
         assert!(!super::capture_saw_a_file(15_000, "text/html"));
         assert!(!super::capture_saw_a_file(15_000, "text/html; charset=UTF-8"));
     }
+
+    /// The one judgement `open` makes, and the reason pre-emption is safe: a
+    /// click that turns out to be a page has to come straight back to the
+    /// browser, which is still holding the request.
+    #[test]
+    fn a_pre_empted_request_tells_a_page_from_a_download() {
+        // The landing page of the very file host this exists for. Cancelling
+        // this navigation would leave the tab showing nothing.
+        assert!(super::answered_with_a_page("text/html; charset=UTF-8", None));
+        assert!(super::answered_with_a_page("application/xhtml+xml", None));
+
+        // Anything that is not a page is a download to be taken.
+        assert!(!super::answered_with_a_page("video/webm", None));
+        assert!(!super::answered_with_a_page("application/octet-stream", None));
+        assert!(!super::answered_with_a_page("", None));
+
+        // A file host that labels its bytes text/html and says "attachment"
+        // anyway. The disposition is the deliberate statement of the two, and
+        // reading only the type would hand this one back to the browser.
+        assert!(!super::answered_with_a_page(
+            "text/html",
+            Some("attachment; filename=\"Moana.mkv\"")
+        ));
+        assert!(!super::answered_with_a_page("text/html", Some("  ATTACHMENT")));
+
+        // `inline` is not that statement: it is how a server says "show this".
+        assert!(super::answered_with_a_page("text/html", Some("inline")));
+    }
+
     use super::*;
 
     fn work_with(claims: Vec<(u64, u64)>) -> Work {

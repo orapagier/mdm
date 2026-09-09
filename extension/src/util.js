@@ -136,6 +136,72 @@ function withoutByteRange(url) {
 }
 
 /* ------------------------------------------------------------------ *
+ * Streams: the manifest, and the pieces it lists
+ * ------------------------------------------------------------------ */
+
+/** Content types an HLS or DASH manifest arrives under. */
+const MANIFEST_MIME = new Set([
+  "application/vnd.apple.mpegurl",
+  "application/x-mpegurl",
+  "audio/mpegurl",
+  "audio/x-mpegurl",
+  "application/dash+xml",
+  "video/vnd.mpeg.dash.mpd",
+]);
+
+/**
+ * Content types the *pieces* arrive under.
+ *
+ * `video/mp2t` is the one that matters and the one nothing else in this file
+ * would have caught: an HLS segment is served under it, has no extension in
+ * its address on most CDNs, and is in every other respect a small video. Six
+ * seconds of one, saved on its own, is a complete download that no player will
+ * open — which is exactly what a grab came back with.
+ */
+const FRAGMENT_MIME = new Set([
+  "video/mp2t",
+  "video/iso.segment",
+  "audio/aac",
+  "audio/x-aac",
+]);
+
+/** `.m3u8` / `.mpd`, wherever the query or a trailing path begins. */
+const MANIFEST_PATH = /\.(?:m3u8|m3u|mpd)(?:[?#/]|$)/i;
+
+/** The container extensions only a stream's pieces use. */
+const FRAGMENT_PATH = /\.(?:ts|m4s|cmfv|cmfa|aac)(?:[?#]|$)/i;
+
+/**
+ * Is this the whole stream written down?
+ *
+ * A manifest is the one media URL worth having from a site that streams:
+ * everything else the player fetches is a slice of what the manifest lists,
+ * and the downloader can rebuild the file from the manifest alone.
+ */
+function isManifest(url, mime) {
+  const type = (mime || "").split(";", 1)[0].trim().toLowerCase();
+  if (MANIFEST_MIME.has(type)) return true;
+  return MANIFEST_PATH.test(String(url || ""));
+}
+
+/**
+ * Is this one slice of a stream rather than a video?
+ *
+ * The type first, because a CDN is under no obligation to name its segments:
+ * the one this was written for serves them from a path that is nothing but a
+ * token, and only `Content-Type: video/mp2t` says what it is. The extension is
+ * the backstop for the servers that do say.
+ */
+function isFragment(url, mime) {
+  const type = (mime || "").split(";", 1)[0].trim().toLowerCase();
+  if (FRAGMENT_MIME.has(type)) return true;
+  // A manifest lists the pieces, it is not one of them — and `.m3u8` would
+  // otherwise never reach the address test below to be told apart.
+  if (isManifest(url, mime)) return false;
+  return FRAGMENT_PATH.test(String(url || ""));
+}
+
+/* ------------------------------------------------------------------ *
  * What a media URL says about itself
  * ------------------------------------------------------------------ */
 

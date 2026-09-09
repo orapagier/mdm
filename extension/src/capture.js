@@ -256,6 +256,47 @@ function classify(req, res, cfg, state) {
 }
 
 /* ------------------------------------------------------------------ *
+ * Pre-emption
+ * ------------------------------------------------------------------ */
+
+/**
+ * Should MDM make this request rather than let the browser make it?
+ *
+ * The decision `classify` cannot make, because it is made a step earlier —
+ * before the response exists, and therefore before anything is known about
+ * what the address holds. That is not a gap to be filled with guesswork: the
+ * request is only held so that MDM can go and find out, and an address that
+ * turns out to be a page is handed straight back.
+ *
+ * So there is exactly one reason to hold anything, and it is a fact rather
+ * than a reading: `hosts` are the ones the app has caught serving links that
+ * answer once. On those, letting the browser ask first is the same as losing
+ * the download, and everywhere else the ordinary capture knows more and should
+ * be left to do it.
+ */
+function preemptable(req, cfg, state, hosts) {
+  if (!cfg.enabled) return SKIP("extension disabled");
+  if (!/^https?:\/\//i.test(req.url)) return SKIP("non-http scheme");
+
+  // A POST cannot be replayed out of process — the same reason `classify`
+  // leaves them alone, and a stronger one here, since this would be cancelling
+  // a request nothing can put back.
+  if (req.method !== "GET") return SKIP("non-GET method");
+  if (!CAPTURABLE_TYPES.has(req.type)) return SKIP("resource type " + req.type);
+
+  const host = hostOf(req.url);
+  if (!host) return SKIP("no host");
+  if (!(hosts || []).some((h) => hostMatches(host, h)))
+    return SKIP("host answers more than once");
+  if (cfg.blockedSites.some((s) => hostMatches(host, s))) return SKIP("site excluded");
+  if (state.bypass.has(req.url)) {
+    state.bypass.delete(req.url);
+    return SKIP("user bypass");
+  }
+  return TAKE("single-use host " + host);
+}
+
+/* ------------------------------------------------------------------ *
  * Host matching
  * ------------------------------------------------------------------ */
 
