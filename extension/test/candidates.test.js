@@ -239,11 +239,22 @@ vm.runInContext(
     playedSeconds = seconds;
     return verdict(info);
   }
+  const MANIFEST = ${constant("video.js", "MANIFEST", "", UI)};
+  const MEDIA_SECTION = ${constant("video.js", "MEDIA_SECTION", "", UI)};
+  const NOT_AN_ID = ${constant("video.js", "NOT_AN_ID", "", UI)};
+  ${lift("video.js", "looksSpecific", "", UI)}
+  ${lift("video.js", "sources", "", UI)}
+  /** What the window would ask yt-dlp about, given this request. */
+  function asked(pageUrl, offered) {
+    $("vid-url").value = pageUrl;
+    candidates = offered;
+    return sources();
+  }
   `,
   win,
   { filename: "video.js (extracted)" }
 );
-const { offer, insist, judge, nameFor } = win;
+const { offer, insist, judge, nameFor, asked } = win;
 
 /* ---------------- harness ---------------- */
 
@@ -1122,6 +1133,85 @@ tests.push(
       nameFor({ title: "AC/DC live", description: "", uploader: "", id: "" }),
       "AC DC live"
     );
+  })
+);
+
+/* ------------------------------------------------------------------ *
+ * A player served in an iframe
+ * ------------------------------------------------------------------ */
+
+/** The streaming site the user is on, and the player it embeds. */
+const HOST_PAGE = "https://myflixerz.day/moana-2/";
+const EMBED =
+  "https://embdmstrplayer.com/v2/L8akmlZnUV7vrA8xmXAYCmHMV6U4nvakopJ1bC_XFJgwpfD";
+
+tests.push(
+  check("the page around an embedded player is offered as well as the embed", async () => {
+    // The content script runs in the iframe, so everything it can read is the
+    // embed's: its own address, and its canonical reading of itself. The page
+    // in the address bar is the one an extractor has any chance with, and only
+    // the background script can see it.
+    setSniffed([]);
+    const got = await videoCandidates(
+      {
+        pageUrl: EMBED,
+        topUrl: HOST_PAGE,
+        candidates: [{ url: EMBED, kind: "page" }],
+      },
+      1
+    );
+    assert.ok(
+      got.some((c) => c.url === HOST_PAGE),
+      "the page the user is actually on was never offered"
+    );
+  }),
+
+  check("a click in the top document does not offer its own page twice", async () => {
+    setSniffed([]);
+    const got = await videoCandidates({ pageUrl: PAGE, topUrl: "", candidates: [] }, 1);
+    assert.strictEqual(got.filter((c) => c.url === PAGE).length, 0);
+  })
+);
+
+/* ------------------------------------------------------------------ *
+ * Which of them the window actually asks about
+ * ------------------------------------------------------------------ */
+
+const M3U8 = "https://cdn.embdmstrplayer.com/hls/master.m3u8";
+
+tests.push(
+  check("a manifest is still asked about when the pages fill every slot", () => {
+    // Exactly the shape an embed produces: the frame's address, the page
+    // around it, and a canonical reading of each. Four pages for four slots,
+    // so the stream — the one candidate that needs no extractor to know the
+    // host — fell off the end, and the window reported "no extractor for
+    // embdmstrplayer.com" as its whole answer about a page that was playing.
+    const got = asked(EMBED, [
+      { url: HOST_PAGE, kind: "page" },
+      { url: "https://myflixerz.day/movie/moana-2", kind: "page" },
+      { url: "https://embdmstrplayer.com/v2/canonical", kind: "page" },
+      { url: M3U8, kind: "media", mime: "application/x-mpegurl" },
+    ]);
+    assert.ok(got.includes(M3U8), `the manifest was dropped: ${JSON.stringify(got)}`);
+    assert.strictEqual(got.length, 4, "the cap on extractions was raised instead");
+    assert.strictEqual(got[0], EMBED, "the page the button was pressed on lost its lead");
+  }),
+
+  check("a manifest does not displace a page when there is room for both", () => {
+    const got = asked(HOST_PAGE, [
+      { url: "https://myflixerz.day/movie/moana-2", kind: "page" },
+      { url: M3U8, kind: "media", mime: "application/x-mpegurl" },
+    ]);
+    assert.deepStrictEqual([...got], [HOST_PAGE, "https://myflixerz.day/movie/moana-2", M3U8]);
+  }),
+
+  check("a plain media file is still not asked about as though it were a page", () => {
+    // Only manifests get the reserved slot. A raw .mp4 has nothing to extract,
+    // and asking yt-dlp about one spends a slot to learn that.
+    const got = asked(HOST_PAGE, [
+      { url: "https://cdn.example.com/a.mp4", kind: "media", mime: "video/mp4" },
+    ]);
+    assert.deepStrictEqual([...got], [HOST_PAGE]);
   })
 );
 

@@ -1189,7 +1189,12 @@ async function grabVideo(msg, tabId) {
   await settingsReady;
   const pageUrl = msg.pageUrl || "";
   const host = hostOf(pageUrl);
-  if (host && cfg.blockedSites.some((s) => hostMatches(host, s))) {
+  // Both the frame and the page around it, because either is the site the
+  // exclusion was written about. Excluding a site whose player is served from
+  // an iframe otherwise excluded only the frame's own host — a name the user
+  // has never seen, on a page they had said to leave alone.
+  const excluded = (h) => !!h && cfg.blockedSites.some((s) => hostMatches(h, s));
+  if (excluded(host) || excluded(hostOf(msg.topUrl || ""))) {
     return { ok: false, error: "site excluded" };
   }
   if (!Native.isAvailable()) {
@@ -1314,6 +1319,18 @@ async function videoCandidates(msg, tabId) {
   // spare — a preview, or the lowest rung of a ladder. So a file is what this
   // falls back to, never what it reaches for first.
   for (const c of found.filter((c) => c.kind !== "media")) add(c.url, "page");
+
+  // The page around the frame, on a site that serves its player in one.
+  //
+  // Everything above came out of the document the button was pressed in, and
+  // in an embed that document is the player: its permalink readings are the
+  // embed's own address, and the address bar's — the one a person would call
+  // "the page", and the only one either a site-specific extractor or a
+  // generic one following the iframe can do anything with — appears nowhere.
+  // Offered after the frame's own readings rather than instead of them: a
+  // YouTube video embedded in an article is best extracted from the embed,
+  // and this is the answer for when that fails.
+  add(msg.topUrl || "", "page");
   for (const c of found.filter((c) => c.kind === "media")) {
     add(c.url, "media", "", false, c.origin || "page");
   }
@@ -1456,7 +1473,20 @@ browser.runtime.onMessage.addListener(async (msg, sender) => {
     case "download":
       return sendSimple(msg.url, { pageUrl: msg.referrer, mime: msg.mime }, { id: msg.tabId });
     case "grabVideo":
-      return grabVideo(msg, sender.tab?.id ?? msg.tabId ?? -1);
+      return grabVideo(
+        {
+          ...msg,
+          // The address the user is actually on, where that is not the one the
+          // button was pressed in. The content script runs in every frame, so
+          // a player served in an iframe reports the *embed* as its page — a
+          // signed token on a host nobody has an extractor for — while the
+          // page around it, the one in the address bar, is not offered at all.
+          // Only the background script can see both. Empty for a click in the
+          // top document, where it would be the page URL a second time.
+          topUrl: sender.frameId ? sender.tab?.url || "" : "",
+        },
+        sender.tab?.id ?? msg.tabId ?? -1
+      );
     case "openApp":
       Native.post({ type: "focus" });
       return { ok: true };

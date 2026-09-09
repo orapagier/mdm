@@ -552,13 +552,30 @@ function sources() {
     return !seen.has(key) && seen.add(key);
   };
 
-  return [
+  const ranked = [
     ...pages.filter(looksSpecific),
     ...pages.filter((u) => !looksSpecific(u)),
     ...streams,
-  ]
-    .filter(fresh)
-    .slice(0, 4);
+  ].filter(fresh);
+
+  const kept = ranked.slice(0, 4);
+
+  // A manifest keeps a slot, however many pages were offered.
+  //
+  // Streams sit last because a page usually resolves and gives every quality,
+  // where a manifest gives the one the player chose. But last also meant cut:
+  // a player served in an iframe offers the embed, the page around it and each
+  // of their canonical readings, which is the cap on its own — so on exactly
+  // the sites where no extractor knows the host, the one candidate that needs
+  // no extractor to know anything was never asked about, and the window
+  // reported the embed's "no extractor for this site" as the whole answer.
+  //
+  // Taking the last slot rather than being appended: each extraction is
+  // seconds, and the fourth page is worth less than the first stream on any
+  // page where the first three did not resolve.
+  const stream = ranked.find((u) => MANIFEST.test(u));
+  if (stream && kept.length && !kept.includes(stream)) kept[kept.length - 1] = stream;
+  return kept;
 }
 
 async function probe(pageTitle) {
