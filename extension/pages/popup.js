@@ -41,7 +41,7 @@ async function init() {
 
   $("dot").classList.toggle("on", state.connected);
   $("status").textContent = state.connected
-    ? "Connected to the MDM daemon."
+    ? "Connected to MDM."
     : "MDM is not running — downloads stay in the browser.";
   $("enabled").checked = state.cfg.enabled;
 

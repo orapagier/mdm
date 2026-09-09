@@ -1432,9 +1432,19 @@ function isStreamingSite(host) {
 browser.runtime.onMessage.addListener(async (msg, sender) => {
   switch (msg.type) {
     case "getState":
+      // Chromium stops this worker after thirty seconds idle, and the popup is
+      // usually what starts it again: the message arrives before the settings
+      // read has come back, so answering straight away handed the popup the
+      // defaults as the user's settings. Firefox keeps its event page resident
+      // behind the open native port, which is why this only ever showed on
+      // Chromium.
+      await settingsReady;
       return {
         cfg,
-        connected: Native.isAvailable(),
+        // Asked of the app rather than of the port. A port is opened
+        // optimistically and, on a worker this popup has only just started,
+        // may not be open at all yet — neither says whether MDM is running.
+        connected: await Native.ping(),
         media: [...(tabMedia.get(msg.tabId)?.values() ?? [])],
       };
     case "setSettings":
@@ -1463,12 +1473,13 @@ Native.onMessage((msg) => {
  * Startup
  * ------------------------------------------------------------------ */
 
-// The settings read is already in flight from the top of the file; this only
-// waits for it so the badge is drawn from the real ones. Connecting the native
-// port is the other half: it is what makes the app reachable, and on Chromium
-// an open port is also what keeps this service worker resident instead of
-// being stopped thirty seconds later.
-settingsReady.then(() => {
-  Native.connect();
-  updateBadge();
-});
+// Opening the native port is what makes the app reachable, and on Chromium an
+// open port is also what keeps this service worker resident instead of being
+// stopped thirty seconds later. It reads none of the settings, so it does not
+// wait for them — every moment it spends behind that read is a moment the
+// extension cannot say the app is there.
+Native.connect();
+
+// The badge is the half that does wait: the settings read is already in flight
+// from the top of the file.
+settingsReady.then(updateBadge);

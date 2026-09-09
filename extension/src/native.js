@@ -122,10 +122,33 @@ const Native = (() => {
     });
   }
 
+  /**
+   * Is MDM actually running?
+   *
+   * `isAvailable()` answers a cheaper question — has a port been opened — and
+   * answers it optimistically: `connectNative` hands back a port for a host
+   * that does not exist, and the failure only arrives later, on disconnect.
+   * For gating a download that is the right trade, since the request that
+   * follows fails open anyway. For telling the user whether the app is there
+   * it is not, so this asks the app and waits for it to say so itself.
+   *
+   * `ping` and `hello` are the same message to the app, and it answers both
+   * with a pong carrying the request id back.
+   */
+  async function ping(timeoutMs = 1500) {
+    try {
+      const reply = await request({ type: "ping" }, timeoutMs);
+      return !!(reply && reply.ok);
+    } catch {
+      return false;
+    }
+  }
+
   return {
     connect,
     post,
     request,
+    ping,
     isAvailable: () => available,
     onMessage: (fn) => listeners.add(fn),
   };
