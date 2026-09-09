@@ -611,8 +611,14 @@ if [[ "$BUNDLE" == yes ]]; then
   # checked on *every* build, and the binary it names is produced by that same
   # build, so putting it in the base config makes a plain `cargo build` fail on
   # any tree where it has not been staged — which is every clean checkout.
+  #
+  # Which is also why this file is not called tauri.linux.conf.json. That name
+  # is reserved: Tauri merges tauri.<platform>.conf.json into every build for
+  # that platform automatically, so calling it that would put `externalBin`
+  # back into every build through the back door and break the clean checkout
+  # exactly as if it had been written into the base config.
   ( cd "$REPO" && cargo tauri build --bundles deb,rpm \
-      --config src-tauri/tauri.linux.conf.json ) || die "cargo tauri build failed"
+      --config src-tauri/tauri.bundle.linux.conf.json ) || die "cargo tauri build failed"
 
   echo
   built=no
@@ -638,6 +644,20 @@ inside its own sandbox and will not see the system ones, so those two need
 install.sh rather than a package. yt-dlp is not carried either: the app fetches
 it on first run and keeps it current.
 PACKAGES
+
+  # The one thing about these packages that is not visible in them. glibc has
+  # no forward compatibility, so a package built here runs only on
+  # distributions at least as new as this one -- and the failure is silent: it
+  # installs without complaint and then does nothing when clicked.
+  glibc="$(ldd --version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+$')"
+  cat <<GLIBC
+Built against this machine's glibc${glibc:+ ($glibc)}, so they will not start on
+anything older. For packages to hand to other people, build them against an old
+glibc instead, which costs a container and nothing else:
+
+  ./packaging/build-in-container.sh
+
+GLIBC
 fi
 
 # The click that finishes the install is Firefox's own "Add"; all this does is

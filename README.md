@@ -611,6 +611,24 @@ upgrade, where deleting them would leave the newly installed app unregistered.
 `mdm.db` is deliberately kept on uninstall, the same choice the Windows
 uninstaller makes.
 
+**Where they will run.** `install.sh --bundle` links against the glibc of the
+machine that builds them, and glibc has no forward compatibility, so packages
+built on a current Fedora refuse to start on Ubuntu 22.04 — silently, after
+installing without complaint, which is the worst way for this to fail. For
+packages meant for other people:
+
+    ./packaging/build-in-container.sh
+
+That builds both in an Ubuntu 22.04 container, which puts the floor at glibc
+2.35 and takes glibc out of the picture: every distribution carrying
+webkit2gtk-4.1 — Tauri's real requirement, and the actual limit — already has
+a glibc at least that old. Ubuntu 22.04+, Debian 12+ and Fedora 38+ are
+covered; Fedora 36 and openSUSE Leap 15.6 have the glibc but no
+webkit2gtk-4.1, and RHEL 9 and its rebuilds ship only webkit2gtk3, the
+libsoup2 build, so no build flag reaches them. One container build produces
+both packages — Tauri assembles the .rpm in Rust rather than by shelling out
+to rpmbuild, so an Ubuntu image can produce a package Fedora installs.
+
 What the packages cannot register is a **Flatpak or Snap browser**. Those read
 their manifests from inside their own sandbox, where a system directory is not
 visible, so a machine whose Firefox came from Flatpak or Snap still wants
@@ -787,6 +805,7 @@ python3 packaging/test-native-host.py target/debug/mdm-host
 | `src-tauri/` | Desktop app and its commands |
 | `ui/` | Frontend — plain HTML/CSS/JS, no bundler |
 | `src-tauri/linux/` | Post-install and post-remove scripts for the .deb and .rpm |
+| `packaging/Containerfile.build` | Old-glibc toolchain for the redistributable packages |
 | `packaging/` | Icon generator, Range-capable test server, native-host harness |
 
 ## Data

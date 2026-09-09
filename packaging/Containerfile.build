@@ -1,0 +1,35 @@
+# Toolchain for building the redistributable packages against an old glibc.
+#
+# glibc has no forward compatibility: a binary linked against 2.39 refuses to
+# start on anything older, so a package built on the newest Fedora installs
+# cleanly on Ubuntu 22.04 and then does nothing when clicked. Building here
+# instead sets the floor at this image's glibc — old enough to cover every
+# distribution still in support, and binaries stay compatible upwards.
+#
+# Ubuntu 22.04 is the oldest base that still has what Tauri v2 needs. RHEL 9
+# and its rebuilds are older still, but ship only webkit2gtk3 (the 4.0 soname
+# against libsoup2), so they cannot build or run this at all.
+FROM ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# webkit2gtk-4.1 is the one that matters: 4.0 is the libsoup2 build, which
+# Tauri v2 does not use. The rest are what its build scripts look for.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      build-essential curl ca-certificates pkg-config file \
+      libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev \
+      libayatana-appindicator3-dev librsvg2-dev patchelf \
+    && rm -rf /var/lib/apt/lists/*
+
+# The distribution's own rustc is far too old for this workspace's edition, so
+# the toolchain comes from rustup rather than apt.
+ENV RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    PATH=/usr/local/cargo/bin:$PATH
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+      | sh -s -- -y --default-toolchain stable --profile minimal --no-modify-path
+
+# Baked into the image so a rebuild of the packages does not rebuild this.
+RUN cargo install tauri-cli --locked --version "^2"
+
+WORKDIR /work
