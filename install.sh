@@ -588,7 +588,14 @@ DONE
 if [[ "$BUNDLE" == yes ]]; then
   say "Building the redistributable packages"
 
-  command -v cargo-tauri >/dev/null \
+  # Asked of cargo, not of PATH. `cargo install` puts the CLI in
+  # $CARGO_HOME/bin, and cargo searches that directory for `cargo-<subcommand>`
+  # whether or not it is on PATH — so a machine can have a perfectly good
+  # `cargo tauri`, which is what the build below actually runs, and no
+  # `cargo-tauri` for `command -v` to find. Looking for the wrong one of those
+  # is how a freshly installed CLI still came back as "the Tauri CLI was not
+  # found", with a successful `cargo install` sitting in between.
+  cargo tauri --version >/dev/null 2>&1 \
     || die "the Tauri CLI was not found. Install it with: cargo install tauri-cli --locked"
 
   # Tauri copies a sidecar by looking for `<name>-<target triple>` and installs

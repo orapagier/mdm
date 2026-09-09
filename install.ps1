@@ -577,7 +577,13 @@ if ($Installer) {
     Write-Host ""
     Say "Building the redistributable installer"
 
-    if (-not (Get-Command cargo-tauri -ErrorAction SilentlyContinue)) {
+    # Asked of cargo, not of PATH. `cargo install` puts the CLI in
+    # $CARGO_HOME\bin, and cargo searches that directory for
+    # `cargo-<subcommand>` whether or not it is on PATH -- so a machine can
+    # have a perfectly good `cargo tauri`, which is what the build below
+    # actually runs, and no `cargo-tauri` for Get-Command to find.
+    cargo tauri --version *> $null
+    if ($LASTEXITCODE -ne 0) {
         Die "the Tauri CLI was not found. Install it with: cargo install tauri-cli --locked"
     }
 
