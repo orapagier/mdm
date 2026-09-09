@@ -380,9 +380,10 @@ foreach ($hive in $ChromiumHives) {
 
 Say "Packaging the extension"
 # $Repo\target here, not $Target: these are packages rather than build output,
-# and tauri.bundle.conf.json names ..\target\mdm-chrome relative to itself --
-# a path inside the repo whatever CARGO_TARGET_DIR happens to say. Created
-# explicitly because a build that was redirected elsewhere never makes it.
+# and tauri.bundle.windows.conf.json names ..\target\mdm-chrome relative to
+# itself -- a path inside the repo whatever CARGO_TARGET_DIR happens to say.
+# Created explicitly because a build that was redirected elsewhere never makes
+# it.
 New-Item -ItemType Directory -Force -Path "$Repo\target" | Out-Null
 $Xpi = "$Repo\target\mdm-firefox.xpi"
 if (Test-Path $Xpi) { Remove-Item $Xpi -Force }
@@ -659,7 +660,15 @@ if ($Installer) {
         # same build, so putting it in the base config makes a plain
         # `cargo build` fail on any tree where it has not been staged — which
         # is every clean checkout. Bundling is the only thing that needs them.
-        cargo tauri build --bundles nsis --config src-tauri/tauri.bundle.conf.json
+        #
+        # And why the name is tauri.bundle.windows.conf.json rather than
+        # tauri.windows.conf.json: the second is reserved. Tauri merges
+        # tauri.<platform>.conf.json into every build for that platform on its
+        # own, which would put `externalBin` back into every build through the
+        # back door and break the clean checkout exactly as writing it into the
+        # base config would. The Linux overlay is named the same way for the
+        # same reason.
+        cargo tauri build --bundles nsis --config src-tauri/tauri.bundle.windows.conf.json
         if ($LASTEXITCODE -ne 0) { Die "cargo tauri build failed" }
     } finally {
         Pop-Location

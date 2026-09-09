@@ -616,7 +616,10 @@ if [[ "$BUNDLE" == yes ]]; then
   # is reserved: Tauri merges tauri.<platform>.conf.json into every build for
   # that platform automatically, so calling it that would put `externalBin`
   # back into every build through the back door and break the clean checkout
-  # exactly as if it had been written into the base config.
+  # exactly as if it had been written into the base config. The Windows overlay
+  # beside it, tauri.bundle.windows.conf.json, is named the same way and for
+  # the same reason — the pair is deliberate, and neither may lose the
+  # `bundle.` in front.
   ( cd "$REPO" && cargo tauri build --bundles deb,rpm \
       --config src-tauri/tauri.bundle.linux.conf.json ) || die "cargo tauri build failed"
 
