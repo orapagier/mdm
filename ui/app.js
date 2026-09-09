@@ -13,6 +13,12 @@ let snapshot = { downloads: [], globalSpeed: 0, active: 0, queued: 0 };
 let filter = { kind: "all", value: null };
 let settings = null;
 
+/* Set by wireBatchDialog. The window is torn down when closed, so a capture
+   can arrive with nothing listening; init() collects the parked one and hands
+   it to the same code the live events reach. */
+let showBatch = () => {};
+let showMedia = () => {};
+
 function visible(d) {
   if (filter.kind === "all") return true;
   if (filter.kind === "category") return d.category === filter.value;
@@ -313,31 +319,34 @@ function wireBatchDialog() {
     );
   }
 
-  listen("mdm://batch", (event) => {
-    links = (event.payload.links || []).map((l) => ({ ...l, selected: true }));
+  showBatch = (payload) => {
+    links = (payload.links || []).map((l) => ({ ...l, selected: true }));
     $("batch-title").textContent =
-      `${links.length} links on ${event.payload.title || event.payload.pageUrl}`;
+      `${links.length} links on ${payload.title || payload.pageUrl}`;
     $("batch-filter").value = "";
     draw();
     if (!dlg.open) dlg.showModal();
-  });
+  };
 
-  listen("mdm://media", (event) => {
-    links = (event.payload.items || []).map((m) => ({
+  showMedia = (payload) => {
+    links = (payload.items || []).map((m) => ({
       url: m.url,
       // The note is what tells two hundred JPEGs apart; the MIME only says
       // they are all JPEGs.
       text: [m.kind, m.note || m.mime].filter(Boolean).join(" · "),
       selected: true,
     }));
-    const kinds = new Set((event.payload.items || []).map((m) => m.kind));
+    const kinds = new Set((payload.items || []).map((m) => m.kind));
     const what = kinds.size === 1 && kinds.has("image") ? "images" : "media";
     $("batch-title").textContent =
-      `${links.length} ${what} on ${event.payload.title || "page"}`;
+      `${links.length} ${what} on ${payload.title || "page"}`;
     $("batch-filter").value = "";
     draw();
     if (!dlg.open) dlg.showModal();
-  });
+  };
+
+  listen("mdm://batch", (event) => showBatch(event.payload));
+  listen("mdm://media", (event) => showMedia(event.payload));
 
   $("batch-filter").addEventListener("input", draw);
   $("batch-all").addEventListener("click", () => {
@@ -572,6 +581,14 @@ async function init() {
 
   settings = await invoke("get_settings").catch(() => null);
   await refresh();
+
+  // Whatever arrived while there was no window to emit into. The live event
+  // above covers a window that was already up; this covers one built for the
+  // message itself.
+  const parked = await invoke("take_pending_main").catch(() => null);
+  if (parked?.event === "mdm://batch") showBatch(parked.payload);
+  else if (parked?.event === "mdm://media") showMedia(parked.payload);
+
   offerUpdate();
 }
 

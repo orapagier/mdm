@@ -3,11 +3,12 @@
 
 mod commands;
 mod video;
+mod window;
 
 use mdm_core::engine::Engine;
 use mdm_core::ipc::{self, UiRequest};
 use mdm_core::{config, paths};
-use tauri::{Emitter, Manager};
+use tauri::Emitter;
 use tokio::sync::mpsc;
 
 /// Tell the desktop which application these windows belong to.
@@ -171,6 +172,7 @@ fn main() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(engine.clone())
         .manage(video::Pending::default())
+        .manage(window::Pending::default())
         // The shape the download window is currently in, so it is only ever
         // resized when it actually has to change.
         .manage(std::sync::Mutex::<Option<video::Kind>>::new(None))
@@ -198,6 +200,7 @@ fn main() {
             commands::read_clipboard_url,
             commands::open_video_window,
             commands::take_pending_video,
+            commands::take_pending_main,
             commands::start_capture,
             commands::fit_window,
             commands::check_update,
@@ -207,9 +210,13 @@ fn main() {
             let handle = app.handle().clone();
             let clip_rx = clip_rx;
 
-            if background {
-                if let Some(w) = handle.get_webview_window("main") {
-                    let _ = w.hide();
+            // A background start builds no window at all. It used to build one
+            // and hide it, which kept a WebKitWebProcess alive from login for a
+            // window nobody had asked to see; `window::focus` puts one up the
+            // moment anything actually wants it.
+            if !background {
+                if let Err(e) = window::build(&handle) {
+                    log::error!("could not open the main window: {e}");
                 }
             }
 
@@ -386,14 +393,10 @@ fn main() {
                         _ => {}
                     }
 
-                    let Some(window) = ui_handle.get_webview_window("main") else {
-                        continue;
-                    };
-                    let _ = window.show();
-                    let _ = window.unminimize();
-                    let _ = window.set_focus();
+                    // Each of these builds the window when it is closed, so a
+                    // capture arriving at a torn-down UI is not dropped.
                     match req {
-                        UiRequest::Focus => {}
+                        UiRequest::Focus => window::focus(&ui_handle),
                         UiRequest::VideoPage { .. } | UiRequest::Started { .. } => {
                             unreachable!("handled above")
                         }
@@ -401,54 +404,48 @@ fn main() {
                             links,
                             page_url,
                             title,
-                        } => {
-                            let _ = window.emit(
-                                "mdm://batch",
-                                serde_json::json!({
-                                    "links": links, "pageUrl": page_url, "title": title
-                                }),
-                            );
-                        }
+                        } => window::deliver(
+                            &ui_handle,
+                            "mdm://batch",
+                            serde_json::json!({
+                                "links": links, "pageUrl": page_url, "title": title
+                            }),
+                        ),
                         UiRequest::Media {
                             items,
                             page_url,
                             title,
-                        } => {
-                            let _ = window.emit(
-                                "mdm://media",
-                                serde_json::json!({
-                                    "items": items, "pageUrl": page_url, "title": title
-                                }),
-                            );
-                        }
+                        } => window::deliver(
+                            &ui_handle,
+                            "mdm://media",
+                            serde_json::json!({
+                                "items": items, "pageUrl": page_url, "title": title
+                            }),
+                        ),
                     }
                 }
             });
 
             Ok(())
         })
-        .on_window_event(|window, event| {
-            // Closing the main window leaves the engine running so captures
-            // from the browser still work; quitting is an explicit action.
-            // The download window is genuinely closed instead, so the next
-            // grab opens a clean one rather than inheriting the last video.
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                if window.label() == video::LABEL {
-                    return;
-                }
-                api.prevent_close();
-                let _ = window.hide();
-            }
-        })
+        // Neither window is held open: both are genuinely closed, so the next
+        // one opens clean and the webview's WebKit processes are given back in
+        // between. Nothing to intercept, so there is no window-event handler.
         .build(tauri::generate_context!())
-        .expect("building the MDM window")
-        .run(move |_app, event| {
-            if let tauri::RunEvent::ExitRequested { .. } = event {
+        .expect("building the MDM app")
+        .run(move |_app, event| match event {
+            // Closing the last window is routine now rather than a request to
+            // quit: the engine stays up so browser captures still work, and
+            // `window::focus` builds a new window when one is wanted. Ending
+            // the process remains an explicit act from outside (stop.sh).
+            tauri::RunEvent::ExitRequested { api, .. } => api.prevent_exit(),
+            tauri::RunEvent::Exit => {
                 let engine = engine.clone();
                 tauri::async_runtime::block_on(async move {
                     engine.shutdown().await;
                 });
             }
+            _ => {}
         });
 }
 

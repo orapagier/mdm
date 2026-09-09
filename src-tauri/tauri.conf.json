@@ -20,18 +20,7 @@
   "app": {
     "withGlobalTauri": true,
     "enableGTKAppId": true,
-    "windows": [
-      {
-        "label": "main",
-        "title": "My Download Manager",
-        "width": 1040,
-        "height": 680,
-        "minWidth": 760,
-        "minHeight": 460,
-        "resizable": true,
-        "center": true
-      }
-    ],
+    "windows": [],
     "security": {
       "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; script-src 'self'"
     }

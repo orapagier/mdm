@@ -222,6 +222,18 @@ pub fn take_pending_video(pending: State<'_, crate::video::Pending>) -> Option<c
     pending.take()
 }
 
+/// Collect whatever arrived for the main window while it was closed.
+///
+/// The window is torn down on close, so a capture can land with nothing to
+/// emit into; it is parked instead, and this is the load-time pull that pairs
+/// with the live `mdm://batch` and `mdm://media` events.
+#[tauri::command]
+pub fn take_pending_main(
+    pending: State<'_, crate::window::Pending>,
+) -> Option<crate::window::Message> {
+    pending.take()
+}
+
 /// Start a capture the window has been holding, at the folder and name the
 /// user settled on.
 ///
