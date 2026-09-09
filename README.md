@@ -110,8 +110,12 @@ anything, MDM downloads and merges a 4K YouTube video by itself.
 
 ## Capture rules
 
-Three independent nets, because none of them is sufficient alone:
+Four independent nets, because none of them is sufficient alone:
 
+0. `webRequest.onBeforeRequest` (blocking) — the only one that acts *before*
+   the browser asks the server anything, and it exists for the one case where
+   asking second is asking too late. See **Links that answer once** below. It
+   is not registered at all until the app has a host to use it on.
 1. `webRequest.onHeadersReceived` (blocking) — decides from
    `Content-Disposition`, `Content-Type`, `Content-Length` and the file
    extension, then hands over the URL **together with the request headers
@@ -129,6 +133,64 @@ Three independent nets, because none of them is sufficient alone:
    placed, and not yet asked about. See **Chromium** below.
 3. A content script, for downloads that never had a URL to begin with — see
    **In-memory downloads** below.
+
+### Links that answer once
+
+File hosts hand out an address that is good for a single request: serve it
+once, and everything after that gets the landing page. Every net above net 0
+works the same way — watch a response go past, then ask the server for the same
+file again — and on a host like that the second ask is the page, because the
+browser's own request already spent the link. The download fails, and it fails
+*after* MDM has cancelled the browser's copy, so nothing is saved at all.
+
+MDM notices when that happens: a URL that answered with a page, where the
+capture had watched a file arrive, is a spent link rather than a player page,
+and the host goes on a list (Settings ▸ **Sites MDM asks first**). What the
+list means is that MDM goes *first* there. The next request to that host is
+held before it is sent, MDM makes it instead, and the browser's request — still
+held, never sent — is cancelled only if what came back was a file. So there is
+exactly one request, and it is MDM's.
+
+Two things follow from there being only one:
+
+* **One connection.** A link that answers once cannot be probed and then
+  segmented, so a pre-empted download is written straight out of the response
+  the pre-emption opened. No probe, no second connection, and no resume — a
+  spent link has nothing to resume into, and offering one would turn a lost
+  download into a stuck one.
+* **A page is handed straight back.** The extension holds the request without
+  knowing whether it is a download — it cannot know, because nothing has asked
+  the server yet — so a file host's own pages are held too. The app answers
+  from the response: HTML is "not mine", the held request goes ahead, and the
+  page loads as though none of this happened.
+
+Holding a request open before it is sent is exactly what Manifest V3 took away,
+so on Chromium the same job is done a step earlier — at the click.
+
+**Chromium catches the click instead.** A download does not begin with a
+request; it begins with somebody pressing a link, and a click is still
+cancellable on every browser there is. So on these hosts, and only on these
+hosts, the extension cancels the click and hands the address to MDM, which
+means the browser is never told to navigate and never spends the one answer.
+
+The difference from Firefox's version is what happens when the address turns
+out to be a page. A held request can be released — it was never sent, so it
+simply goes ahead. A cancelled click cannot be released, and the navigation has
+to be made again from the content script. That costs one extra request, which
+is harmless precisely because a page is by definition an address that answers
+twice; it is only the *file* links on these hosts that answer once. Where the
+browser can hold the real request it does, and the click net stays out of the
+way.
+
+What it does not catch is a download the page starts by script rather than by a
+link — those stay with the browser, which is where they still work.
+
+**A link nothing has followed is still good.** The refusal above is about a
+link the browser has already spent. Right-click ▸ *Download with MDM*, an
+address pasted into the window, an `mdm:` link: nothing has requested any of
+those, so MDM's request is the first one and the file is there to be had.
+Refusing those was refusing the one thing that reliably works on such a host,
+and the job now says which of the two it is.
 
 ### Images
 
@@ -228,6 +290,26 @@ found nothing to offer, while `/explore`, which does not rewrite the address,
 worked perfectly. The per-tab ceiling drops the oldest entry rather than
 refusing the newest, for the same reason: refusing went deaf part-way down a
 feed, holding fifty videos already scrolled past and never the one on screen.
+
+**Except the manifest, which is never the entry to drop.** Age is the wrong
+measure for a stream: the manifest is fetched once, before the first frame, so
+it is always the oldest thing in the record, while the segments it lists arrive
+every few seconds for as long as anyone watches. Fifty slots is about five
+minutes of playback, after which oldest-out had thrown away the one entry
+describing the whole video and kept fifty slices of it — so Download at six
+minutes into a film came back with a 1.6 MB file that no player would open. It
+was one HLS segment, correct in every respect and six seconds long. Manifests
+now survive their own segments, a fragment is ranked as half a video the way a
+DASH audio track already was, and where the tab holds exactly one manifest the
+window offers it outright: one manifest is not a guess between videos, it is
+the stream being played. It is fetched piece by piece and rebuilt into a single
+MP4 by the stream downloader, which is the same path a `.m3u8` pasted by hand
+takes.
+
+Recognising one is a matter of the response as well as the address. A CDN is
+under no obligation to end a playlist in `.m3u8` or a segment in `.ts`, and the
+one this was written against names neither — its segments are a bare token and
+only `Content-Type: video/mp2t` says what they are.
 
 On a feed the post is identified rather than guessed at, because on the worst
 of them nothing else survives. TikTok's home feed, measured on a live page,
@@ -710,6 +792,46 @@ Two things differ, and both are Chromium's doing:
 Load it from `chrome://extensions` (or `edge://extensions`) with Developer mode
 on and "Load unpacked". `install.ps1` writes the `allowed_origins` manifest and
 the registry value for Chrome, Edge, Chromium, Brave and Vivaldi.
+
+### Getting the extension without building it
+
+Every way of installing MDM already carries the extension, and until recently
+nothing said so. The `.deb` and `.rpm` stage both browsers' copies under
+`/usr/lib/My Download Manager`, the Windows installer copies them to
+`%APPDATA%\mdm`, and `install.sh` leaves them in the data directory — but a
+package manager prints nothing about its own payload, so somebody installing a
+release build got a working app, a registered native host, and no indication
+that the half doing the capturing was already on the machine. The only visible
+route to the add-on was cloning the repository and building it, which is the
+one thing a release build exists to avoid.
+
+Three things now point at it, because people arrive from three directions:
+
+* **The app.** A **Browser extension** button in the main toolbar — not inside
+  Settings, because it is the first thing a new install needs and a thing
+  nobody can find is the problem being solved. It finds the copies on this
+  machine, whatever shape the install was, and offers each: Firefox's button
+  hands the `.xpi` to Firefox, which is the click that installs it; the
+  Chromium one opens the unpacked folder *and* the browser's own extensions
+  page, side by side. `extension_assets` in `src-tauri/src/commands.rs` does
+  the finding — the resource directory first, because that one is right by
+  construction, then each package layout in turn.
+
+  Chromium gets two steps rather than one because it will not install an
+  unpacked extension on a program's say-so, which is the correct answer to
+  software offering to add code to your browser. "Load unpacked" needs a human
+  at that page with that folder in a file dialog, so both are put in front of
+  you rather than described in a paragraph.
+* **The package.** `linux/postinstall.sh` prints where the two copies landed as
+  it registers the native host, which is the moment the question is being
+  asked. `install.sh` does the same for a source install, and copies both out
+  of `target/` into the data directory on the way — Chromium re-reads an
+  unpacked extension's folder at every start, so one left inside the checkout
+  is an extension a `cargo clean` quietly breaks.
+* **The release.** `bundle.sh` copies the signed `.xpi` and the Chromium `.zip`
+  out beside the packages it builds, ready to upload as release assets. Inside
+  a package covers everyone who installs one; it does not cover an AppImage,
+  which runs no install script, or a distribution neither package fits.
 
 ### Updating itself
 
