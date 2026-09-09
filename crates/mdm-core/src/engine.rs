@@ -1203,8 +1203,38 @@ impl Engine {
         // Read before the message is rewritten: the marker is in the raw text,
         // and `plain_error` is under no obligation to keep it.
         let was_page = crate::fetch::is_page_response(message);
-        let permanent = crate::ytdlp::is_permanent_error(message);
-        let message = &if was_page {
+
+        // A page found where the browser had *watched a file arrive* is not a
+        // page an extractor can read. It is a link that has been spent.
+        //
+        // File hosts hand out one-time addresses, and the capture sits at
+        // `onHeadersReceived` — by the time it can divert anything the server
+        // has already committed the file to the browser's request. Cancelling
+        // that request and asking again asks for a token the server has
+        // finished with, and what comes back is the landing page it hands
+        // anyone without one. Confirmed by hand against the download in the
+        // bug report: the capture recorded `video/webm`, 2.1 GB, status 200,
+        // and the same GET with the same cookies now answers 200 `text/html`.
+        //
+        // Everything that used to happen next was wrong. yt-dlp was handed a
+        // file host it has no extractor for, so five retries went by and the
+        // row settled on "No extractor for filekeeper.net" — a true sentence
+        // about the wrong tool, blaming the site for a link MDM had spent
+        // itself.
+        let spent = was_page && crate::fetch::capture_saw_a_file(d.total_bytes, &d.mime);
+
+        let permanent = crate::ytdlp::is_permanent_error(message) || spent;
+        let message = &if spent {
+            let site = url::Url::parse(&d.url)
+                .ok()
+                .and_then(|u| u.host_str().map(str::to_owned))
+                .unwrap_or_else(|| "That site".to_string());
+            format!(
+                "{site} served this file once and now answers with a page — that \
+                 link was single-use. Add {site} under \"Sites to ignore\" in the \
+                 extension's options and download it again; the browser will save it."
+            )
+        } else if was_page {
             // The marker exists for this branch, not for the user.
             "that address is a web page, not a file — trying an extractor".to_string()
         } else {
@@ -1224,6 +1254,7 @@ impl Engine {
         // about to happen. Once only: the flag is persisted, so the next
         // attempt sees a row that has already moved.
         if !d.use_ytdlp
+            && !spent
             && (was_page || crate::stream::looks_like_manifest(&d.url, &d.mime))
             && ytdlp::available()
         {

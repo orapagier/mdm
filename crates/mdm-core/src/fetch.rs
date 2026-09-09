@@ -942,6 +942,20 @@ pub fn is_page_response(message: &str) -> bool {
     message.contains(PAGE_MARKER)
 }
 
+/// Did the browser watch this address hand over the file itself?
+///
+/// The capture records what the *response* said, not what the address looks
+/// like: a byte count, and a content type that is not a page. Both present
+/// means this URL really did serve a file once, with the browser watching it
+/// happen — which is a different thing from an address that has always been a
+/// page, and needs a different answer when a later request finds HTML there.
+///
+/// Nothing in a manually pasted URL can satisfy this: no request has been made
+/// yet, so there is no length and no type to have recorded.
+pub fn capture_saw_a_file(total_bytes: i64, mime: &str) -> bool {
+    total_bytes > 0 && !mime.trim().is_empty() && !is_html(mime)
+}
+
 fn is_html(mime: &str) -> bool {
     let mime = mime.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
     mime == "text/html" || mime == "application/xhtml+xml"
@@ -1720,6 +1734,28 @@ pub fn worth_splitting(size: Option<u64>, resumable: bool, min_split: u64) -> bo
 
 #[cfg(test)]
 mod tests {
+
+    /// The download from the bug report. The browser watched `/download` hand
+    /// over 2.1 GB of `video/webm`; the same GET, with the same cookies,
+    /// answers with a 151 KB landing page. That is a spent one-time link, and
+    /// the evidence for it is the capture's own record of the first response —
+    /// which is what separates it from an address that was always a page.
+    #[test]
+    fn a_page_where_a_file_was_watched_arriving_is_a_spent_link() {
+        assert!(super::capture_saw_a_file(2_204_580_989, "video/webm"));
+        assert!(super::capture_saw_a_file(4096, "application/octet-stream"));
+
+        // A pasted URL: nothing has requested it, so there is nothing recorded
+        // and no reason to claim the site spent anything.
+        assert!(!super::capture_saw_a_file(-1, ""));
+        assert!(!super::capture_saw_a_file(-1, "video/mp4"));
+        assert!(!super::capture_saw_a_file(1_000, ""));
+
+        // A player page that was always a page. The extractor is the right
+        // next step for this one, and it must stay reachable.
+        assert!(!super::capture_saw_a_file(15_000, "text/html"));
+        assert!(!super::capture_saw_a_file(15_000, "text/html; charset=UTF-8"));
+    }
     use super::*;
 
     fn work_with(claims: Vec<(u64, u64)>) -> Work {

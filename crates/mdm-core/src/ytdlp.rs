@@ -932,7 +932,10 @@ pub async fn probe(
         if is_js_challenge_failure(line) {
             bail!("{}", js_challenge_advice(line));
         }
-        bail!("yt-dlp could not read that page: {line}");
+        // Said the way every other failure is said. Raw, this is where a
+        // 200-character signed player URL was quoted back at the user inside
+        // an error about that same URL.
+        bail!("yt-dlp could not read that page: {}", plain_error(line));
     }
 
     let v: serde_json::Value =
@@ -1496,18 +1499,22 @@ pub fn plain_error(message: &str) -> String {
         .map(|h| format!(" {h}"))
         .unwrap_or_default();
 
-    // "Unsupported URL" means no extractor claims this address — and yt-dlp
-    // says it by quoting the whole address back, which is the half the user
-    // already has. A row only reaches the extractor at all when our own
-    // fetcher found a page where a file should have been, so both tools are
-    // now out of ideas, and saying which one gave up on what is less use than
-    // saying what is left to try: the page itself, which the browser can open
-    // and which has the real link somewhere on it.
+    // "Unsupported URL" is yt-dlp's way of saying no extractor claims this
+    // address and the generic one found nothing embedded in the page. It says
+    // it by quoting the address back, which is the half the user already has
+    // — and for a player link that is two hundred characters of signed token,
+    // so the part that identifies anything is off the end of the strip before
+    // the sentence has started. The host is the part worth the room.
+    //
+    // Stated, not advised: this is said both under a download row, where the
+    // address came from a page our own fetcher refused, and under the Fetch
+    // box, where the user typed it. What to do next differs; what happened
+    // does not.
     if lower.contains("unsupported url") {
         let who = named_host(message).unwrap_or_else(|| "this site".to_string());
         return format!(
-            "No extractor for {who} — open the page in your browser and start \
-             the download from the link on it."
+            "No extractor for {who} — yt-dlp does not know this site, and \
+             found no media in the page."
         );
     }
 
@@ -1709,8 +1716,16 @@ mod tests {
     fn an_unsupported_url_names_the_site_and_a_way_forward() {
         let said = plain_error("Unsupported URL: https://filekeeper.net/download");
         assert!(said.contains("filekeeper.net"), "{said}");
-        assert!(said.contains("browser"), "{said}");
         assert!(!said.contains("http"), "the URL is what the user already had: {said}");
+
+        // The player link from the bug report: 200 characters of signed token,
+        // every one of which used to be printed inside the error about it.
+        let long = plain_error(
+            "ERROR: Unsupported URL: https://embdmstrplayer.com/v2/8B-_4YFNa6RTQCh3Nqp2n\
+             LSeouNDpdBuTwMe02i63LDGJQbkLibySN_wH5odvwslinxA3hZuf-oPzxJyQFl4Mz1uLf-aeWV3",
+        );
+        assert!(long.contains("embdmstrplayer.com"), "{long}");
+        assert!(long.len() < 120, "still a wall of token: {long}");
 
         // Nothing to name is not a reason to say nothing.
         assert!(plain_error("ERROR: Unsupported URL: rtmp://x/y").contains("this site"));
