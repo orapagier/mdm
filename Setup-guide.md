@@ -239,13 +239,31 @@ git config --global --add safe.directory '%(prefix)///tsclient/media/Data/dev/md
 ### Linux
 
 ```bash
-./install.sh
+./install.sh              # build and install for this user, no root
+./uninstall.sh            # take it back off, keep the database and settings
+./uninstall.sh --purge    # remove those too
 ```
 
 Same layout under XDG paths: binaries in `~/.local/bin`, data in
 `~/.local/share/mdm`, native messaging manifests written to every Firefox and
 Chromium config tree that exists. Files you have already downloaded are
 untouched by either script.
+
+`uninstall.sh` removes only what `install.sh` wrote. If MDM is also installed
+from the `.rpm` or `.deb`, that install belongs to the package manager and is
+left alone — including its native messaging manifests, which are recognised by
+naming a host binary outside `~/.local/bin`.
+
+To build the packages instead of installing this way:
+
+```bash
+./bundle.sh               # .rpm and .deb; installs nothing
+./bundle.sh --rpm         # just the one
+```
+
+That is a system-wide install by your package manager, so it replaces
+`install.sh` rather than accompanying it — running both leaves two copies, and
+`~/.local/bin` is what PATH finds first.
 
 ### Tests
 

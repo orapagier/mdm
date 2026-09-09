@@ -579,8 +579,15 @@ it may launch a host binary from `~/.local/bin`.
 
 ### Linux, and a redistributable package
 
-`install.sh` builds from source and installs for one user. For a machine that
-is not this one, `./install.sh --bundle` additionally produces two packages:
+`install.sh` builds from source and installs for one user, under `~/.local`,
+needing no root; `./uninstall.sh` takes that install back off. Neither touches
+a packaged install, and the check that keeps them apart is the manifest's own
+`path`: a native messaging manifest naming a host binary outside `~/.local/bin`
+belongs to the package, or to whoever wrote it by hand, and is left where it
+is.
+
+`./bundle.sh` is the other half, and installs nothing. It produces two
+packages:
 
     target/release/bundle/rpm/My Download Manager-1.0.0-1.x86_64.rpm
     target/release/bundle/deb/My Download Manager_1.0.0_amd64.deb
@@ -608,10 +615,11 @@ time rather than shipped as package files, the post-*remove* script takes them
 away again — carefully, since both package managers reuse that script for an
 upgrade, where deleting them would leave the newly installed app unregistered.
 
-`mdm.db` is deliberately kept on uninstall, the same choice the Windows
-uninstaller makes.
+`mdm.db` is deliberately kept on uninstall — by the package's post-remove
+script, and by `uninstall.sh` unless it is given `--purge`. The same choice the
+Windows uninstaller makes.
 
-**Where they will run.** `install.sh --bundle` links against the glibc of the
+**Where they will run.** `bundle.sh` links against the glibc of the
 machine that builds them, and glibc has no forward compatibility, so packages
 built on a current Fedora refuse to start on Ubuntu 22.04 — silently, after
 installing without complaint, which is the worst way for this to fail. For

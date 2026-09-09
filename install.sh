@@ -5,19 +5,13 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# say/warn/die, the extension ids, and the staging this shares with bundle.sh.
+# shellcheck source=packaging/common.sh
+source "$REPO/packaging/common.sh"
+
 BIN_DIR="${HOME}/.local/bin"
 APP_DIR="${HOME}/.local/share/applications"
 ICON_DIR="${HOME}/.local/share/icons/hicolor"
-EXT_ID="mdm@ramlej.local"
-# Chromium derives an extension's id from its public key, so pinning the key in
-# manifest.chrome.json pins the id -- which is what lets the native messaging
-# manifest name it before the extension has ever been installed.
-CHROME_ID="pegdlonllkokelfmdafooihklghlkimh"
-HOST_NAME="io.mdm.host"
-
-say()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
-warn() { printf '\033[1;33m warning:\033[0m %s\n' "$*"; }
-die()  { printf '\033[1;31m error:\033[0m %s\n' "$*" >&2; exit 1; }
 
 # Yes unless a terminal says otherwise. Asked of nothing else on purpose: a
 # scripted install, or one piped in through curl, has no one there to answer
@@ -32,31 +26,33 @@ ask() { # ask <question>
 
 # ------------------------------------------------------------- arguments
 
-# Off by default. The packages are for handing to somebody else rather than for
-# installing here, they need the Tauri CLI, and building them takes longer than
-# the install they are built alongside. `install.ps1 -Installer` is the same
-# switch on Windows.
-BUNDLE=no
+# This script only installs. Building the redistributable packages is
+# ./bundle.sh, which installs nothing -- they were one script with a --bundle
+# flag, and one script that both sets up this machine and produces packages for
+# other machines was read as doing neither clearly.
 while (( $# )); do
   case "$1" in
-    --bundle) BUNDLE=yes ;;
     -h|--help)
       cat <<'USAGE'
-Usage: install.sh [--bundle]
+Usage: install.sh
 
-Builds MDM and installs it for the current user. Needs no root.
+Builds MDM and installs it for the current user. Needs no root: everything
+lands under ~/.local, and the system packages it depends on are checked for,
+not installed.
 
-  --bundle   also build the redistributable packages for other machines:
-
-               target/release/bundle/rpm/*.rpm   Fedora, RHEL, openSUSE
-               target/release/bundle/deb/*.deb   Debian, Ubuntu, Mint
-
-             Each is one self-contained file carrying the app, the native
-             host and the extension, and registers itself with Firefox and
-             the Chromium browsers as it installs. Needs the Tauri CLI:
-             cargo install tauri-cli --locked
+  ./uninstall.sh   removes what this installed
+  ./bundle.sh      builds the .rpm and .deb packages instead, and installs
+                   nothing. Those are a system-wide install by a package
+                   manager, so they are an alternative to this script and not
+                   a companion to it -- running both leaves two copies, and
+                   the one in ~/.local/bin is the one PATH finds first.
 USAGE
       exit 0 ;;
+    # Answered by name rather than as "unknown option", because it worked until
+    # recently and the thing it did still exists.
+    --bundle) die "--bundle has moved out into its own script: ./bundle.sh
+  It builds the .rpm and .deb and installs nothing, which is why it is no
+  longer a flag on the installer." ;;
     *) die "unknown option: $1 (try --help)" ;;
   esac
   shift
@@ -250,7 +246,7 @@ cd "$REPO"
 # stale entries still look fresh. The first thing to trip over it is
 # tauri-build, which reads plugin permissions through one of those paths and
 # fails with "No such file or directory" for a file the current tree never had.
-TARGET_DIR="${CARGO_TARGET_DIR:-$REPO/target}"
+# TARGET_DIR is set in packaging/common.sh, from CARGO_TARGET_DIR where it is set.
 recorded="$(grep -rhoE '/[^ ":=]+/build/[A-Za-z0-9_.-]+/out\b' \
               "$TARGET_DIR"/*/build/*/output 2>/dev/null | head -1 || true)"
 if [[ -n "$recorded" && "$recorded" != "$TARGET_DIR"/* ]]; then
@@ -331,12 +327,19 @@ for suffix in "" "-wal" "-shm"; do
 done
 
 # Old install artefacts. Only ever files this script itself wrote.
-for stale in "$BIN_DIR/ldm" "$BIN_DIR/ldm-host" "$APP_DIR/io.ldm.app.desktop"; do
+#
+# `io.mdm.app.desktop` is here for the same reason the ldm entries are: the app
+# id moved to `mdm`, and an entry left behind under the old name still claims
+# the `mdm:` scheme and still offers a launcher that points at the same binary,
+# so the menu shows MDM twice and only one of them can own the icon.
+for stale in "$BIN_DIR/ldm" "$BIN_DIR/ldm-host" \
+             "$APP_DIR/io.ldm.app.desktop" "$APP_DIR/io.mdm.app.desktop"; do
   [[ -e "$stale" ]] && { rm -f "$stale"; migrated=yes; }
 done
 for size in 16 24 32 48 64 128 256 512; do
   rm -f "$ICON_DIR/${size}x${size}/apps/io.ldm.app.png" \
-        "$ICON_DIR/${size}x${size}/apps/ldm.png"
+        "$ICON_DIR/${size}x${size}/apps/ldm.png" \
+        "$ICON_DIR/${size}x${size}/apps/io.mdm.app.png"
 done
 
 say "Installing binaries to $BIN_DIR"
@@ -349,13 +352,13 @@ case ":$PATH:" in
   *) warn "$BIN_DIR is not on your PATH; add it to ~/.bashrc" ;;
 esac
 
-# Under both names on purpose: desktop entries name their icon explicitly,
-# while some shells instead guess it from the window's app id.
+# One name, because there is now only one to be: the entry below names its
+# icon `mdm`, and a shell that instead guesses from the window's app id gets
+# `mdm` as well. It was installed twice over when those two disagreed.
 say "Installing icons"
 for size in 16 24 32 48 64 128 256 512; do
   dir="$ICON_DIR/${size}x${size}/apps"
   mkdir -p "$dir"
-  install -m644 "$REPO/extension/icons/mdm-${size}.png" "$dir/io.mdm.app.png"
   install -m644 "$REPO/extension/icons/mdm-${size}.png" "$dir/mdm.png"
 done
 command -v gtk-update-icon-cache >/dev/null && \
@@ -367,22 +370,31 @@ mkdir -p "$APP_DIR"
 # gets typed to find it. The long name lives in GenericName, and Keywords make
 # the app findable by what it does as well as by what it is called.
 #
-# StartupWMClass must equal the window's GTK app id — the "identifier" from
-# tauri.conf.json, which "enableGTKAppId" is what actually applies. Without
-# that pair agreeing, the desktop cannot tell which entry the window belongs to
-# and shows a generic placeholder in the taskbar instead of the icon above.
-cat > "$APP_DIR/io.mdm.app.desktop" <<DESKTOP
+# StartupWMClass must equal the window's app id, which `claim_desktop_identity`
+# in src-tauri/src/main.rs sets to `mdm`. Without that pair agreeing the desktop
+# cannot tell which entry the window belongs to and shows a generic placeholder
+# in the taskbar instead of the icon above.
+#
+# `mdm` and not something reverse-DNS, because the .deb and .rpm carry a desktop
+# entry of their own that Tauri's bundler generates from the binary name, saying
+# `StartupWMClass=mdm`, and offers no way to set it. One app id has to satisfy
+# both entries, so it is the one that is not ours to change.
+#
+# The file is named after the app id too: a Wayland compositor matches a window
+# to a desktop entry by id first and falls back to StartupWMClass, and only the
+# name gets it right without the fallback.
+cat > "$APP_DIR/mdm.desktop" <<DESKTOP
 [Desktop Entry]
 Type=Application
 Name=MDM
 GenericName=My Download Manager
 Comment=My Download Manager — accelerated downloads with browser capture
 Exec=$BIN_DIR/mdm %u
-Icon=io.mdm.app
+Icon=mdm
 Terminal=false
 Categories=Network;FileTransfer;
 Keywords=mdm;my download manager;download;manager;downloader;idm;video;
-StartupWMClass=io.mdm.app
+StartupWMClass=mdm
 MimeType=x-scheme-handler/mdm;
 DESKTOP
 command -v update-desktop-database >/dev/null && \
@@ -454,15 +466,10 @@ fi
 # id -- and a different directory per browser and per packaging. Same rule as
 # above: write to every tree that exists, an unused manifest is inert.
 say "Registering the native messaging host for Chrome and Edge"
-CHROMIUM_NM_DIRS=(
-  "${HOME}/.config/google-chrome/NativeMessagingHosts"
-  "${HOME}/.config/chromium/NativeMessagingHosts"
-  "${HOME}/.config/microsoft-edge/NativeMessagingHosts"
-  "${HOME}/.config/BraveSoftware/Brave-Browser/NativeMessagingHosts"
-  "${HOME}/.config/vivaldi/NativeMessagingHosts"
-  "${HOME}/.var/app/com.google.Chrome/config/google-chrome/NativeMessagingHosts"
-  "${HOME}/.var/app/com.brave.Browser/config/BraveSoftware/Brave-Browser/NativeMessagingHosts"
-)
+# The list lives in packaging/common.sh because uninstall.sh has to find the
+# very same files again, and a directory written here but not looked for there
+# would leave a manifest naming a host binary that is no longer installed.
+mapfile -t CHROMIUM_NM_DIRS < <(chromium_manifest_dirs)
 for nm_dir in "${CHROMIUM_NM_DIRS[@]}"; do
   # Only where the browser's config tree already exists: creating one for a
   # browser that is not installed leaves litter in ~/.config forever.
@@ -481,58 +488,11 @@ MANIFEST
 done
 # ---------------------------------------------------------------- extension
 
-say "Packaging the extension"
-XPI="$REPO/target/mdm-firefox.xpi"
-# The test directory is developer-only; shipping it would put dead code in
-# front of AMO reviewers and bloat the package. The Chromium manifest and its
-# service worker go the same way: Firefox reads neither.
-( cd "$REPO/extension" && rm -f "$XPI" \
-  && zip -qr "$XPI" . -x '*.DS_Store' 'test/*' 'manifest.chrome.json' 'src/sw.js' )
+# Both browsers' copies, built the same way bundle.sh builds them. Sets XPI and
+# CHROME_DIR.
+stage_extension
 
-# The Chromium build: same source, one file swapped. Left unpacked as well as
-# zipped because Chrome and Edge load an *unzipped folder* in developer mode,
-# which is how this gets used before a store listing exists, while the zip is
-# what the store dashboards want uploaded.
-say "Packaging the extension for Chrome and Edge"
-CHROME_DIR="$REPO/target/mdm-chrome"
-rm -rf "$CHROME_DIR"
-mkdir -p "$CHROME_DIR"
-( cd "$REPO/extension" && tar cf - --exclude=test --exclude=manifest.json . ) \
-  | ( cd "$CHROME_DIR" && tar xf - )
-mv "$CHROME_DIR/manifest.chrome.json" "$CHROME_DIR/manifest.json"
-# Staging this folder wrong is silent and expensive, so it is checked rather
-# than assumed. The folder still loads with the Firefox manifest in it; what
-# breaks is downstream and mute -- Chromium derives the id from the path when
-# no key is pinned, the native host allows exactly one id and refuses every
-# other, and the popup then sits on "Checking..." for good with nothing said
-# anywhere about why. Checked here rather than trusted because the zip below,
-# and any package built from this folder, carry whatever it finds.
-[[ -f "$CHROME_DIR/manifest.json" ]] \
-  || die "staging $CHROME_DIR produced no manifest.json"
-grep -q '"key"' "$CHROME_DIR/manifest.json" \
-  || die "$CHROME_DIR/manifest.json carries no pinned key, so it is the Firefox
-  manifest rather than the Chromium one. A browser would derive an id from the
-  path and the native host would refuse it."
-( cd "$CHROME_DIR" && rm -f "$REPO/target/mdm-chrome.zip" \
-  && zip -qr "$REPO/target/mdm-chrome.zip" . -x '*.DS_Store' )
-
-# Firefox installs nothing Mozilla has not signed, and signing happens at AMO
-# rather than here. So the package built above is the one to submit, and the
-# one that comes back signed is the one to install: leave it at SIGNED_XPI (or
-# point MDM_XPI at it) and every install from then on offers the one-click
-# install below instead of an add-on that vanishes at the next restart.
-#
-# The signature is also what tells the two apart. A signed .xpi carries
-# META-INF/mozilla.rsa, and a zip keeps its member names uncompressed, so the
-# name can be found in the file without unpacking it — no unzip to require.
-SIGNED_XPI="${MDM_XPI:-$REPO/packaging/mdm-firefox-signed.xpi}"
-signed=no
-if LC_ALL=C grep -qsa 'META-INF/mozilla\.rsa' "$SIGNED_XPI"; then
-  signed=yes
-elif [[ -n "${MDM_XPI:-}" ]]; then
-  warn "MDM_XPI=$SIGNED_XPI is missing or carries no signature. Firefox would
-  refuse it, so the temporary add-on is what gets offered below instead."
-fi
+find_signed_xpi
 
 if [[ "$signed" == yes ]]; then
   # Kept out of the checkout on purpose. Firefox copies the package into the
@@ -583,92 +543,18 @@ Then start the app:  mdm
 The extension launches it automatically on the first captured download.
 DONE
 
-# ---------------------------------------------------------------- bundle
+# ----------------------------------------------------------------- packages
 
-if [[ "$BUNDLE" == yes ]]; then
-  say "Building the redistributable packages"
+# Said once, here, because the question comes up at exactly this moment: this
+# was one script with a --bundle flag, and the flag read as "install from a
+# package" when what it did was "install here, and also build packages for
+# elsewhere".
+cat <<PACKAGES
+To build the .rpm and .deb instead of installing this way:  ./bundle.sh
+That is a separate, system-wide install by your package manager, so it
+replaces this script rather than adding to it.
 
-  # Asked of cargo, not of PATH. `cargo install` puts the CLI in
-  # $CARGO_HOME/bin, and cargo searches that directory for `cargo-<subcommand>`
-  # whether or not it is on PATH — so a machine can have a perfectly good
-  # `cargo tauri`, which is what the build below actually runs, and no
-  # `cargo-tauri` for `command -v` to find. Looking for the wrong one of those
-  # is how a freshly installed CLI still came back as "the Tauri CLI was not
-  # found", with a successful `cargo install` sitting in between.
-  cargo tauri --version >/dev/null 2>&1 \
-    || die "the Tauri CLI was not found. Install it with: cargo install tauri-cli --locked"
-
-  # Tauri copies a sidecar by looking for `<name>-<target triple>` and installs
-  # it beside the app as `<name>`. The triple comes from the toolchain rather
-  # than being assumed: a machine building for aarch64 would otherwise ship an
-  # x86 host binary that silently never starts.
-  triple="$(rustc -vV | sed -n 's/^host: //p')"
-  [[ -n "$triple" ]] || die "could not read the host triple from rustc"
-  mkdir -p "$REPO/src-tauri/binaries"
-  install -m755 "$HOST_BIN" "$REPO/src-tauri/binaries/mdm-host-$triple"
-
-  # The packages carry the *signed* extension. Without it they would ship an
-  # add-on Firefox refuses, which is worse than shipping none.
-  [[ "$signed" == yes ]] || warn "packaging/mdm-firefox-signed.xpi is missing or unsigned, so the
-  packages will carry an add-on Firefox refuses. Sign the package at
-  addons.mozilla.org and save it there, then build again."
-
-  # The overlay carries the sidecar, the extension and the registration
-  # scripts. They are deliberately not in tauri.conf.json: `externalBin` is
-  # checked on *every* build, and the binary it names is produced by that same
-  # build, so putting it in the base config makes a plain `cargo build` fail on
-  # any tree where it has not been staged — which is every clean checkout.
-  #
-  # Which is also why this file is not called tauri.linux.conf.json. That name
-  # is reserved: Tauri merges tauri.<platform>.conf.json into every build for
-  # that platform automatically, so calling it that would put `externalBin`
-  # back into every build through the back door and break the clean checkout
-  # exactly as if it had been written into the base config. The Windows overlay
-  # beside it, tauri.bundle.windows.conf.json, is named the same way and for
-  # the same reason — the pair is deliberate, and neither may lose the
-  # `bundle.` in front.
-  ( cd "$REPO" && cargo tauri build --bundles deb,rpm \
-      --config src-tauri/tauri.bundle.linux.conf.json ) || die "cargo tauri build failed"
-
-  echo
-  built=no
-  for pkg in "$TARGET_DIR"/release/bundle/rpm/*.rpm "$TARGET_DIR"/release/bundle/deb/*.deb; do
-    [[ -f "$pkg" ]] || continue
-    built=yes
-    printf '  %s\n  %s\n' "$pkg" "$(du -h "$pkg" | cut -f1)"
-  done
-  [[ "$built" == yes ]] || die "the bundler reported success but produced no packages"
-
-  cat <<'PACKAGES'
-
-Each is one file and needs nothing beside it. Installing one puts the app, the
-native host and the extension on the machine and registers the host with
-Firefox and with the Chromium browsers — Chrome, Brave, Chromium, Edge and
-Vivaldi — for every account on it:
-
-  sudo dnf install ./My*.rpm     (Fedora, RHEL, openSUSE)
-  sudo apt install ./My*.deb     (Debian, Ubuntu, Mint)
-
-A Firefox or Chrome installed from Flatpak or Snap reads its manifests from
-inside its own sandbox and will not see the system ones, so those two need
-install.sh rather than a package. yt-dlp is not carried either: the app fetches
-it on first run and keeps it current.
 PACKAGES
-
-  # The one thing about these packages that is not visible in them. glibc has
-  # no forward compatibility, so a package built here runs only on
-  # distributions at least as new as this one -- and the failure is silent: it
-  # installs without complaint and then does nothing when clicked.
-  glibc="$(ldd --version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+$')"
-  cat <<GLIBC
-Built against this machine's glibc${glibc:+ ($glibc)}, so they will not start on
-anything older. For packages to hand to other people, build them against an old
-glibc instead, which costs a container and nothing else:
-
-  ./packaging/build-in-container.sh
-
-GLIBC
-fi
 
 # The click that finishes the install is Firefox's own "Add"; all this does is
 # put the package in front of it. Backgrounded, because a Firefox that was not

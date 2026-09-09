@@ -2,7 +2,7 @@
 #
 # Build the redistributable packages against an old glibc.
 #
-# `install.sh --bundle` builds them against *this* machine's glibc, which is
+# `./bundle.sh` builds them against *this* machine's glibc, which is
 # the right answer for a package you install here and the wrong one for a
 # package you hand to somebody else. glibc has no forward compatibility: a
 # binary linked on Fedora 44 wants GLIBC_2.39, and on Ubuntu 22.04 that
@@ -28,7 +28,7 @@ die()  { printf '\033[1;31m error:\033[0m %s\n' "$*" >&2; exit 1; }
 # ------------------------------------------------------------------ inner
 #
 # The half that runs inside the container, on a copy of the tree. Same staging
-# as install.sh --bundle does, because the bundler wants the same things
+# as bundle.sh does, because the bundler wants the same things
 # wherever it runs.
 if [[ "${1:-}" == "--inner" ]]; then
   cargo build --release --workspace
@@ -58,7 +58,7 @@ for candidate in podman docker; do
 done
 [[ -n "$ENGINE" ]] || die "neither podman nor docker is installed, and the whole
   point of this script is to build somewhere other than here. Install one, or
-  use ./install.sh --bundle to build against this machine's glibc and accept
+  use ./bundle.sh to build against this machine's glibc and accept
   that the packages will only run on distributions at least this new."
 
 say "Preparing the toolchain image (cached after the first build)"
