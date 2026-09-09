@@ -14,10 +14,18 @@ use tokio::sync::mpsc;
 /// Tell the desktop which application these windows belong to.
 ///
 /// GTK3's Wayland backend takes a toplevel's `app_id` from the *program name*,
-/// not from the GTK application id — so a binary called `mdm` announces itself
-/// as "mdm", nothing matches `io.mdm.app.desktop`, and the panel, having no
-/// entry to take an icon from, draws a generic placeholder. Naming ourselves
-/// after the desktop entry is what makes the two agree.
+/// not from the GTK application id, and a desktop entry claims a window by
+/// matching that against its own `StartupWMClass`. Where the two disagree the
+/// panel has no entry to take an icon from and draws a generic placeholder.
+///
+/// Stated here rather than left to whatever `argv[0]` happened to be, because
+/// it has to be one exact string and there are two desktop entries to satisfy:
+/// the one `install.sh` writes, and the one Tauri's own bundler generates
+/// inside the .deb and .rpm. That second one is not ours to choose --- the
+/// bundler templates it from the binary name and offers no setting for it ---
+/// so it says `StartupWMClass=mdm`, and `mdm` is therefore what this must be.
+/// It was `io.mdm.app` before, which matched the script's entry and not the
+/// package's, so the placeholder simply moved from one install to the other.
 ///
 /// glib is already linked in under Tauri, so this needs no crate of its own.
 /// It must run before GTK starts, which is why it is the first thing `main`
@@ -27,14 +35,20 @@ fn claim_desktop_identity() {
     extern "C" {
         fn g_set_prgname(prgname: *const std::os::raw::c_char);
     }
-    let id = std::ffi::CString::new(IDENTIFIER).expect("no interior nul");
+    let id = std::ffi::CString::new(APP_ID).expect("no interior nul");
     unsafe { g_set_prgname(id.as_ptr()) };
 }
 
-/// The application id: `tauri.conf.json`'s `identifier`, and the base name of
-/// the desktop entry `install.sh` writes. All three have to say the same thing.
+/// What this window calls itself to the desktop.
+///
+/// Deliberately *not* `tauri.conf.json`'s `identifier`, which the two used to
+/// share. That one is a bundle identifier --- reverse-DNS, and what macOS and
+/// Windows record an installation under --- while this is a Linux `app_id`,
+/// whose only job is to equal the `StartupWMClass` of the installed desktop
+/// entry. Tying them together meant a bundle identifier could not be corrected
+/// without silently changing which windows the panel could put an icon on.
 #[cfg(target_os = "linux")]
-const IDENTIFIER: &str = "io.mdm.app";
+const APP_ID: &str = "mdm";
 
 /// Put a fatal startup error in front of whoever launched from a menu, where
 /// stderr goes nowhere.
