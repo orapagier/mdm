@@ -59,6 +59,12 @@ vm.runInContext(
   const RANGE_PARAMS = ${constant("util.js", "RANGE_PARAMS")};
   const URL_FACTS = ${constant("util.js", "URL_FACTS")};
   ${lift("util.js", "decodeTag")}
+  const MANIFEST_MIME = ${constant("util.js", "MANIFEST_MIME")};
+  const FRAGMENT_MIME = ${constant("util.js", "FRAGMENT_MIME")};
+  const MANIFEST_PATH = ${constant("util.js", "MANIFEST_PATH")};
+  const FRAGMENT_PATH = ${constant("util.js", "FRAGMENT_PATH")};
+  ${lift("util.js", "isManifest")}
+  ${lift("util.js", "isFragment")}
   ${lift("util.js", "urlFacts")}
   ${lift("util.js", "pageForStream")}
   // The sniffer's record: tab id -> (url -> what was seen). Insertion order
@@ -71,11 +77,27 @@ vm.runInContext(
   // The browser's headers are fetched per candidate; irrelevant here.
   async function headersForUrl() { return []; }
   ${lift("background.js", "videoCandidates")}
+  const MAX_SNIFFED = ${constant("background.js", "MAX_SNIFFED")};
+  ${lift("background.js", "makeRoom")}
+  /** Fill a tab's record the way a long watch does, and report what survived. */
+  function watchFor(manifest, fragments) {
+    const m = new Map();
+    m.set(manifest.url, manifest);
+    for (const f of fragments) {
+      while (m.size >= MAX_SNIFFED) makeRoom(m);
+      m.set(f.url, f);
+    }
+    tabMedia = new Map([[TAB, m]]);
+    return [...m.keys()];
+  }
   `,
   bg,
   { filename: "background.js (extracted)" }
 );
-const { videoCandidates, setSniffed } = bg;
+const { videoCandidates, setSniffed, watchFor, makeRoom } = bg;
+/** The tab the harness records against, and the sniffer's own ceiling. */
+const TAB = 1;
+const MAX_SNIFFED = Number(constant("background.js", "MAX_SNIFFED"));
 
 const PAGE = "https://www.tiktok.com/";
 /** TikTok's HEVC capability probe: two seconds, played at every page load. */
@@ -240,6 +262,9 @@ vm.runInContext(
     return verdict(info);
   }
   const MANIFEST = ${constant("video.js", "MANIFEST", "", UI)};
+  const MANIFEST_MIME = ${constant("video.js", "MANIFEST_MIME", "", UI)};
+  ${lift("video.js", "isManifestCandidate", "", UI)}
+  ${lift("video.js", "manifestUrl", "", UI)}
   const MEDIA_SECTION = ${constant("video.js", "MEDIA_SECTION", "", UI)};
   const NOT_AN_ID = ${constant("video.js", "NOT_AN_ID", "", UI)};
   ${lift("video.js", "looksSpecific", "", UI)}
@@ -254,7 +279,7 @@ vm.runInContext(
   win,
   { filename: "video.js (extracted)" }
 );
-const { offer, insist, judge, nameFor, asked } = win;
+const { offer, insist, judge, nameFor, asked, isManifestCandidate, manifestUrl } = win;
 
 /* ---------------- harness ---------------- */
 
@@ -1170,6 +1195,157 @@ tests.push(
     setSniffed([]);
     const got = await videoCandidates({ pageUrl: PAGE, topUrl: "", candidates: [] }, 1);
     assert.strictEqual(got.filter((c) => c.url === PAGE).length, 0);
+  })
+);
+
+/* ------------------------------------------------------------------ *
+ * A stream, and the pieces of it the player fetched
+ *
+ * The failure these are about: six and a half minutes into a film on
+ * myflixerz, Download came back with a 1.6 MB file that would not play. It
+ * was one HLS segment. The manifest had been fetched once, before the first
+ * frame, and the fifty-slot record had since been filled with fragments —
+ * so the one entry describing the whole video was the first thing thrown out.
+ * ------------------------------------------------------------------ */
+
+/** The manifest, and a segment shaped like the one that actually came back. */
+const MASTER = "https://100.wowstreamingsofast.lol/hls/index.m3u8?t=Yb3Q";
+const SEGMENT = (n) =>
+  `https://100.wowstreamingsofast.lol/99rR47vp5TCOI3yKaKyr6MbOH55_027NPX3Qo${n}`;
+
+const manifestSeen = { url: MASTER, mime: "application/vnd.apple.mpegurl", kind: "stream", at: 1 };
+const segmentsSeen = (count) =>
+  Array.from({ length: count }, (_, i) => ({
+    url: SEGMENT(i),
+    // No extension anywhere in the address: the type is the only thing that
+    // says this is a slice rather than a small video.
+    mime: "video/mp2t",
+    kind: "media",
+    at: 1000 + i,
+  }));
+
+tests.push(
+  check("the manifest outlives the fragments that crowd it out", () => {
+    const left = watchFor(manifestSeen, segmentsSeen(200));
+    assert.ok(left.includes(MASTER), "the manifest was evicted by its own segments");
+    assert.strictEqual(left.length, MAX_SNIFFED, "the ceiling stopped being a ceiling");
+  }),
+
+  check("with nothing but manifests to lose, the oldest goes", () => {
+    // The rule is "not the manifest while there is a fragment", not "never a
+    // manifest" — a page with more streams than slots still has to give.
+    const m = new Map();
+    m.set("https://a.test/1.m3u8", { url: "https://a.test/1.m3u8", kind: "stream", at: 1 });
+    m.set("https://a.test/2.m3u8", { url: "https://a.test/2.m3u8", kind: "stream", at: 2 });
+    makeRoom(m);
+    assert.deepStrictEqual([...m.keys()], ["https://a.test/2.m3u8"]);
+  }),
+
+  check("a fragment is offered as half a video, and the manifest as the whole", async () => {
+    watchFor(manifestSeen, segmentsSeen(200));
+    const got = await videoCandidates({ pageUrl: EMBED, topUrl: HOST_PAGE, candidates: [] }, TAB);
+    const files = Array.from(got).filter((c) => c.kind === "media");
+    assert.strictEqual(files[0].url, MASTER, `a fragment led the files: ${files[0].url}`);
+    assert.strictEqual(files[0].partial, false, "the manifest was called half a video");
+    assert.ok(
+      files.slice(1).every((c) => c.partial),
+      "a segment was offered as though it were the whole film"
+    );
+  }),
+
+  check("the window offers the stream instead of declining to answer", () => {
+    // A player in an iframe, so nothing identifies the post and the address
+    // reads like a feed's. With only fragments to choose between the window
+    // was right to refuse; with the manifest present there is nothing to
+    // choose between, and refusing sent people to "Download it anyway" and a
+    // file that would not open.
+    const got = offer(
+      [
+        { url: MASTER, mime: "application/vnd.apple.mpegurl", origin: "tab", post: "" },
+        { url: SEGMENT(1), mime: "video/mp2t", origin: "tab", post: "", partial: true },
+        { url: SEGMENT(2), mime: "video/mp2t", origin: "tab", post: "", partial: true },
+      ],
+      true
+    );
+    assert.strictEqual(got.url, MASTER, `the window offered ${got.url}`);
+    assert.ok(got.canStart, "the window still refused to answer");
+    assert.match(got.said, /stream the player is playing/);
+  }),
+
+  check("two streams on one page is a guess again", () => {
+    const got = offer(
+      [
+        { url: MASTER, mime: "application/vnd.apple.mpegurl", origin: "tab", post: "" },
+        { url: "https://100.wowstreamingsofast.lol/other/index.m3u8", origin: "tab", post: "" },
+      ],
+      true
+    );
+    assert.ok(!got.canStart, "the window picked one of two videos for the user");
+    assert.ok(got.anyway, "and offered no way to insist");
+  }),
+
+  check("a stream is named for the file it becomes, not for the playlist", () => {
+    const got = offer(
+      [{ url: MASTER, mime: "application/vnd.apple.mpegurl", origin: "tab", post: "" }],
+      true
+    );
+    assert.strictEqual(
+      got.name,
+      "index.mp4",
+      "the Save box has to name the file that will be there, not the playlist"
+    );
+  }),
+
+  /* A manifest whose address says nothing.
+   *
+   * The address is not always available to be read. A CDN may serve the
+   * playlist from the same shape of bare token as its segments -- no `.m3u8`,
+   * no extension, nothing -- and then `Content-Type` is the only thing that
+   * tells the whole stream from one slice of it. The extension has the
+   * response and can see that; the window has only the candidate, so the
+   * finding is carried on it as `stream` rather than re-derived from a URL
+   * that will not answer. */
+  check("a manifest is still a manifest when its address does not say so", () => {
+    const BARE = "https://100.wowstreamingsofast.lol/hls/9tR4vXQ0zLpKm";
+    const got = offer(
+      [
+        // What the sniffer saw: the type says playlist, the address says
+        // nothing, and `stream` is the extension passing on what it read.
+        {
+          url: BARE,
+          mime: "application/vnd.apple.mpegurl",
+          stream: true,
+          origin: "tab",
+          post: "",
+        },
+        { url: SEGMENT(1), mime: "video/mp2t", origin: "tab", post: "", partial: true },
+        { url: SEGMENT(2), mime: "video/mp2t", origin: "tab", post: "", partial: true },
+      ],
+      true
+    );
+    assert.strictEqual(got.url, BARE, `the window offered ${got.url}`);
+    assert.ok(got.canStart, "a manifest the address did not spell out was not trusted");
+    assert.match(got.said, /stream the player is playing/);
+    // And named for the file it becomes. Without the type being consulted the
+    // stem is the whole token and the extension is guessed from the mime,
+    // which is a playlist type -- the Save box would promise a playlist.
+    assert.strictEqual(got.name, "9tR4vXQ0zLpKm.mp4");
+  }),
+
+  check("the type alone settles it, in both directions", () => {
+    // The window's own reading, for candidates that never went past the
+    // sniffer: a `.m3u8` typed into the box, or one read out of markup.
+    assert.ok(manifestUrl("https://a.test/x/index.m3u8", ""));
+    assert.ok(manifestUrl("https://a.test/token", "application/x-mpegurl"));
+    assert.ok(manifestUrl("https://a.test/token", "audio/mpegurl"), "a video master served as audio");
+    assert.ok(!manifestUrl("https://a.test/token", "video/mp2t"), "a segment read as a playlist");
+    assert.ok(!manifestUrl("https://a.test/clip.mp4", "video/mp4"));
+
+    // And the candidate's, which prefers what the extension already decided.
+    assert.ok(isManifestCandidate({ url: "https://a.test/token", stream: true }));
+    assert.ok(isManifestCandidate({ url: "https://a.test/index.m3u8" }));
+    assert.ok(!isManifestCandidate({ url: "https://a.test/clip.mp4" }));
+    assert.ok(!isManifestCandidate(null));
   })
 );
 

@@ -798,7 +798,14 @@
         button.title = (reply && reply.error) || "";
       }
     } catch (e) {
-      label.textContent = "MDM unavailable";
+      // The same reasoning as the branch above, for a failure that never
+      // reached the background script at all. The commonest one by a distance
+      // is a page still running the content script of an extension that has
+      // been reloaded since it loaded — nothing to do with MDM, which is
+      // running — and "MDM unavailable" sent people to restart the app.
+      label.textContent = /context invalidated/i.test(e.message || "")
+        ? "Reload the page"
+        : e.message || "MDM unavailable";
       button.title = e.message || "";
     }
 

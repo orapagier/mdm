@@ -503,7 +503,37 @@ function verdict(info) {
  * A manifest is a whole stream written down, and yt-dlp reads real formats out
  * of one. A plain media file has nothing to extract.
  */
-const MANIFEST = /\.(?:m3u8|mpd)(?:[?#]|$)/i;
+const MANIFEST = /\.(?:m3u8|m3u|mpd)(?:[?#/]|$)/i;
+
+/** The types a manifest arrives under, for the CDNs whose addresses say nothing. */
+const MANIFEST_MIME = new Set([
+  "application/vnd.apple.mpegurl",
+  "application/x-mpegurl",
+  "audio/mpegurl",
+  "audio/x-mpegurl",
+  "application/dash+xml",
+  "video/vnd.mpeg.dash.mpd",
+]);
+
+/**
+ * Is this candidate a manifest?
+ *
+ * The extension's answer first, because it is the only one made with the
+ * response in hand: `stream` is set from the `Content-Type` the sniffer saw,
+ * and on a CDN that serves its playlist from a bare token that is the only
+ * thing that says so. The address is the fallback, for candidates that never
+ * went past the sniffer — a `.m3u8` typed into the box, or one read out of a
+ * page's markup.
+ */
+function isManifestCandidate(c) {
+  return !!c && (c.stream === true || MANIFEST.test(c.url || ""));
+}
+
+/** The same question about a bare address and the type it came with. */
+function manifestUrl(url, mime) {
+  const type = (mime || "").split(";", 1)[0].trim().toLowerCase();
+  return MANIFEST_MIME.has(type) || MANIFEST.test(url || "");
+}
 
 /**
  * Everything worth asking yt-dlp about, in order, without repeats.
@@ -530,7 +560,7 @@ function sources() {
     ...candidates.filter((c) => c.kind !== "media").map((c) => c.url),
   ];
   const streams = candidates
-    .filter((c) => c.kind === "media" && MANIFEST.test(c.url))
+    .filter((c) => c.kind === "media" && isManifestCandidate(c))
     .map((c) => c.url);
 
   // Deduplicated by what the URL *addresses*, not by how it is spelled. A
@@ -573,7 +603,9 @@ function sources() {
   // Taking the last slot rather than being appended: each extraction is
   // seconds, and the fourth page is worth less than the first stream on any
   // page where the first three did not resolve.
-  const stream = ranked.find((u) => MANIFEST.test(u));
+  // Looked up in `streams` rather than re-tested, so a manifest recognised by
+  // its type and not by its address keeps the slot too.
+  const stream = ranked.find((u) => streams.includes(u) || MANIFEST.test(u));
   if (stream && kept.length && !kept.includes(stream)) kept[kept.length - 1] = stream;
   return kept;
 }
@@ -800,9 +832,16 @@ function directName(url, mime) {
   const stem = (named ? raw.slice(0, dot) : raw).slice(0, MAX_STEM) || "video";
   // A media candidate is a video unless its type says otherwise: it came from
   // a <video> element, or from a response the sniffer saw play as one.
-  const ext = named
-    ? raw.slice(dot + 1)
-    : MIME_EXTENSION[(mime || "").split(";", 1)[0].trim().toLowerCase()] || "mp4";
+  //
+  // A manifest is the exception, and it is named after itself rather than
+  // after its file: `.m3u8` is a playlist of segments, and what lands on disk
+  // is the single file they are rebuilt into. Keeping that extension would put
+  // "index.m3u8" in the Save box and promise something that will not be there.
+  // The stem still stands — it is often the only name the stream has.
+  const ext =
+    named && !manifestUrl(url, mime)
+      ? raw.slice(dot + 1)
+      : MIME_EXTENSION[(mime || "").split(";", 1)[0].trim().toLowerCase()] || "mp4";
   return `${stem}.${ext}`;
 }
 
@@ -839,10 +878,21 @@ function offerDirect(reason, feed) {
   // is one the site said belongs to the post the markup named; and a file
   // known to belong to a *neighbour* comes after everything, since offering it
   // is the one mistake this window cannot apologise its way out of.
+  //
+  // The manifests among them, which are a different kind of thing from the
+  // rest: a manifest is the whole stream written down, and the pieces the
+  // player fetched are slices of what it lists. One of them in a tab is
+  // therefore not a guess between files — it is the stream being played.
+  const manifests = files.filter(isManifestCandidate);
+  const lone = manifests.length === 1 ? manifests[0] : null;
+
   const pick = (want) => files.find((c) => !c.partial && want(c));
   const whole =
     pick((c) => c.origin === "player") ||
     pick((c) => c.post === "this") ||
+    // Ahead of any plain file, because a plain file on a page that streams is
+    // an advert or a preview: the video itself never arrives in one piece.
+    lone ||
     pick((c) => c.post !== "other") ||
     pick(() => true);
   const media = whole || files.find((c) => c.post !== "other") || files[0];
@@ -855,7 +905,7 @@ function offerDirect(reason, feed) {
   // a grab came back with a video five posts further down, downloaded in full
   // and named as though it had been asked for.
   const playing = media.origin === "player";
-  const mine = playing || media.post === "this";
+  const mine = playing || media.post === "this" || media === lone;
 
   // Was there anything to guess *between*?
   //
@@ -870,7 +920,9 @@ function offerDirect(reason, feed) {
   // as you scroll, so the page reads as one video's own while the tab is busy
   // with six. Whole files only — a DASH page fetches a picture track and a
   // sound track for the same video, and that is one video, not two.
-  const loose = files.filter((c) => !c.partial && c.origin !== "player" && c.post !== "this");
+  const loose = files.filter(
+    (c) => !c.partial && c.origin !== "player" && c.post !== "this" && c !== lone
+  );
   // Nothing ties this file to the video that was on screen, and it was one of
   // several it could have been. That is a guess, and a guess does not get to
   // arrive pre-filled under a Start button: the wrong file downloads in full,
@@ -882,7 +934,11 @@ function offerDirect(reason, feed) {
     media,
     // Said plainly when it is half a video, because it will download to 100%
     // and look every bit as finished as one that is not.
-    whole && playing
+    media === lone
+      ? "This is the stream the player is playing, so it is the video on " +
+        "screen. It is fetched piece by piece and rebuilt into one file, at " +
+        "whatever quality the manifest offers."
+      : whole && playing
       ? "This is the file the player itself has open, so it is the video on " +
         "screen — but it comes as it is, with no quality to choose."
       : whole && mine
@@ -1019,6 +1075,12 @@ async function start(paused) {
     // its links per session answers 403, and the download never starts.
     headers: carrying ? carrying.headers || [] : null,
     referrer: carrying ? carrying.referrer || "" : null,
+    // What the sniffer saw the response call itself. A manifest whose address
+    // does not end in .m3u8 — and a CDN is under no obligation to make it —
+    // is only recognisable by its type, and recognising it is the difference
+    // between rebuilding the video and saving a text file full of segment
+    // addresses.
+    mime: carrying ? carrying.mime || "" : null,
   });
   if (id === null) return;
 
