@@ -182,7 +182,7 @@ function classify(req, res, cfg, state) {
   const url = res.url || req.url;
   if (!/^https?:\/\//i.test(url)) return SKIP("non-http scheme");
 
-  // A POST-initiated download cannot be replayed as a GET by aria2; the
+  // A POST-initiated download cannot be replayed as a GET out of process; the
   // server would reject it or hand back a different body.
   if (req.method !== "GET") return SKIP("non-GET method");
 

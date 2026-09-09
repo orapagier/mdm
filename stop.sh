@@ -14,9 +14,6 @@
 # without being asked — see --quit-browser.
 set -euo pipefail
 
-CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/mdm"
-DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/mdm"
-
 # Mirrors paths::runtime_dir(): XDG_RUNTIME_DIR when the session has one, and a
 # uid-suffixed directory under TMPDIR when it does not.
 if [[ -n "${XDG_RUNTIME_DIR:-}" ]]; then
@@ -236,12 +233,6 @@ fi
 
 # ---------------------------------------------------------------- verify
 
-# What actually blocks the next launch is the RPC port: the supervisor waits
-# ten seconds for it and then refuses to start, so check the port rather than
-# trust that the kills landed.
-port="$(sed -n 's/^rpcPort *= *\([0-9]*\).*/\1/p' "$CONFIG_DIR/settings.toml" 2>/dev/null | head -1)"
-port="${port:-6810}"
-
 problems=()
 relaunched=
 note() { # note <name> <pids>
@@ -259,11 +250,6 @@ note mdm-host "$(live_pids mdm-host)"
 note mdm      "$(live_pids mdm)"
 
 [[ -n "$(zombie_pids mdm)" ]] && problems+=("a dead mdm (pid $(commas $(zombie_pids mdm))) has not been collected by its parent")
-if command -v ss >/dev/null; then
-  holder="$(ss -lntpH "sport = :$port" 2>/dev/null |
-              sed -n 's/.*users:(("\([^"]*\)",pid=\([0-9]*\).*/\1 (pid \2)/p' | head -1)"
-  [[ -n "$holder" ]] && problems+=("port $port is still held by $holder")
-fi
 
 if (( ${#problems[@]} )); then
   for p in "${problems[@]}"; do warn "$p"; done

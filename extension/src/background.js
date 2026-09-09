@@ -117,8 +117,9 @@ setInterval(() => {
 
 /**
  * Headers that must not be replayed by the downloader. Hop-by-hop headers are
- * connection-scoped, and Range/Accept-Encoding/Host must be set by aria2 itself
- * — forwarding Range in particular would truncate every segmented download.
+ * connection-scoped, and Range/Accept-Encoding/Host must be set by the fetcher
+ * itself — forwarding Range in particular would truncate every segmented
+ * download.
  */
 const STRIP_HEADERS = new Set([
   "host","connection","keep-alive","proxy-authorization","proxy-connection",
@@ -1393,7 +1394,7 @@ async function videoCandidates(msg, tabId) {
     if (must && !kept.includes(must) && slot >= 0) kept[slot--] = must;
   }
 
-  // A media candidate may be downloaded straight from the window, by aria2,
+  // A media candidate may be downloaded straight from the window, by MDM,
   // outside the browser — so it has to travel with what the browser would have
   // sent for it. Facebook signs its video links per session and answers a bare
   // request with 403, which arrived as a download that simply would not start.

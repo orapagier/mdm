@@ -36,9 +36,9 @@ function sizeOf(headers) {
  *
  * RFC 6249 ("Metalink/HTTP") lets a server answer a download with
  * `Link: <https://mirror/file.iso>; rel=duplicate; pri=1` for every other place
- * the same bytes live. Handing those to aria2 alongside the original lets one
- * file be pulled from several servers at once — the one thing a single-source
- * downloader, IDM included, structurally cannot do.
+ * the same bytes live. Handing those to the fetcher alongside the original
+ * lets one file be pulled from several servers at once — the one thing a
+ * single-source downloader, IDM included, structurally cannot do.
  *
  * Only absolute http(s) URLs are taken: a relative or non-HTTP `rel=duplicate`
  * is either a server bug or someone hoping we will fetch something else.
@@ -69,7 +69,8 @@ function mirrorsOf(headers, originalUrl) {
   }
 
   // A ceiling because a hostile or misconfigured server can list hundreds, and
-  // aria2 would try to open a connection to each.
+  // connections are dealt round-robin across them — every entry kept here is
+  // another host the fetcher would open a connection to.
   return out.sort((a, b) => a.pri - b.pri).slice(0, 8).map((m) => m.url);
 }
 
@@ -307,7 +308,7 @@ function sanitizeFilename(name) {
   // RFC 6266 says a filename parameter carries no path components, and
   // recipients must strip any that appear. Taking the last segment is both
   // what the spec asks for and what stops "../../etc/passwd" from escaping
-  // the download directory once the name reaches aria2's `out` option.
+  // the download directory once the name is joined to it.
   let out = String(name).split(/[/\\]/).pop() || "";
   out = out.replace(RESERVED, "_").trim();
   // A leading dot would hide the file; ".." would escape the directory.
