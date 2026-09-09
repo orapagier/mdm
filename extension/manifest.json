@@ -3,7 +3,7 @@
   "name": "My Download Manager",
   "short_name": "MDM",
   "version": "1.0.0",
-  "description": "Capture every download \u2014 binaries, archives, documents, media \u2014 and hand it to MDM for accelerated multi-connection downloading.",
+  "description": "Capture every download — binaries, archives, documents, media — and hand it to MDM for accelerated multi-connection downloading.",
   "browser_specific_settings": {
     "gecko": {
       "id": "mdm@ramlej.local",
@@ -68,7 +68,8 @@
       "js": [
         "src/polyfill.js",
         "src/content/blob.js",
-        "src/content/preempt.js"
+        "src/content/preempt.js",
+        "src/content/streams.js"
       ],
       "run_at": "document_start",
       "all_frames": true

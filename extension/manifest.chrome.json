@@ -8,6 +8,7 @@
   "minimum_chrome_version": "116",
   "permissions": [
     "webRequest",
+    "declarativeNetRequestWithHostAccess",
     "webNavigation",
     "downloads",
     "nativeMessaging",
@@ -52,7 +53,8 @@
       "js": [
         "src/polyfill.js",
         "src/content/blob.js",
-        "src/content/preempt.js"
+        "src/content/preempt.js",
+        "src/content/streams.js"
       ],
       "run_at": "document_start",
       "all_frames": true
@@ -68,6 +70,20 @@
       ],
       "run_at": "document_idle",
       "all_frames": true
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "pages/handoff.html",
+        "pages/handoff.js",
+        "pages/common.css",
+        "src/polyfill.js"
+      ],
+      "matches": [
+        "http://*/*",
+        "https://*/*"
+      ]
     }
   ]
 }

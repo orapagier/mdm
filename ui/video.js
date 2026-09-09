@@ -993,7 +993,19 @@ function refuse(reason, media) {
   guessed = media;
   say(
     "vid-status",
-    media
+    // A slice of a stream is its own answer and deserves its own sentence.
+    // The message below it is about a *feed* — which post of several the file
+    // belongs to — and on a site that streams one film at a time that reads as
+    // a non-sequitur about something the page does not have. Worse, it is
+    // reassuring in the wrong direction: it says the file might be the wrong
+    // video, when what is actually wrong with it is that it is six seconds of
+    // the right one.
+    media && media.partial
+      ? "This page would not resolve, and the only thing the player has left " +
+        "behind is one segment of the stream — a few seconds of it, not the " +
+        "video. Trying again usually works; playing a moment of the video " +
+        "first gives MDM the playlist to work from."
+      : media
       ? "Nothing here identifies the video on screen. There is a file to be " +
         "had, but a feed loads the posts below the one you are watching, so " +
         "it may well be a different video. Trying again usually works."
@@ -1258,8 +1270,11 @@ $("vid-force").addEventListener("click", () => {
   if (!guessed) return;
   takeFile(
     guessed,
-    "Taken at your word: nothing tied this file to the video that was on " +
-      "screen, so check what arrives.",
+    guessed.partial
+      ? "Taken at your word — but this is one segment of the stream, so what " +
+        "arrives will be a few seconds long and most players will not open it."
+      : "Taken at your word: nothing tied this file to the video that was on " +
+        "screen, so check what arrives.",
     "hint bad"
   );
 });

@@ -84,6 +84,76 @@ const CAPTURE_DEDUPE_MS = 5_000;
 /** tabId -> Map<url, mediaInfo> discovered by the sniffer. */
 const tabMedia = new Map();
 
+/* ------------------------------------------------------------------ *
+ * Keeping the sniffer's record across a stopped service worker
+ *
+ * On Chromium the background is a service worker, and a service worker is
+ * stopped once it has been idle for thirty seconds. Every map above goes with
+ * it. For most of them that is fine and even tidy — a claim on a URL is worth
+ * five seconds, a half-remembered request rather less — but the sniffer's
+ * record is not that kind of state. It is the answer to "what is this page
+ * playing", asked minutes or hours after the answer was learned.
+ *
+ * `storage.session` is memory the browser keeps rather than memory this script
+ * keeps: it lives as long as the browser session, is never written to disk, and
+ * is there again when the worker comes back. Which makes the mirror below the
+ * difference between a Download button that knows what the page is playing and
+ * one that has to say it found nothing.
+ * ------------------------------------------------------------------ */
+
+const MEDIA_KEY = "tabMedia";
+
+/** Available on Chromium and on Firefox 115 and later; absent is survivable. */
+const SESSION = browser.storage && browser.storage.session;
+
+/**
+ * Hydration, awaited by everything that reads the record.
+ *
+ * Resolved rather than rejected on every failure. A sniffer that starts empty
+ * is exactly what the old behaviour was, and no worse; a sniffer that never
+ * starts because a storage read threw would be.
+ */
+const mediaReady = (async () => {
+  if (!SESSION) return;
+  let stored;
+  try {
+    stored = (await SESSION.get(MEDIA_KEY))[MEDIA_KEY];
+  } catch (e) {
+    console.warn("[mdm] could not read back what the page was playing:", e.message);
+    return;
+  }
+  for (const [tabId, items] of Object.entries(stored || {})) {
+    // Only for tabs this worker has not already heard from: an event that woke
+    // the worker can easily be answered before this read comes back, and what
+    // just happened is newer than what was written.
+    if (tabMedia.has(Number(tabId))) continue;
+    tabMedia.set(Number(tabId), new Map((items || []).map((m) => [m.url, m])));
+  }
+})();
+
+/**
+ * Write the record back, at most every couple of seconds.
+ *
+ * Debounced because the thing being recorded is a stream: segments arrive
+ * every few seconds per track, and a storage write per segment would be the
+ * most expensive thing this extension does. Two seconds is far inside the
+ * thirty a worker is given before it is stopped.
+ */
+let persistTimer = null;
+function persistMedia() {
+  if (!SESSION || persistTimer) return;
+  persistTimer = setTimeout(async () => {
+    persistTimer = null;
+    const out = {};
+    for (const [tabId, items] of tabMedia) out[tabId] = [...items.values()];
+    try {
+      await SESSION.set({ [MEDIA_KEY]: out });
+    } catch (e) {
+      console.warn("[mdm] could not save what the page is playing:", e.message);
+    }
+  }, 2000);
+}
+
 function markCaptured(url) {
   recentlyCaptured.set(url, Date.now());
 }
@@ -286,7 +356,10 @@ browser.webRequest.onHeadersReceived.addListener(
     // Firefox lets a blocking listener return a Promise, so the request is
     // held open until the daemon confirms it took the job. Only then is it
     // cancelled, which makes double-downloads impossible.
-    return Native.request({ type: "download", job }, cfg.handoffTimeoutMs)
+    return Native.request(
+      { type: "download", job },
+      handoffDeadline(details.url) || cfg.handoffTimeoutMs
+    )
       .then((reply) => {
         if (reply && reply.accepted) {
           markCaptured(url);
@@ -383,6 +456,9 @@ function learnSingleUse(hosts) {
     browser.webRequest.onBeforeRequest.removeListener(holdForMdm);
   }
   preempting = wanted;
+  // The click net's rule names these hosts, so a list that has emptied leaves
+  // a rule that can never match and would sit there until its timer ran out.
+  if (!singleUseHosts.length) disarmRequestPreempt();
 }
 
 /**
@@ -407,6 +483,27 @@ function publishSingleUse() {
   if (next === publishedSingleUse) return;
   publishedSingleUse = next;
   browser.storage.local.set({ singleUseHosts }).catch(() => {});
+}
+
+/**
+ * How long to let MDM think about a hand-off.
+ *
+ * Ordinarily a hand-off is bookkeeping: the app writes a row and answers, and
+ * anything slower than a second or two is the app not being there. A capture
+ * from a single-use host is not that. The app no longer declines those on
+ * sight — it opens the connection and decides from what comes back, and where
+ * a file comes back that same connection *is* the download. Which means the
+ * answer now waits on a server, and the old deadline expired while the app was
+ * still holding a perfectly good response to a file it had been asked for.
+ *
+ * The ceiling is Chromium's, not ours: `onDeterminingFilename` holds a
+ * download for fifteen seconds, `ensureNative` may spend two of them, and the
+ * app gives up on the server at six. Ten leaves room at both ends.
+ */
+function handoffDeadline(url) {
+  const host = hostOf(url);
+  const listed = host && singleUseHosts.some((h) => hostMatches(host, h));
+  return listed ? 10_000 : 0;
 }
 
 /** How often to ask for it again, at most. */
@@ -467,6 +564,118 @@ async function askApp() {
     return appAnswered;
   } catch {
     return false;
+  }
+}
+
+/* ------------------------------------------------------------------ *
+ * Net 0b — the request net, for the browser that cannot hold a request
+ *
+ * The click net above catches a link. It cannot catch anything else, and on
+ * the hosts this exists for the download button routinely is not a link: a
+ * single-page app renders a <button>, asks its own API where the file is, and
+ * navigates by assigning to `location`. There is no click on an anchor to
+ * cancel, so the click net sees nothing, the browser makes the request, and
+ * the one answer the address had is spent before MDM is told the download
+ * exists. That is exactly the case reported against filekeeper.net in Brave.
+ *
+ * `location` cannot be patched — it is unforgeable, by specification — so
+ * there is no way to catch that navigation in the page. What is left is
+ * declarativeNetRequest, which can redirect a request *before* it is sent. A
+ * redirect is a hold, provided something lets go again, and pages/handoff.js
+ * is what lets go.
+ *
+ * Armed by a click rather than left standing, and that is the whole of the
+ * cost control. A rule matching every navigation to these hosts would send
+ * ordinary browsing through the handoff page too — a flash and a round trip on
+ * every page of the site. So the click net arms it when it sees a click it
+ * cannot itself handle, which is the moment just before a scripted download
+ * navigates and is otherwise nothing like ordinary browsing.
+ * ------------------------------------------------------------------ */
+
+/** Whether this build has the API at all. Chromium only in practice. */
+const CAN_REDIRECT = !!(
+  browser.declarativeNetRequest && browser.declarativeNetRequest.updateSessionRules
+);
+
+/**
+ * One rule, replaced rather than accumulated.
+ *
+ * Session rules rather than dynamic ones: these describe a click that has just
+ * happened, they are meaningless a minute later, and none of them has any
+ * business surviving a browser restart on disk.
+ */
+const PREEMPT_RULE_ID = 9001;
+
+/**
+ * How long an arming lasts.
+ *
+ * Long enough for a download button that asks its own API where the file is
+ * before navigating — a couple of round trips — and short enough that a click
+ * which turned out not to be a download leaves nothing behind. Whichever comes
+ * first, the rule is also removed the instant the handoff page loads.
+ */
+const ARM_MS = 12_000;
+
+let disarmTimer = null;
+
+/**
+ * Put the rule up: the next navigation to a single-use host is MDM's.
+ *
+ * The condition carries every listed host rather than the one clicked, because
+ * the address a download button navigates to is routinely on a different
+ * subdomain from the page the button was on, and the list already matches by
+ * suffix. `\1` is the whole address, handed to the handoff page in the
+ * fragment — the query would have worked for most links and then quietly
+ * truncated the first one whose token contained an `&`.
+ */
+async function armRequestPreempt() {
+  if (!CAN_REDIRECT || CAN_BLOCK || !singleUseHosts.length) return;
+  const target =
+    browser.runtime.getURL("pages/handoff.html") + "#\\1";
+  try {
+    await browser.declarativeNetRequest.updateSessionRules({
+      removeRuleIds: [PREEMPT_RULE_ID],
+      addRules: [
+        {
+          id: PREEMPT_RULE_ID,
+          priority: 1,
+          action: { type: "redirect", redirect: { regexSubstitution: target } },
+          condition: {
+            regexFilter: "^(.+)$",
+            requestDomains: singleUseHosts.map((h) => h.replace(/^\*\./, "")),
+            // A POST cannot be replayed out of process, and redirecting one
+            // would lose the body it carries. The same rule `preemptable`
+            // applies, applied a step earlier.
+            requestMethods: ["get"],
+            resourceTypes: ["main_frame", "sub_frame", "other"],
+          },
+        },
+      ],
+    });
+  } catch (e) {
+    console.warn("[mdm] could not arm the request net:", e.message);
+    return;
+  }
+  if (disarmTimer) clearTimeout(disarmTimer);
+  disarmTimer = setTimeout(() => {
+    disarmTimer = null;
+    disarmRequestPreempt();
+  }, ARM_MS);
+}
+
+/** Take it down again. Safe to call when nothing is up. */
+async function disarmRequestPreempt() {
+  if (!CAN_REDIRECT) return;
+  if (disarmTimer) {
+    clearTimeout(disarmTimer);
+    disarmTimer = null;
+  }
+  try {
+    await browser.declarativeNetRequest.updateSessionRules({
+      removeRuleIds: [PREEMPT_RULE_ID],
+    });
+  } catch (e) {
+    console.warn("[mdm] could not take the request net down:", e.message);
   }
 }
 
@@ -646,7 +855,10 @@ async function offerWebDownload(item) {
     source: "downloads",
   };
 
-  const reply = await Native.request({ type: "download", job }, 4000);
+  const reply = await Native.request(
+    { type: "download", job },
+    handoffDeadline(item.url) || 4000
+  );
   if (!reply || !reply.accepted) return false;
 
   // Claimed only where net 1 can act on it, because net 1 is its only reader:
@@ -1160,6 +1372,9 @@ browser.webRequest.onHeadersReceived.addListener(
   async (details) => {
     await settingsReady;
     if (!cfg.sniffMedia || details.tabId < 0) return;
+    // Before the map is read or written, so a worker that has just been
+    // restarted adds to what the last one learned rather than to nothing.
+    await mediaReady;
     const headers = headerMap(details.responseHeaders);
     const mime = mimeOf(headers);
     const isStream = isManifest(details.url, mime);
@@ -1182,13 +1397,17 @@ browser.webRequest.onHeadersReceived.addListener(
       kind: isStream ? "stream" : "media",
       at: Date.now(),
     });
+    persistMedia();
     updateBadge();
   },
   { urls: ["<all_urls>"], types: ["media", "xmlhttprequest", "other", "main_frame", "sub_frame"] },
   ["responseHeaders"]
 );
 
-browser.tabs.onRemoved.addListener((tabId) => tabMedia.delete(tabId));
+browser.tabs.onRemoved.addListener((tabId) => {
+  tabMedia.delete(tabId);
+  persistMedia();
+});
 
 /**
  * Forget a tab's media when the tab actually goes somewhere else.
@@ -1206,6 +1425,7 @@ browser.tabs.onRemoved.addListener((tabId) => tabMedia.delete(tabId));
 browser.webNavigation.onCommitted.addListener(({ tabId, frameId }) => {
   if (frameId !== 0) return;
   tabMedia.delete(tabId);
+  persistMedia();
   updateBadge();
   // A page load is the moment before a download button is pressed, which
   // makes it the last useful moment to find out whether this site is one MDM
@@ -1224,6 +1444,7 @@ browser.webNavigation.onCommitted.addListener(({ tabId, frameId }) => {
 
 async function updateBadge() {
   try {
+    await mediaReady;
     const tabs = await browser.tabs.query({ active: true, currentWindow: true });
     const tabId = tabs[0]?.id;
     const n = tabId !== undefined ? (tabMedia.get(tabId)?.size ?? 0) : 0;
@@ -1265,6 +1486,7 @@ browser.contextMenus.onClicked.addListener(async (info, tab) => {
     case "mdm-selection":
       return grabFromPage(tab, "selection");
     case "mdm-page-media": {
+      await mediaReady;
       const found = [...(tabMedia.get(tab.id)?.values() ?? [])];
       if (!found.length) return notifyPlain("No media detected on this page yet.");
       return Native.post({ type: "media", items: found, pageUrl: tab.url, title: tab.title });
@@ -1498,7 +1720,57 @@ async function grabVideo(msg, tabId) {
  * lets a video be grabbed without playing it first: none of it needs the
  * player to have started.
  */
+/**
+ * Every manifest the *page* remembers fetching, best frame first.
+ *
+ * src/content/streams.js keeps these out of Resource Timing, which is the one
+ * record of a stream that neither the background's memory limit nor Chromium
+ * stopping the service worker can take away. See the note at the top of that
+ * file for why both of those routinely do.
+ *
+ * Asked of every frame, because the player is usually in one of them and the
+ * manifest was fetched there; ranked with the button's own frame first,
+ * because a streaming page has advertising frames and they fetch streams too.
+ * A frame that does not answer — no content script, a document that has gone
+ * away — is skipped rather than waited on.
+ */
+async function pageStreams(tabId, preferFrameId) {
+  if (tabId < 0) return [];
+  let frames = [];
+  try {
+    frames = (await browser.webNavigation.getAllFrames({ tabId })) || [];
+  } catch {
+    frames = [{ frameId: 0 }];
+  }
+  const order = [...frames].sort((a, b) => {
+    const rank = (f) => (f.frameId === preferFrameId ? 0 : f.frameId === 0 ? 1 : 2);
+    return rank(a) - rank(b);
+  });
+
+  const out = [];
+  const seen = new Set();
+  for (const frame of order.slice(0, MAX_FRAMES_ASKED)) {
+    let reply = null;
+    try {
+      reply = await browser.tabs.sendMessage(
+        tabId,
+        { type: "mdm-page-streams" },
+        { frameId: frame.frameId }
+      );
+    } catch {
+      continue; // no content script in that frame
+    }
+    for (const url of (reply && reply.streams) || []) {
+      if (seen.has(url)) continue;
+      seen.add(url);
+      out.push(url);
+    }
+  }
+  return out;
+}
+
 async function videoCandidates(msg, tabId) {
+  await mediaReady;
   const out = [];
   const seen = new Set([msg.pageUrl || ""]);
   // What the markup around the player said this post is. The content script
@@ -1581,6 +1853,14 @@ async function videoCandidates(msg, tabId) {
   add(msg.topUrl || "", "page");
   for (const c of found.filter((c) => c.kind === "media")) {
     add(c.url, "media", "", false, c.origin || "page");
+  }
+
+  // What the page itself remembers fetching. First among the media, because a
+  // manifest read back out of Resource Timing is the only one that is still
+  // there an hour into a film — see pageStreams, and the note in
+  // src/content/streams.js.
+  for (const url of await pageStreams(tabId, msg.frameId ?? 0)) {
+    add(url, "media", "", true, "page-timing");
   }
 
   // What the player has actually fetched in this tab. A manifest is the whole
@@ -1704,6 +1984,7 @@ browser.runtime.onMessage.addListener(async (msg, sender) => {
       // behind the open native port, which is why this only ever showed on
       // Chromium.
       await settingsReady;
+      await mediaReady;
       return {
         cfg,
         // Asked of the app rather than of the port. A port is opened
@@ -1732,9 +2013,33 @@ browser.runtime.onMessage.addListener(async (msg, sender) => {
           // Only the background script can see both. Empty for a click in the
           // top document, where it would be the page URL a second time.
           topUrl: sender.frameId ? sender.tab?.url || "" : "",
+          // Which frame that was, so the manifests read back out of the page
+          // can be ranked by whose player they belong to. A streaming page
+          // carries advertising frames, and those fetch streams of their own.
+          frameId: sender.frameId ?? 0,
         },
         sender.tab?.id ?? msg.tabId ?? -1
       );
+    // The click net has met a click it cannot handle itself -- a button, or
+    // anything else that will navigate by script -- so the request net goes up
+    // for the few seconds in which that navigation happens. Nothing is decided
+    // here; this only puts MDM in a position to decide.
+    case "armPreempt":
+      armRequestPreempt();
+      return { ok: true };
+
+    // The handoff page has loaded, so the rule that sent it there has done its
+    // job. Taken down before that page asks anything, so the navigation it
+    // makes afterwards -- whichever way the answer goes -- cannot be redirected
+    // back to it.
+    case "disarmPreempt":
+      await disarmRequestPreempt();
+      return { ok: true };
+
+    // A request the browser was about to make and has not: the redirect got in
+    // front of it, so this address is unspent and MDM's request is the first.
+    // The same decision as the click net's, from the same evidence.
+    case "preemptHeld":
     case "preemptClick": {
       // The click net's half of net 0 — src/content/preempt.js has already
       // cancelled the click, so this decides whether the browser is sent after

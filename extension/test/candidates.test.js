@@ -76,6 +76,14 @@ vm.runInContext(
   }
   // The browser's headers are fetched per candidate; irrelevant here.
   async function headersForUrl() { return []; }
+  // Hydration of the sniffer's record from session storage. Already done here:
+  // the record is set directly by setSniffed above.
+  const mediaReady = Promise.resolve();
+  // What the page itself remembers fetching, read back out of Resource Timing
+  // by src/content/streams.js. Set per test; empty is the ordinary case.
+  let pageTiming = [];
+  function setPageStreams(urls) { pageTiming = urls; }
+  async function pageStreams() { return pageTiming; }
   ${lift("background.js", "videoCandidates")}
   const MAX_SNIFFED = ${constant("background.js", "MAX_SNIFFED")};
   ${lift("background.js", "makeRoom")}
@@ -94,7 +102,7 @@ vm.runInContext(
   bg,
   { filename: "background.js (extracted)" }
 );
-const { videoCandidates, setSniffed, watchFor, makeRoom } = bg;
+const { videoCandidates, setSniffed, setPageStreams, watchFor, makeRoom } = bg;
 /** The tab the harness records against, and the sniffer's own ceiling. */
 const TAB = 1;
 const MAX_SNIFFED = Number(constant("background.js", "MAX_SNIFFED"));
@@ -285,20 +293,31 @@ const { offer, insist, judge, nameFor, asked, isManifestCandidate, manifestUrl }
 
 let passed = 0;
 const failures = [];
+/**
+ * Run one case, after the one before it has finished.
+ *
+ * Sequential on purpose. Every `check` below is evaluated where it is written —
+ * they are the arguments to one call — so the bodies all start before any of
+ * them finishes, and they share one sniffer record between them: `setSniffed`
+ * writes it, `videoCandidates` reads it. That was harmless only for as long as
+ * `videoCandidates` never awaited anything, which made it run to completion
+ * before the next case could touch the record. It awaits now, and every case
+ * promptly began reading whatever the *last* one had set up.
+ *
+ * So the cases are chained rather than raced. The fragility was in this
+ * harness rather than in what it tests, and this is where it is fixed.
+ */
+let queue = Promise.resolve();
 function check(name, fn) {
-  try {
-    const r = fn();
-    if (r && typeof r.then === "function") {
-      return r.then(
-        () => passed++,
-        (e) => failures.push(name + " — " + e.message)
-      );
+  queue = queue.then(async () => {
+    try {
+      await fn();
+      passed++;
+    } catch (e) {
+      failures.push(name + " — " + e.message);
     }
-    passed++;
-  } catch (e) {
-    failures.push(name + " — " + e.message);
-  }
-  return Promise.resolve();
+  });
+  return queue;
 }
 
 /* The lifted code builds its arrays in the vm's realm, where they are not
@@ -1251,6 +1270,38 @@ tests.push(
       files.slice(1).every((c) => c.partial),
       "a segment was offered as though it were the whole film"
     );
+  }),
+
+  check("the page's own record of the manifest survives a restarted worker", async () => {
+    // The reported failure, reproduced. An hour into a film, Chromium has
+    // stopped and restarted the service worker many times over: the sniffer
+    // holds only what has arrived since the last restart, which is segments.
+    // The manifest was fetched once before the first frame and is long gone
+    // from everything the background knows.
+    setSniffed(segmentsSeen(6));
+    // The page has it, because Resource Timing is kept by the document rather
+    // than by us. src/content/streams.js reads it back.
+    setPageStreams([MASTER]);
+    const got = await videoCandidates({ pageUrl: EMBED, topUrl: HOST_PAGE, candidates: [] }, TAB);
+    const files = Array.from(got).filter((c) => c.kind === "media");
+    assert.strictEqual(
+      files[0].url,
+      MASTER,
+      `a segment was offered as the film: ${files[0] && files[0].url}`
+    );
+    assert.strictEqual(files[0].partial, false, "the manifest was called half a video");
+    setPageStreams([]);
+  }),
+
+  check("a manifest the page remembers is not offered twice", async () => {
+    // Both nets can see the same stream: the sniffer watched the response go
+    // past and the page recorded the request. One entry, either way.
+    setSniffed([manifestSeen]);
+    setPageStreams([MASTER]);
+    const got = await videoCandidates({ pageUrl: EMBED, topUrl: HOST_PAGE, candidates: [] }, TAB);
+    const masters = Array.from(got).filter((c) => c.url === MASTER);
+    assert.strictEqual(masters.length, 1, "the manifest was listed twice");
+    setPageStreams([]);
   }),
 
   check("the window offers the stream instead of declining to answer", () => {

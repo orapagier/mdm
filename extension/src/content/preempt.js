@@ -142,6 +142,32 @@ function goAnyway(href, newTab) {
  */
 const CLICK_TIMEOUT_MS = 9000;
 
+/**
+ * Ask the background to put the request net up for a few seconds.
+ *
+ * For every click this file cannot itself act on. A download button on these
+ * hosts is routinely not a link — a single-page app renders a <button>, asks
+ * its own API where the file is, and then assigns to `location`, which cannot
+ * be patched and so cannot be caught here. What can be caught is the request
+ * that assignment makes, and src/background.js holds the only instrument that
+ * catches it. This is the signal that one is about to happen.
+ *
+ * Fire and forget, deliberately: it is on the click path, and a click must not
+ * wait on a round trip to decide whether to be a click.
+ */
+function armRequestNet() {
+  try {
+    browser.runtime.sendMessage({ type: "armPreempt" }).catch(() => {});
+  } catch {
+    /* the background is gone; the browser gets the download, as ever */
+  }
+}
+
+/** Is the document this click happened in on a host that spends its links? */
+function onSingleUsePage() {
+  return onSingleUseHost(location.href);
+}
+
 async function handle(event) {
   if (CAN_BLOCK) return;
   if (event.defaultPrevented) return;
@@ -149,9 +175,17 @@ async function handle(event) {
   if (event.altKey) return; // the modifier that means "save it", not "open it"
 
   const link = linkFor(event);
-  if (!link) return;
-  const href = link.href;
-  if (!onSingleUseHost(href)) return;
+  const href = link ? link.href : "";
+
+  // Everything this file cannot cancel itself, on a page where a download may
+  // be about to be started by script. The two cases are a click on no link at
+  // all — a button — and a click on a link pointing somewhere ordinary, which
+  // on these sites is how the download page itself is reached and is followed
+  // moments later by the download.
+  if (!href || !onSingleUseHost(href)) {
+    if (onSingleUsePage()) armRequestNet();
+    return;
+  }
 
   const newTab = wantsNewTab(event, link);
   event.preventDefault();
@@ -178,4 +212,17 @@ async function handle(event) {
 if (!CAN_BLOCK) {
   addEventListener("click", handle, true);
   addEventListener("auxclick", handle, true);
+  /* A form is the other way these hosts start a download, and the classic one:
+   * the download page posts `op=download2` and the server answers with a
+   * redirect to the address the file is actually on. Nothing here can cancel
+   * that — a POST cannot be replayed out of process — but the *redirect* is a
+   * GET, and a GET is what the request net is waiting for. So the submit is
+   * left alone and the net goes up behind it. */
+  addEventListener(
+    "submit",
+    () => {
+      if (onSingleUsePage()) armRequestNet();
+    },
+    true
+  );
 }

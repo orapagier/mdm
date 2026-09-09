@@ -395,29 +395,86 @@ async fn dispatch(
                 }
             };
             let url = job.url.clone();
-            // A host that has already been caught handing out one-time
-            // addresses is refused here rather than attempted and failed.
-            // Accepting is what cancels the browser's download, and the
-            // browser's request is the only one such an address will answer —
-            // so the useful thing MDM can do with this one is decline it. The
-            // extension leaves a download it was not allowed to place with the
-            // browser, which is exactly where it will work.
+            // A host caught handing out one-time addresses is asked, not
+            // assumed about.
+            //
+            // The answer here used to be to decline outright. The browser has
+            // already spent the address by the time an ordinary capture
+            // arrives, so a second request fetches the landing page, and the
+            // one useful thing left is to let the browser finish what it
+            // started. That is true of an address which really is good for a
+            // single request — and it was quite wrong about the hosts that
+            // merely looked like one. A host lands on this list the first time
+            // any capture from it comes back a page, and a page comes back for
+            // several reasons that have nothing to do with the address being
+            // spent: a cooldown between two downloads, a request that went out
+            // without the referrer the host wants, a CDN node that had not yet
+            // heard of the token. One unlucky download was enough to put a
+            // host on the list, and everything from it afterwards went to the
+            // browser — which is precisely the complaint that this is a
+            // download manager which does not manage the download.
+            //
+            // So it tries, and `preempt` is the instrument that makes trying
+            // safe. It opens the connection, decides from the response rather
+            // than from the address, and where a file comes back it downloads
+            // on *that* connection instead of opening a second one. The host is
+            // asked exactly once more, and if it answers with the file then the
+            // answer is the download. A page still means what it always meant.
             //
             // Only where the browser has in fact already asked, which is what
             // `spends_the_link` reads off the job. A link the user right-clicked
             // has not been requested by anything, so MDM's request is the first
-            // one and the refusal would be turning down the one job on such a
-            // host it can actually do — the whole reason the address is
-            // single-use is that whoever asks first gets the file.
+            // one and it goes down the ordinary path below.
             if job.spends_the_link() {
                 if let Some(host) = engine.single_use_host(&url) {
-                    log::info!("leaving {url} to the browser: {host} serves single-use links");
-                    return json!({
-                        "accepted": false,
-                        "error": format!(
-                            "{host} serves single-use links — leaving this to the browser"
-                        ),
-                    });
+                    // Bounded well inside the extension's own deadline. It is
+                    // holding the browser's download open while this is
+                    // decided, and a server that will not answer must not be
+                    // the reason the file is lost.
+                    let held = tokio::time::timeout(
+                        std::time::Duration::from_secs(6),
+                        engine.preempt(job.clone()),
+                    )
+                    .await;
+                    match held {
+                        // Running already, on the connection that was opened to
+                        // find out. Focus rather than Started: `Started` is the
+                        // offer of a row waiting on a Start button, and there is
+                        // nothing left here to decide.
+                        Ok(Ok(Some(id))) => {
+                            let _ = ui.send(UiRequest::Focus).await;
+                            return json!({ "accepted": true, "downloadId": id });
+                        }
+                        // The address really was spent: what came back is the
+                        // page this host hands anyone arriving without a live
+                        // token. The browser's own request is still the one
+                        // holding the file, so it keeps it.
+                        Ok(Ok(None)) => {
+                            log::info!(
+                                "leaving {url} to the browser: {host} had already spent \
+                                 the link on the browser's own request"
+                            );
+                            return json!({
+                                "accepted": false,
+                                "error": format!(
+                                    "{host} serves single-use links — leaving this to the browser"
+                                ),
+                            });
+                        }
+                        Ok(Err(e)) => {
+                            log::warn!("could not take {url} back from {host}: {e:#}");
+                            return json!({ "accepted": false, "error": format!("{e:#}") });
+                        }
+                        Err(_) => {
+                            log::warn!(
+                                "{host} did not answer in time; leaving {url} to the browser"
+                            );
+                            return json!({
+                                "accepted": false,
+                                "error": "the server did not answer in time",
+                            });
+                        }
+                    }
                 }
             }
             // Taking it off the browser's hands is not the same as agreeing to

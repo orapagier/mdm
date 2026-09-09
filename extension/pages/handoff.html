@@ -1,0 +1,16 @@
+<meta charset="utf-8">
+<title>My Download Manager</title>
+<link rel="stylesheet" href="common.css">
+<style>
+  body { padding: 24px; display: flex; align-items: center; justify-content: center;
+         min-height: 100vh; }
+  .card { max-width: 420px; text-align: center; }
+  .url { color: var(--muted); font-size: 11px; word-break: break-all; margin-top: 10px; }
+</style>
+<div class="card">
+  <h1>Handing this to MDM…</h1>
+  <p class="hint" id="status">Asking the app whether this address is a file.</p>
+  <p class="url" id="url"></p>
+</div>
+<script src="../src/polyfill.js"></script>
+<script src="handoff.js"></script>

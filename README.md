@@ -151,6 +151,28 @@ held before it is sent, MDM makes it instead, and the browser's request — stil
 held, never sent — is cancelled only if what came back was a file. So there is
 exactly one request, and it is MDM's.
 
+**The list says who to ask carefully, not who to give up on.** It used to do
+both: a capture from a listed host was declined on sight, on the reasoning that
+the browser had already spent the address and a second request would only fetch
+the landing page. That is true of an address which really is good for one
+request, and quite wrong about the hosts that merely look like one. A host lands
+on this list the first time *any* capture from it comes back a page, and a page
+comes back for several reasons that have nothing to do with the address being
+spent — a cooldown between two downloads, a request that went out without the
+referrer the host wants, a CDN node that had not yet heard of the token. One
+unlucky download put a host on the list, and everything from it afterwards went
+to the browser for good.
+
+So a listed host is asked rather than assumed about, and `Engine::preempt` is
+what makes asking safe: it opens the connection, decides from the response
+rather than from the address, and where a file comes back it downloads on *that
+same connection* instead of opening another. The address is asked exactly once
+more. If it answers with the file, that answer is the download and the browser's
+copy is cancelled; if it answers with a page then the link really was spent, MDM
+declines, and the browser's own request — the one actually holding the file —
+keeps it. `crates/mdm-core/tests/single_use.rs` runs both halves against a
+loopback server that really does spend its links.
+
 Two things follow from there being only one:
 
 * **One connection.** A link that answers once cannot be probed and then
@@ -182,8 +204,35 @@ twice; it is only the *file* links on these hosts that answer once. Where the
 browser can hold the real request it does, and the click net stays out of the
 way.
 
-What it does not catch is a download the page starts by script rather than by a
-link — those stay with the browser, which is where they still work.
+**And a second Chromium net, for the download that is not a link at all.** The
+click net can only cancel a click on an `<a>`, and on these hosts the download
+button routinely is not one: a single-page app renders a `<button>`, asks its
+own API where the file is, and navigates by assigning to `location`. There is
+no anchor to cancel, and `location` cannot be patched — it is unforgeable, by
+specification — so nothing in the page can catch that navigation. This is the
+reported failure on filekeeper.net in Brave: MDM saw nothing, the browser made
+the request, and the one answer the address had was gone before MDM was told a
+download existed.
+
+What can catch it is `declarativeNetRequest`, which redirects a request *before*
+it is sent — and a redirect is a hold, provided something lets go again.
+`pages/handoff.js` is what lets go: it disarms the rule the moment it loads, so
+its own navigation cannot be redirected back to it; asks MDM; and then either
+goes back to the page (MDM has the file) or navigates to the address after all
+(it was a page, or MDM is not running, or nothing answered). Every path out ends
+in one of those two, because a tab left sitting on an extension page is a
+navigation the user asked for and did not get.
+
+The rule is *armed by a click* rather than left standing, and that is the whole
+of the cost control. A standing rule would send ordinary browsing on these hosts
+through the handoff page too — a flash and a round trip per page. So the click
+net arms it when it meets a click it cannot itself handle, which is the moment
+just before a scripted download navigates and is otherwise nothing like ordinary
+browsing. A form submit arms it as well: the classic file-host flow posts
+`op=download2` and the server answers with a redirect, and while a POST cannot
+be replayed out of process, the redirect it produces is a GET and a GET is what
+the rule is waiting for. The arming lasts twelve seconds, or until the handoff
+page takes it down, whichever comes first.
 
 **A link nothing has followed is still good.** The refusal above is about a
 link the browser has already spent. Right-click ▸ *Download with MDM*, an
@@ -310,6 +359,51 @@ Recognising one is a matter of the response as well as the address. A CDN is
 under no obligation to end a playlist in `.m3u8` or a segment in `.ts`, and the
 one this was written against names neither — its segments are a bare token and
 only `Content-Type: video/mp2t` says what they are.
+
+**But the record has to still exist to be ranked, and on Chromium it did not.**
+Manifests surviving their own segments is a fix inside a map that the browser
+throws away. A Manifest V3 background is a service worker, stopped once it has
+been idle for thirty seconds, and every map in it goes with it. A film is two
+hours long. Press Download an hour in and the worker has been stopped and
+restarted many times over: what it holds is whatever arrived since the last
+restart, which is segments, and the one address describing the whole video was
+recorded before the first frame and lost with the first restart. So the
+reported download — myflixerz.day, played in an embedded player, 2.7 MB, six
+seconds of the film — was not a ranking failure at all. There was nothing left
+to rank.
+
+Two fixes, because the record fails in two ways:
+
+* **The sniffer's record is kept where a stopped worker cannot lose it.**
+  `storage.session` is memory the browser holds rather than memory the script
+  holds: it lives as long as the browser session, is never written to disk, and
+  is there again when the worker comes back. The map is hydrated from it at
+  startup and mirrored back on a two-second debounce — debounced because the
+  thing being recorded is a stream, and a storage write per segment would be
+  the most expensive thing the extension does.
+* **The page is asked what it fetched.** `src/content/streams.js` runs at
+  `document_start` in every frame and keeps the manifests out of Resource
+  Timing, which is a per-document record the browser maintains for the life of
+  the document. It does not care that the background was stopped, it does not
+  evict the oldest entry to make room, and it was populated whether or not
+  anything was watching. In every frame because a streaming site serves its
+  player in an iframe from another origin and the manifest is fetched *there* —
+  the document in the address bar has no record of it at all. The frame the
+  Download button was pressed in is ranked first, because a streaming page
+  carries advertising frames and they fetch streams of their own.
+
+The two nets recognise a manifest differently on purpose, and between them
+cover both ways a CDN can hide one: the sniffer goes by the response's
+`Content-Type`, so it catches a playlist served from a path that is nothing but
+a token, and the page-side recorder goes by the address, so it catches one the
+background never saw. A manifest both of them found is listed once.
+
+When nothing turns one up, the window now says which failure it is. Offering a
+fragment used to come with a sentence about a *feed* — which post of several
+the file belongs to — and on a site streaming one film that reads as a
+non-sequitur about something the page does not have. Worse, it is reassuring in
+the wrong direction: it says the file may be the wrong video, when what is
+actually wrong with it is that it is six seconds of the right one.
 
 On a feed the post is identified rather than guessed at, because on the worst
 of them nothing else survives. TikTok's home feed, measured on a live page,
@@ -910,13 +1004,28 @@ cargo test                              # engine logic: categories, scheduling, 
 node extension/test/capture.test.js     # capture rules and header parsing
 node extension/test/permalink.test.js   # finding the post a feed video sits in
 node extension/test/candidates.test.js  # which URL, and which file, a grab means
+node extension/test/streams.test.js     # what counts as a manifest in a page's own record
 ```
+
+`cargo test` includes `tests/single_use.rs`, which runs the whole single-use
+decision — take it, or leave it to the browser — against a loopback server that
+really does spend its links. It needs no network: the failure it is about is a
+*decision*, and a decision can be put in front of a server that behaves the way
+the real ones do.
 
 If you have moved or renamed the checkout, run `cargo clean` first. Cargo
 records absolute paths in `target/` and cannot relocate that cache, so the
 stale entries still look fresh and the build follows one of them to a directory
 that is gone — surfacing as `tauri-build` failing to read a plugin permission
 file. `install.sh` detects this and cleans for you.
+
+The candidate tests run one case at a time rather than all at once, and that is
+load-bearing rather than tidy: every `check` in that file is evaluated where it
+is written, so the bodies all start before any of them finishes, and they share
+one sniffer record between them. That was harmless only for as long as
+`videoCandidates` awaited nothing and so ran to completion before the next case
+could touch the record. It awaits now, and every case promptly began reading
+whatever the last one had set up.
 
 The capture tests load `util.js` and `capture.js` in a bare VM context — those
 two files hold no `browser.*` reference precisely so the decision logic can be
