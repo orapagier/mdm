@@ -140,8 +140,9 @@ if [ -n "$EXT_DIR" ]; then
     echo "     Chromium: chrome://extensions, Developer mode, Load unpacked,"
     echo "               then pick $EXT_DIR/mdm-chrome"
   fi
-  echo "     Or press \"Browser extension\" in the app, which opens each one"
-  echo "     in the right browser for you."
+  echo "     Or let the app show you: it offers this the first time it is"
+  echo "     opened, and afterwards it is in Settings under \"Browser"
+  echo "     extension\"."
 fi
 
 # The launcher and its icon, so the app appears in the menu without a logout.

@@ -11,7 +11,6 @@
 <header class="toolbar">
   <button id="btn-add" class="primary">Add URL</button>
   <button id="btn-video">Add video…</button>
-  <button id="btn-extension">Browser extension</button>
   <div class="sep"></div>
   <button id="btn-pause-all">Pause all</button>
   <button id="btn-resume-all">Resume all</button>
@@ -115,12 +114,20 @@
 
       <label>Chrome, Brave, Edge, Vivaldi
         <span class="path" id="ext-chrome-path">—</span>
-        <button type="button" id="ext-chrome" class="primary">Install</button>
+        <button type="button" id="ext-chrome" class="primary">Show me how</button>
       </label>
-      <p class="hint">Opens your browser at its extensions page and this folder
-        beside it. Chromium will not let a program add an extension on its own,
-        so the last two steps are yours: turn on <b>Developer mode</b>, then
-        <b>Load unpacked</b> and pick the folder.</p>
+      <p class="hint">Chromium will not let a program add an extension on its
+        own, and there is no one-click equivalent of Firefox’s. It is four steps
+        by hand, and this shows them with the folder to paste in.</p>
+      <ol class="steps" id="ext-chrome-steps" hidden>
+        <li>Open a new tab and go to <code>chrome://extensions</code>. Typing it
+          is the only way in — a browser will not open that address for a
+          program that asks.</li>
+        <li>Turn on <b>Developer mode</b>, top right.</li>
+        <li>Click <b>Load unpacked</b>.</li>
+        <li>Paste this folder into the dialog and choose it:
+          <code class="path" id="ext-chrome-folder">—</code></li>
+      </ol>
     </div>
 
     <p class="hint" id="ext-status"></p>
@@ -135,6 +142,13 @@
 <dialog id="dlg-settings">
   <form method="dialog">
     <h2>Settings</h2>
+
+    <h3>Browser extension</h3>
+    <p class="hint">The half that captures downloads out of the browser. It
+      ships with every way of installing MDM — there is nothing to download.
+      <button type="button" id="btn-extension">Install or check it…</button></p>
+
+    <h3>Downloads</h3>
     <div class="grid">
       <label>Download folder
         <span class="path-row">

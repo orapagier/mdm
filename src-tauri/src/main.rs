@@ -210,7 +210,7 @@ fn main() {
             commands::ytdlp_available,
             commands::extension_assets,
             commands::install_firefox_extension,
-            commands::open_chromium_extensions,
+            commands::chromium_browsers,
             commands::install_hint,
             commands::open_path,
             commands::pick_directory,

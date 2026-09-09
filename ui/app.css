@@ -315,6 +315,23 @@ dialog menu {
    under the label rather than starting a block of their own. */
 .ext-rows .hint { margin: 2px 0 14px; }
 
+/* The Chromium steps. Numbered because they are done in order and the order
+   matters -- Developer mode has to be on before "Load unpacked" is there to
+   click -- and hidden until asked for, so the dialog does not open as a wall
+   of instructions for the Firefox user who needs none of them. */
+.steps { margin: 2px 0 14px; padding-left: 20px; color: var(--muted); font-size: 12px; }
+.steps li { margin: 4px 0; }
+.steps code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  background: var(--card);
+  border-radius: 4px;
+  padding: 1px 4px;
+}
+/* The folder is the one thing here that gets pasted, so it is on its own line
+   and wraps rather than being clipped: a path that cannot be read whole is a
+   path that cannot be typed. */
+.steps code.path { display: block; margin-top: 3px; padding: 4px 6px; overflow-wrap: anywhere; }
+
 /* A hint that is reporting something that did not work. The dialog says what
    to do next either way -- a browser that could not be started is not a dead
    end, it is the same two steps done by hand -- so this colours the line

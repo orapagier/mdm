@@ -807,21 +807,33 @@ one thing a release build exists to avoid.
 
 Three things now point at it, because people arrive from three directions:
 
-* **The app.** A **Browser extension** button in the main toolbar — not inside
-  Settings, because it is the first thing a new install needs and a thing
-  nobody can find is the problem being solved. It finds the copies on this
-  machine, whatever shape the install was, and offers each: Firefox's button
-  hands the `.xpi` to Firefox, which is the click that installs it; the
-  Chromium one opens the unpacked folder *and* the browser's own extensions
-  page, side by side. `extension_assets` in `src-tauri/src/commands.rs` does
-  the finding — the resource directory first, because that one is right by
-  construction, then each package layout in turn.
+* **The app.** It offers the extension by itself the first time it is opened,
+  and afterwards keeps the same dialog in **Settings ▸ Browser extension**.
+  That is a correction: the button lived in the main toolbar, on the reasoning
+  that it is the first thing a new install needs — true, and the wrong
+  conclusion. It is needed exactly once, and a permanent button for a one-time
+  job sat among the four that get pressed daily. The once is covered where it
+  belongs now: `install.sh` asks as the last thing it does, the package prints
+  it, and the app raises the dialog on a first run.
 
-  Chromium gets two steps rather than one because it will not install an
-  unpacked extension on a program's say-so, which is the correct answer to
-  software offering to add code to your browser. "Load unpacked" needs a human
-  at that page with that folder in a file dialog, so both are put in front of
-  you rather than described in a paragraph.
+  `extension_assets` in `src-tauri/src/commands.rs` finds the copies on this
+  machine, whatever shape the install was — the resource directory first,
+  because that one is right by construction, then each package layout in turn.
+  Firefox's button hands the `.xpi` to Firefox, which is the click that
+  installs it.
+
+  Chromium gets instructions rather than a button, and that too is a
+  correction. The button used to open the browser at `chrome://extensions` and
+  the folder in a file manager; neither did what it looked like. A Chromium
+  browser refuses a `chrome://` address passed on the command line — the check
+  is deliberate, it is what stops a program talking a browser into opening its
+  own settings — so the browser started, ignored the address, and showed an
+  empty new tab. Two windows arrived and no extension. There is no supported
+  way to install an unpacked extension without a person doing it, which is the
+  correct answer to software offering to add code to your browser, so the
+  honest interface is the four steps and the folder to paste, with the names of
+  the Chromium browsers actually on this machine read off by
+  `chromium_browsers`.
 * **The package.** `linux/postinstall.sh` prints where the two copies landed as
   it registers the native host, which is the moment the question is being
   asked. `install.sh` does the same for a source install, and copies both out

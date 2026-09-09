@@ -369,28 +369,31 @@ pub fn install_firefox_extension(path: String) -> Cmd<()> {
     Err("Firefox was not found on this machine".into())
 }
 
-/// Open a Chromium browser on its extensions page.
+/// Which Chromium browsers are on this machine, by the name a person calls them.
 ///
-/// There is no equivalent of Firefox's one click here, and it is not an
-/// oversight: Chromium will not install an unpacked extension on anybody's
-/// say-so but the user's, which is the correct answer to a program offering to
-/// add code to your browser. "Load unpacked" is the whole of the supported
-/// path, and it needs a human at the extensions page with the folder in a file
-/// dialog.
+/// It used to open one of them at `chrome://extensions`, and that never worked.
+/// Chromium refuses to navigate to a `chrome://` address given on the command
+/// line — the check is deliberate, it is what stops a program talking a browser
+/// into opening its own settings — so the browser started, ignored the address
+/// and showed a new tab. Which looked, correctly, like MDM opening an empty
+/// window for no reason and calling it the extensions page. Reported as exactly
+/// that.
 ///
-/// So this does the half that can be automated — puts the browser on that page
-/// — and the caller opens the folder beside it, leaving the two things the
-/// user must do in front of them rather than described in a paragraph.
+/// There is no supported way to do the thing that was being attempted, and
+/// there is no point attempting it badly. Chromium will not install an unpacked
+/// extension on a program's say-so — which is the right answer to software
+/// offering to add code to your browser — so `Load unpacked` is the whole of
+/// the path and it needs a person at the keyboard. So this stops pretending and
+/// returns what is actually useful: the names to put in the instructions, so
+/// they say "Brave" to somebody using Brave rather than listing four browsers
+/// and leaving them to find themselves in it.
 ///
-/// Returns the browser it opened, because the answer changes what the user is
-/// then looking at, and "Brave is open at its extensions page" is a different
-/// instruction from "Chrome is".
+/// Empty is a real answer and the caller says so: no Chromium browser here.
 #[cfg(unix)]
 #[tauri::command]
-pub fn open_chromium_extensions() -> Cmd<String> {
+pub fn chromium_browsers() -> Vec<String> {
     // Brave first among equals: it is the one people arrive from when Firefox
-    // is not the browser they use. Beyond that the order is arbitrary, and the
-    // first one installed wins.
+    // is not the browser they use. Beyond that the order is arbitrary.
     const BROWSERS: [(&str, &str); 8] = [
         ("brave-browser", "Brave"),
         ("brave", "Brave"),
@@ -401,48 +404,37 @@ pub fn open_chromium_extensions() -> Cmd<String> {
         ("microsoft-edge", "Edge"),
         ("vivaldi", "Vivaldi"),
     ];
+    let mut found: Vec<String> = Vec::new();
     for (bin, name) in BROWSERS {
-        // A running browser takes the URL and opens a tab; one that is not
-        // running starts. Either way the page it lands on is the one with the
-        // "Load unpacked" button on it.
-        if std::process::Command::new(bin)
-            .arg("chrome://extensions")
-            .spawn()
-            .is_ok()
-        {
-            return Ok(name.to_string());
+        // Looked for rather than started. Two launchers for one browser --
+        // `brave-browser` and `brave` -- must not become two names in a list a
+        // person is reading.
+        if mdm_core::which::which(bin).is_some() && !found.iter().any(|n| n == name) {
+            found.push(name.to_string());
         }
     }
-    Err("no Chromium browser was found on this machine".into())
+    found
 }
 
 #[cfg(windows)]
 #[tauri::command]
-pub fn open_chromium_extensions() -> Cmd<String> {
+pub fn chromium_browsers() -> Vec<String> {
     const BROWSERS: [(&str, &str); 5] = [
         (r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe", "Brave"),
         (r"C:\Program Files\Google\Chrome\Application\chrome.exe", "Chrome"),
         (r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe", "Chrome"),
         (r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe", "Edge"),
-        ("chrome.exe", "Chrome"),
+        (r"C:\Program Files\Vivaldi\Application\vivaldi.exe", "Vivaldi"),
     ];
-    for (bin, name) in BROWSERS {
-        if std::process::Command::new(bin)
-            .arg("chrome://extensions")
-            .spawn()
-            .is_ok()
-        {
-            return Ok(name.to_string());
+    let mut found: Vec<String> = Vec::new();
+    for (path, name) in BROWSERS {
+        if std::path::Path::new(path).exists() && !found.iter().any(|n| n == name) {
+            found.push(name.to_string());
         }
     }
-    Err("no Chromium browser was found on this machine".into())
+    found
 }
 
-/// The command that installs `package` on this machine.
-///
-/// The frontend cannot read `/etc/os-release`, and a hint that says `dnf` on a
-/// Debian desktop is a wrong turn rather than an instruction, so the advice is
-/// resolved here and handed over as text.
 #[tauri::command]
 pub fn install_hint(package: String) -> String {
     mdm_core::distro::install(&package)

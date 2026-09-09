@@ -99,9 +99,12 @@ rm -f "$BIN_DIR/ldm" "$BIN_DIR/ldm-host"
 # ------------------------------------------------------------- desktop entry
 
 say "Removing the launcher entry and icons"
-# mdm.desktop is what install.sh writes now; the other two are what it wrote
+# "My Download Manager.desktop" is what install.sh writes now -- it takes the
+# packaged entry's name so the two shadow each other rather than both showing;
+# see the note there. mdm.desktop is what it wrote before that, and the other two
 # before the app id settled, and a machine that has not re-run it still has one.
-for entry in "$APP_DIR/mdm.desktop" "$APP_DIR/io.mdm.app.desktop" "$APP_DIR/io.ldm.app.desktop"; do
+for entry in "$APP_DIR/My Download Manager.desktop" "$APP_DIR/mdm.desktop" \
+             "$APP_DIR/io.mdm.app.desktop" "$APP_DIR/io.ldm.app.desktop"; do
   if [[ -e "$entry" ]]; then
     rm -f "$entry"
     removed+=("$entry")

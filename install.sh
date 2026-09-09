@@ -332,8 +332,12 @@ done
 # id moved to `mdm`, and an entry left behind under the old name still claims
 # the `mdm:` scheme and still offers a launcher that points at the same binary,
 # so the menu shows MDM twice and only one of them can own the icon.
+# `mdm.desktop` joins them for the same reason and one step further on: the
+# entry is still ours and still correct, it simply no longer has the name that
+# lets a packaged install replace it, so a machine with both showed MDM twice.
 for stale in "$BIN_DIR/ldm" "$BIN_DIR/ldm-host" \
-             "$APP_DIR/io.ldm.app.desktop" "$APP_DIR/io.mdm.app.desktop"; do
+             "$APP_DIR/io.ldm.app.desktop" "$APP_DIR/io.mdm.app.desktop" \
+             "$APP_DIR/mdm.desktop"; do
   [[ -e "$stale" ]] && { rm -f "$stale"; migrated=yes; }
 done
 for size in 16 24 32 48 64 128 256 512; do
@@ -382,10 +386,27 @@ mkdir -p "$APP_DIR"
 # Exec is the one value that legitimately differs: a package puts the binary in
 # /usr/bin, this puts it in ~/.local/bin, which is not always on PATH.
 #
-# The file keeps the app id for its name rather than the product name the
-# bundler uses. A Wayland compositor matches a window to an entry by id first
-# and falls back to StartupWMClass, and only `mdm.desktop` gets it right
-# without needing the fallback.
+# The file takes the *packaged* entry's name, and that is the whole of the fix
+# for MDM appearing twice in the launcher.
+#
+# A desktop entry is identified by its filename, not by the Name inside it, and
+# a user entry only replaces a system one when the two ids match. The bundler
+# hardcodes `<product name>.desktop` -- there is no setting for it, see
+# generate_desktop_file in tauri-bundler -- so this script writing `mdm.desktop`
+# produced a *second* id saying the same thing. Anyone who had installed the
+# .rpm or .deb and then run this script, which is everybody who tried both, got
+# two launchers with one name, one icon and no way to tell which was which.
+# Matching the packaged name means XDG shadowing does the work: whichever
+# install is newest owns the entry, and there is only ever one.
+#
+# What it costs is the exact app-id match. A Wayland compositor looks for an
+# entry named after the window's app id -- `mdm` -- before falling back to
+# StartupWMClass, and this is no longer that entry. The fallback is what the
+# StartupWMClass line is for and is honoured by every shell tested, which is
+# the cheaper of the two prices: a window whose icon comes from the second
+# lookup rather than the first looks identical, and a duplicate launcher does
+# not.
+ENTRY_NAME="My Download Manager.desktop"
 render_desktop_entry() {
   # Values in the order the bundler supplies them: product name, short
   # description, the command, the icon/app id. Substituted with bash rather
@@ -400,12 +421,12 @@ render_desktop_entry() {
 }
 
 if [[ -f "$REPO/packaging/mdm.desktop.hbs" ]]; then
-  render_desktop_entry > "$APP_DIR/mdm.desktop"
+  render_desktop_entry > "$APP_DIR/$ENTRY_NAME"
 else
   # A checkout missing the template still gets a launcher, because the entry
   # is what makes the app findable and a missing one is silent.
   warn "packaging/mdm.desktop.hbs is missing; writing a minimal desktop entry"
-  cat > "$APP_DIR/mdm.desktop" <<DESKTOP
+  cat > "$APP_DIR/$ENTRY_NAME" <<DESKTOP
 [Desktop Entry]
 Type=Application
 Name=My Download Manager
@@ -418,7 +439,7 @@ Keywords=mdm;download;manager;downloader;idm;video;
 MimeType=x-scheme-handler/mdm;
 DESKTOP
 fi
-chmod 644 "$APP_DIR/mdm.desktop"
+chmod 644 "$APP_DIR/$ENTRY_NAME"
 
 # Not decoration: a launcher that indexes on a schedule shows the entry when
 # the cache says so, and this is what updates the cache now rather than at the
@@ -428,7 +449,7 @@ chmod 644 "$APP_DIR/mdm.desktop"
 command -v update-desktop-database >/dev/null && \
   update-desktop-database -q "$APP_DIR" 2>/dev/null || true
 if command -v desktop-file-validate >/dev/null; then
-  desktop-file-validate "$APP_DIR/mdm.desktop" >/dev/null 2>&1 || \
+  desktop-file-validate "$APP_DIR/$ENTRY_NAME" >/dev/null 2>&1 || \
     warn "the desktop entry did not pass desktop-file-validate; the app is
   installed and runs, but your launcher may not list it"
 fi
@@ -597,9 +618,9 @@ Developer mode, click "Load unpacked" and pick
 
   $INSTALLED_CHROME
 
-Or skip all of that and let the app do it: start MDM and press "Browser
-extension" in the toolbar, which finds both copies and opens each browser at
-the right place.
+Or do it later from the app: start MDM, open Settings and press "Install or
+check it…" under Browser extension, which finds both copies and shows the
+steps for whichever browser you use.
 
 Then start the app:  mdm
 The extension launches it automatically on the first captured download.
@@ -618,20 +639,67 @@ replaces this script rather than adding to it.
 
 PACKAGES
 
-# The click that finishes the install is Firefox's own "Add"; all this does is
-# put the package in front of it. Backgrounded, because a Firefox that was not
-# already running holds the terminal until it is closed and the installer has
-# nothing left to say by then — and under nohup, so that a browser still
-# starting up when this script exits is not hung up on along with it.
-if [[ "$signed" == yes ]]; then
-  FF_CMD=()
+# ---------------------------------------------------------------- extension
+
+# The last thing the installer does, because it is the last thing the install
+# needs and the first thing that gets forgotten. Everything above this line
+# produces an app that runs and captures nothing: the extension is the half
+# that watches the browser, and until this version it was described in the
+# paragraphs above and left as an exercise. An exercise at the end of a
+# successful install is a step that does not happen.
+#
+# Asked rather than done. Adding code to somebody's browser is not a thing an
+# installer should do quietly, and `ask` declines by itself when there is no
+# terminal to ask at — a piped or scripted install answers no and prints the
+# instructions, which is the right answer for both.
+
+chromium_steps() {
+  cat <<STEPS
+
+$(say "Chrome, Brave, Edge or Vivaldi")
+
+  1. Open a new tab and type:  chrome://extensions
+     Typing it is the only way in. A Chromium browser refuses that address
+     when a program passes it on the command line, which is why MDM does not
+     offer to open it for you — it opens an empty window instead.
+  2. Turn on "Developer mode", top right.
+  3. Click "Load unpacked".
+  4. Paste this folder into the dialog and choose it:
+
+       $INSTALLED_CHROME
+
+STEPS
+}
+
+# Firefox is the one that can be finished with a click, so it is the one that
+# is offered as an action. The package is put in front of Firefox's own "Add"
+# button; nothing here installs anything by itself.
+#
+# Backgrounded, because a Firefox that was not already running holds the
+# terminal until it is closed and the installer has nothing left to say by
+# then — and under nohup, so a browser still starting up when this script exits
+# is not hung up on along with it.
+firefox_offer() {
+  [[ "$signed" == yes ]] || return 1
+  local FF_CMD=()
   if command -v firefox >/dev/null; then
     FF_CMD=(firefox)
   elif [[ "$flatpak_firefox" == yes ]]; then
     FF_CMD=(flatpak run org.mozilla.firefox)
+  else
+    return 1
   fi
-  if (( ${#FF_CMD[@]} )) && ask "Open Firefox now to install the extension?"; then
-    nohup "${FF_CMD[@]}" "file://$INSTALLED_XPI" >/dev/null 2>&1 &
-    say "Firefox is opening the package — click \"Add\" there to finish."
-  fi
+  ask "Install the extension in Firefox now?" || return 0
+  nohup "${FF_CMD[@]}" "file://$INSTALLED_XPI" >/dev/null 2>&1 &
+  say "Firefox is opening the package — click \"Add\" there to finish."
+}
+
+firefox_offer || true
+
+# And the other family, which cannot be automated at all — see chromium_steps.
+# Shown on request rather than printed unasked: somebody who uses Firefox has
+# just finished, and four steps for a browser they do not have would read as
+# something still left to do.
+if [[ -d "$INSTALLED_CHROME" ]] && ask "Show the steps for Chrome, Brave, Edge or Vivaldi?"; then
+  chromium_steps
 fi

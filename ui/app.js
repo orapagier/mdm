@@ -504,9 +504,14 @@ function wireSettingsDialog() {
    * of cloning the repository -- which is exactly what a release build is for
    * not having to do.
    *
-   * In the toolbar rather than in Settings, because it is the first thing a
-   * new install needs, and a thing nobody can find is the problem being
-   * solved.
+   * In Settings, and reached from the installer rather than from the toolbar.
+   * It was in the toolbar because it is the first thing a new install needs --
+   * true, and the wrong conclusion. It is needed exactly once, and a permanent
+   * button for a one-time job sat beside the four that are pressed daily. The
+   * once is now covered where it belongs: install.sh offers it as the last
+   * thing it does, the packaged install prints it, and the app opens this by
+   * itself the first time it is run. Afterwards it is where a thing you might
+   * want to check on is: in Settings.
    * ---------------------------------------------------------------- */
 
   const extDialog = $("dlg-extension");
@@ -520,8 +525,12 @@ function wireSettingsDialog() {
     el.className = bad ? "hint bad" : "hint";
   }
 
-  $("btn-extension").addEventListener("click", async () => {
+  async function openExtensionDialog() {
     extSay("");
+    // Folded again on every open. The steps are an answer to a question that
+    // was asked, and a dialog that reopens already showing them looks like it
+    // is telling somebody who came here for Firefox what to do in Chrome.
+    $("ext-chrome-steps").hidden = true;
     extensionAssets = (await invoke("extension_assets").catch(() => null)) || {
       firefox: null,
       chrome: null,
@@ -535,7 +544,36 @@ function wireSettingsDialog() {
     $("ext-firefox").disabled = !extensionAssets.firefox;
     $("ext-chrome").disabled = !extensionAssets.chrome;
     extDialog.showModal();
-  });
+  }
+
+  $("btn-extension").addEventListener("click", openExtensionDialog);
+
+  /* ---------------------------------------------------------------- *
+   * The first run
+   *
+   * A packaged install cannot ask. The .rpm and .deb run their postinstall as
+   * root and non-interactively, so all they can do is print where the
+   * extension is — into a package manager's output, which scrolls past and is
+   * not read. install.sh can ask and now does, but the packages are the way
+   * most people will arrive.
+   *
+   * So the app asks, once, the first time it is opened. Once is the whole of
+   * it: this is a prompt about setting the thing up, and a prompt that comes
+   * back is a prompt that gets dismissed without being read. After this it
+   * lives in Settings like anything else you might want to check on.
+   * ---------------------------------------------------------------- */
+  const SEEN_KEY = "mdm.extensionOffered";
+  try {
+    if (!localStorage.getItem(SEEN_KEY)) {
+      localStorage.setItem(SEEN_KEY, "1");
+      // After the first snapshot, so the window has drawn something behind the
+      // dialog rather than opening onto an empty list.
+      setTimeout(openExtensionDialog, 600);
+    }
+  } catch (e) {
+    // Storage refused. Not being able to remember that the question was asked
+    // is a reason not to ask it, rather than a reason to ask it every time.
+  }
 
   $("ext-firefox").addEventListener("click", async () => {
     if (!extensionAssets.firefox) return;
@@ -551,27 +589,41 @@ function wireSettingsDialog() {
     }
   });
 
+  /**
+   * Chromium: show the steps rather than pretend to do them.
+   *
+   * This used to open the browser at chrome://extensions and the folder in a
+   * file manager. Neither did what it looked like. Chromium refuses a
+   * `chrome://` address given on the command line, so the browser opened an
+   * empty new window and ignored the page it had been asked for; and the file
+   * manager was a second window nobody had asked for, in front of a dialog
+   * that then could not be read. What arrived was two windows and no
+   * extension, which is how it was reported.
+   *
+   * There is no supported way to install an unpacked extension without a
+   * person doing it, so the honest interface is the instructions. The names of
+   * the browsers actually on this machine go in them, because "go to
+   * chrome://extensions in Brave" is a different sentence from a list of four
+   * browsers.
+   */
   $("ext-chrome").addEventListener("click", async () => {
     if (!extensionAssets.chrome) return;
-    // The folder first and always, because it is the half that is certainly
-    // needed: "Load unpacked" opens a file dialog, and this folder is what the
-    // user will be picking in it. The browser is best-effort on top.
-    await call("open_path", { path: extensionAssets.chrome, reveal: false });
-    try {
-      const browserName = await invoke("open_chromium_extensions");
-      extSay(
-        browserName +
-          " is open at its extensions page. Turn on Developer mode, click " +
-          "\u201cLoad unpacked\u201d, and pick the folder that just opened."
-      );
-    } catch (e) {
-      extSay(
-        "The folder is open. In your browser go to the extensions page, turn " +
-          "on Developer mode, click \u201cLoad unpacked\u201d and pick it.",
-        true
-      );
-    }
+    $("ext-chrome-folder").textContent = extensionAssets.chrome;
+    $("ext-chrome-steps").hidden = false;
+    const browsers = (await invoke("chromium_browsers").catch(() => [])) || [];
+    extSay(
+      browsers.length
+        ? "Do this in " + list(browsers) + " \u2014 it takes about twenty seconds."
+        : "No Chromium browser was found on this machine, but the steps are " +
+            "the same in any of them."
+    );
   });
+
+  /** "Brave", "Brave and Chrome", "Brave, Chrome and Edge". */
+  function list(names) {
+    if (names.length < 2) return names[0] || "";
+    return names.slice(0, -1).join(", ") + " and " + names[names.length - 1];
+  }
 
   dlg.addEventListener("close", async () => {
     if (dlg.returnValue !== "ok" || !settings) return;
