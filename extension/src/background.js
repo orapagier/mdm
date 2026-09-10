@@ -1666,11 +1666,21 @@ async function grabVideo(msg, tabId) {
   // `videoSrc` is only there once the player has loaded something, so fall
   // back to whatever file the page declares — a <source>, an og:video — which
   // is readable the moment the page is, played or not.
+  //
+  // A manifest is not a file, and is never sent outright. It describes a
+  // stream — hundreds of segments, fetched by address — and a player serving
+  // its video through MediaSource *always* comes to "a manifest is what it
+  // fetched". Sending one straight to MDM as a download produces a playable
+  // .m3u8 text file, or (where the engine detects it) a raw stream fetch that
+  // lacks the quality picker and the cookies-and-extractor path. These are
+  // precisely the embedded players the download button exists for, so the
+  // manifest goes through the extractor instead — which is why the streaming
+  // hosts list is not the only gate here.
   const file =
     msg.videoSrc ||
     (msg.candidates || []).find((c) => c.kind === "media")?.url ||
     "";
-  if (file && !isStreamingSite(host)) {
+  if (file && !isStreamingSite(host) && !isManifest(file, "")) {
     await sendSimple(file, { pageUrl }, { url: pageUrl });
     return { ok: true, mode: "direct" };
   }
@@ -1851,33 +1861,58 @@ async function videoCandidates(msg, tabId) {
   // YouTube video embedded in an article is best extracted from the embed,
   // and this is the answer for when that fails.
   add(msg.topUrl || "", "page");
-  for (const c of found.filter((c) => c.kind === "media")) {
-    add(c.url, "media", "", false, c.origin || "page");
-  }
-
-  // What the page itself remembers fetching. First among the media, because a
-  // manifest read back out of Resource Timing is the only one that is still
-  // there an hour into a film — see pageStreams, and the note in
-  // src/content/streams.js.
-  for (const url of await pageStreams(tabId, msg.frameId ?? 0)) {
-    add(url, "media", "", true, "page-timing");
-  }
 
   // What the player has actually fetched in this tab. A manifest is the whole
   // stream and outranks a fragment, which is one slice of it.
   //
-  // Newest first among the plain files, because arrival order is not
-  // importance: what a video site fetches *first* is its own furniture. TikTok
-  // opens a page by playing a two-second clip in a hidden element to find out
-  // whether the browser can decode HEVC — oldest in the tab, so first in this
-  // list, and duly downloaded twice in place of the video being watched. The
-  // one being watched is the one fetched most recently, whatever the site.
+  // Streams lead all the other media, and that ordering is load-bearing. The
+  // page is not under an obligation to keep its copies of the stream in a
+  // useful order: on a feed, which is most of the pages this matters on, the
+  // timing buffer also holds the manifests of the posts the feed preloaded
+  // around the one on screen. The very thing the player fetched is the
+  // strongest possible answer to "what is this page playing", so it is added
+  // before anything merely *remembered* or *declared*, and a preloaded
+  // neighbour cannot outrank the stream under the button.
   const sniffed = [...(tabMedia.get(tabId)?.values() ?? [])];
   for (const m of sniffed.filter((m) => m.kind === "stream")) {
     add(m.url, "media", m.mime, true, "tab");
   }
+
+  // What the page's markup declares, played or not.
+  //
+  // Before the tab's *plain* files, because there are pages where the sniffer
+  // has nothing to do with the video itself — the picture is loaded lazily,
+  // or the first thing a site plays is its own furniture, and TikTok opens a
+  // page with a two-second HEVC probe in a hidden element. On those, the
+  // page's own reading of the post is the only word on the video, and it has
+  // to lead the probes. After the fetched *streams*, though: on a page that
+  // streams, a file the page declares in its metadata is usually the copy it
+  // can spare — a preview, or the lowest rung of a ladder — while the
+  // manifest the player fetched is the whole stream.
+  for (const c of found.filter((c) => c.kind === "media")) {
+    add(c.url, "media", "", false, c.origin || "page");
+  }
+
+  // Newest first among the plain files the player fetched, because arrival
+  // order is not importance: what a video site fetches *first* is its own
+  // furniture. TikTok opens a page by playing a two-second clip in a hidden
+  // element to find out whether the browser can decode HEVC — oldest in the
+  // tab, so first in this list, and duly downloaded twice in place of the
+  // video being watched. The one being watched is the one fetched most
+  // recently, whatever the site.
   for (const m of [...sniffed.filter((m) => m.kind !== "stream")].sort((a, b) => b.at - a.at)) {
     add(m.url, "media", m.mime, false, "tab");
+  }
+
+  // What the page itself remembers fetching, from its own Resource Timing.
+  // Last of the media, because on a feed the timing buffer is where the
+  // *neighbours'* streams live — the sniffer only records this tab's
+  // requests, and the page records every frame's. Anything the sniffer
+  // already offered is skipped by `seen`, and a manifest read back out of
+  // Resource Timing is the only one still there an hour into a film — see
+  // pageStreams, and the note in src/content/streams.js.
+  for (const url of await pageStreams(tabId, msg.frameId ?? 0)) {
+    add(url, "media", "", true, "page-timing");
   }
 
   // Files re-ranked by what each turns out to *be*, now that every one of them

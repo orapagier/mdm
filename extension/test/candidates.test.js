@@ -181,6 +181,7 @@ vm.runInContext(
   let location = { hostname: "www.tiktok.com", href: "https://www.tiktok.com/" };
   function setHost(h) { location = { hostname: h, href: "https://" + h + "/" }; }
   function setAddress(href) { location = { hostname: new URL(href).hostname, href }; }
+  const MOST_BUILT = ${constant("content/video-panel.js", "MOST_BUILT", "  ")};
   ${lift("content/video-panel.js", "permalinkFromId", "  ")}
   ${lift("content/video-panel.js", "namesId", "  ")}
   ${lift("content/video-panel.js", "statedMedia", "  ")}
@@ -193,6 +194,7 @@ vm.runInContext(
 const { mediaIn, idsNear, mediaForIds, permalinkFromId, namesId, setHost } = panel;
 const { statedMedia, addressId, setAddress } = panel;
 const MOST_NAMED = Number(constant("content/video-panel.js", "MOST_NAMED", "  "));
+const MOST_BUILT = Number(constant("content/video-panel.js", "MOST_BUILT", "  "));
 
 /* ------------------------------------------------------------------ *
  * What the window falls back to when no page resolves
@@ -871,36 +873,54 @@ tests.push(
     // media in the page state. The id on the row's markup is the only thread,
     // and this is the address it leads to — verified to resolve to 16 formats.
     setHost("www.tiktok.com");
-    assert.strictEqual(
+    assert.deepStrictEqual(
       permalinkFromId(["7650155054757858568"]),
-      "https://www.tiktok.com/@i/video/7650155054757858568"
+      ["https://www.tiktok.com/@i/video/7650155054757858568"]
     );
   })
 );
 
 tests.push(
-  check("the nearest id is the one addressed, not the feed around it", () => {
+  check("the nearest id is addressed first, and the rest are still offered", () => {
+    // Which long number sits closest to the player is a fact about the site's
+    // markup, not a rule — a row carries the author, the sound and whatever
+    // else needed a key. So the nearest leads and the others follow, and the
+    // window's length check settles which was the post rather than this.
     setHost("www.tiktok.com");
-    assert.ok(permalinkFromId(["7650155054757858568", "99999999999999999"]).endsWith("7650155054757858568"));
+    const built = permalinkFromId(["7650155054757858568", "99999999999999999"]);
+    assert.ok(built[0].endsWith("7650155054757858568"), "the nearest id did not lead");
+    assert.ok(built[1].endsWith("99999999999999999"), "the second id was dropped");
+  })
+);
+
+tests.push(
+  check("no more addresses are built than a grab can afford to try", () => {
+    setHost("www.tiktok.com");
+    const many = ["1000000000000000001", "1000000000000000002", "1000000000000000003",
+                  "1000000000000000004", "1000000000000000005"];
+    assert.strictEqual(permalinkFromId(many).length, MOST_BUILT);
   })
 );
 
 tests.push(
   check("nothing is built for a site with no rule, or with no id", () => {
     setHost("www.example.com");
-    assert.strictEqual(permalinkFromId(["7650155054757858568"]), "");
+    assert.deepStrictEqual(Array.from(permalinkFromId(["7650155054757858568"])), []);
     setHost("www.tiktok.com");
-    assert.strictEqual(permalinkFromId([]), "");
+    assert.deepStrictEqual(Array.from(permalinkFromId([])), []);
   })
 );
 
 tests.push(
-  check("the address built is one the picker will ask about first", () => {
+  check("the addresses built are ones the picker will ask about first", () => {
     // looksSpecific in the window and namesOneMedia here have to agree that
-    // this names one video, or it would be tried after the feed it came from.
+    // these name one video, or they would be tried after the feed they came
+    // from.
     setHost("www.tiktok.com");
-    const built = permalinkFromId(["7650155054757858568"]);
-    assert.ok(/\/video\/\d{8,}$/.test(built), "the built address names no video");
+    const built = permalinkFromId(["7650155054757858568", "7650155054757858569"]);
+    for (const url of built) {
+      assert.ok(/\/video\/\d{8,}$/.test(url), `the built address names no video: ${url}`);
+    }
   })
 );
 

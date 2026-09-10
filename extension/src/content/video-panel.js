@@ -9,8 +9,10 @@
  * this offers a button that hands the *page* URL to yt-dlp, which knows how to
  * resolve it into real formats.
  *
- * The panel lives in a shadow root attached to a fixed-position host, so no
- * page CSS reaches it and nothing in the page's own layout is disturbed.
+ * The panel lives in a shadow root, so no page CSS reaches it and nothing in
+ * the page's own layout is disturbed. Its host is a bare, unstyled element and
+ * the fixed positioning belongs to the button inside — see `build`, where that
+ * division earns its keep against content blockers.
  */
 
 (() => {
@@ -24,12 +26,40 @@
    * only thing every injection can see, so the previous panel is found there
    * and taken down before this one goes up.
    */
-  const HOST_ID = "mdm-video-panel";
-  document.getElementById(HOST_ID)?.remove();
+  const PANEL_MARK = "data-mdm-video-panel";
+  for (const old of document.querySelectorAll(`[${PANEL_MARK}]`)) old.remove();
 
-  /** Ignore decorative loops, ad bumpers and tracking pixels. */
-  const MIN_WIDTH = 240;
-  const MIN_HEIGHT = 135;
+  /**
+   * Ignore decorative loops, ad bumpers and tracking pixels.
+   *
+   * Area rather than a width and a height of their own, because a minimum
+   * width is a rule about landscape video. A portrait player is narrow by
+   * design and no less the thing being watched: TikTok's profile grid plays
+   * its preview at 175×232, which a 240-wide floor turned down while passing
+   * a 320×100 banner loop of half the area. So the test is how much picture
+   * there is, with a floor on the shorter side so a letterbox strip is still
+   * furniture. 240×135 — the pair this replaces — is exactly the area, and
+   * still passes.
+   */
+  const MIN_SIDE = 120;
+  const MIN_AREA = 240 * 135;
+
+  /** Narrower than this and there is no room to sit on the player at all. */
+  const MIN_BUTTON = 88;
+
+  /**
+   * How many times the panel may be *removed* before it stops trying.
+   *
+   * Counted only when the host element is taken out of the DOM (a page
+   * rebuilding itself, a SPA swapping a section) — not when a content
+   * blocker merely hides it with CSS. Cosmetic hiding is answered with
+   * `!important` on the host itself and costs nothing, because that is a
+   * fight the panel can win every time; removal is the page restructuring
+   * under it, and after enough of those the panel is better off standing
+   * down.
+   */
+  const MAX_REBUILDS = 10;
+  let rebuilds = 0;
 
   let host = null;
   let shadow = null;
@@ -46,20 +76,40 @@
 
   function build() {
     host = document.createElement("div");
-    host.id = HOST_ID;
-    host.style.cssText =
-      "position:fixed;top:0;left:0;width:0;height:0;z-index:2147483647;" +
-      "pointer-events:none;border:0;margin:0;padding:0;";
+    host.setAttribute(PANEL_MARK, "");
+    // Nothing on the host but a reset.
+    //
+    // The fixed position and the z-index used to live here, in the style
+    // attribute, and that is precisely the shape a content blocker's
+    // generic rules are written against — `div[style*="z-index: 2147483647"]`
+    // is an ordinary line in the lists Brave and uBlock ship, because it is
+    // what an interstitial ad looks like from the outside. A rule like that
+    // does not fire until the filter engine catches up with the new node, so
+    // what it produces is a button that appears and then vanishes a moment
+    // later, on one browser and not another. The positioning belongs to the
+    // button in the shadow root anyway, where no page rule can reach it; the
+    // host is left an empty inline element with nothing to match on.
+    //
+    // Static, not fixed, and that is load-bearing: a fixed-position element
+    // establishes a stacking context, which would trap the button's own
+    // z-index inside it and leave the panel underneath anything on the page
+    // that stacks above the host's place in the document.
+    host.style.cssText = "all:initial";
     // documentElement rather than body: some players replace body content.
     (document.documentElement || document.body).appendChild(host);
 
     shadow = host.attachShadow({ mode: "closed" });
     const style = document.createElement("style");
     style.textContent = `
-      :host { all: initial; }
+      :host { all: initial !important; }
       .btn {
         position: fixed;
+        z-index: 2147483647;
         display: none;
+        box-sizing: border-box;
+        max-width: 100%;
+        white-space: nowrap;
+        overflow: hidden;
         align-items: center;
         gap: 6px;
         padding: 7px 12px;
@@ -78,7 +128,8 @@
       .btn:hover { opacity: 1; transform: translateY(-1px); background: #2f6feb; }
       .btn[data-state="busy"] { opacity: .7; cursor: default; }
       .btn[data-state="busy"]:hover { background: rgba(20,22,28,.86); transform: none; }
-      .arrow { font-size: 14px; line-height: 1; }
+      .arrow { font-size: 14px; line-height: 1; flex: none; }
+      .words { overflow: hidden; text-overflow: ellipsis; }
     `;
 
     button = document.createElement("button");
@@ -88,6 +139,7 @@
     arrow.className = "arrow";
     arrow.textContent = "⤓"; // ⤓
     label = document.createElement("span");
+    label.className = "words";
     label.textContent = "Download";
     button.append(arrow, label);
     button.addEventListener("click", onClick, true);
@@ -102,7 +154,8 @@
   function candidates() {
     return [...document.querySelectorAll("video")].filter((v) => {
       const r = v.getBoundingClientRect();
-      if (r.width < MIN_WIDTH || r.height < MIN_HEIGHT) return false;
+      if (Math.min(r.width, r.height) < MIN_SIDE) return false;
+      if (r.width * r.height < MIN_AREA) return false;
       // Off-screen or hidden players are not what the user is looking at.
       if (r.bottom <= 0 || r.top >= innerHeight) return false;
       const cs = getComputedStyle(v);
@@ -171,11 +224,25 @@
 
     const PAD = 12;
     button.style.display = "inline-flex";
+
+    // Never wider than the player it is sitting on.
+    //
+    // The button says more than "Download": it reports what happened to a
+    // click, and what happened can be a whole sentence from the app. Left to
+    // size itself it grew to fit that sentence, went wider than a portrait
+    // video, and was hidden by the test below — a second after the click that
+    // produced the message, which reads exactly like the button vanishing of
+    // its own accord. Clamped and ellipsised instead; the whole text is still
+    // on the tooltip, which is where the long version was always going.
+    const room = right - left - PAD * 2;
+    button.style.maxWidth = `${Math.max(0, room)}px`;
     const w = button.offsetWidth || 140;
     const h = button.offsetHeight || 32;
 
-    // Too little of the player visible to sit on top of.
-    if (bottom - top < h + PAD * 2 || right - left < w + PAD * 2) {
+    // Too little of the player visible to sit on top of. Measured against what
+    // a button needs rather than against what this one currently is, so a long
+    // message cannot talk the panel off the screen.
+    if (bottom - top < h + PAD * 2 || room < MIN_BUTTON) {
       button.style.display = "none";
       return;
     }
@@ -513,12 +580,33 @@
     [/(^|\.)tiktok\.com$/i, (id) => `https://www.tiktok.com/@i/video/${id}`],
   ];
 
-  /** The post's address built from its id, where the site allows it. */
+  /** How many addresses to build from the ids around one player. */
+  const MOST_BUILT = 3;
+
+  /**
+   * The post's address built from its id, where the site allows it.
+   *
+   * Every nearby id, nearest first, rather than only the nearest one.
+   *
+   * `idsNear` reads long runs of digits off the markup around the player, and
+   * a post id is not the only such run: a feed row carries the author, the
+   * sound, the playlist and whatever else its framework needed a key for, and
+   * which of them sits closest to the video is a fact about that site's markup
+   * on that day. Building an address from the first one and stopping made that
+   * accident decisive — and the failure it produces is the bad one, because an
+   * address built from the wrong id is a real post that resolves cleanly,
+   * downloads in full and is somebody else's video.
+   *
+   * Offered as several candidates instead, so the answer comes from the check
+   * rather than from the guess: the window measures what each page resolves to
+   * against the length of the player under the button, and a neighbouring post
+   * is almost never the same length. The nearest id is still tried first, so
+   * nothing slows down on a page where it was right all along.
+   */
   function permalinkFromId(ids) {
-    if (!ids.length) return "";
+    if (!ids.length) return [];
     const rule = POST_URL.find(([host]) => host.test(location.hostname));
-    // The nearest id: the row the player sits in, not the feed around it.
-    return rule ? rule[1](ids[0]) : "";
+    return rule ? ids.slice(0, MOST_BUILT).map((id) => rule[1](id)) : [];
   }
 
   /** Fields under which a record states its own id. */
@@ -725,7 +813,7 @@
     // ordinary post, and where they disagree the app can try each in turn.
     if (video) {
       add(permalinkById(ids), "page");
-      add(permalinkFromId(ids), "page");
+      for (const url of permalinkFromId(ids)) add(url, "page");
       add(permalinkNear(video), "page");
       add(permalinkOver(video), "page");
     }
@@ -816,6 +904,62 @@
     }, 2200);
   }
 
+  /**
+   * Is our panel still up — and if not, can it be put back?
+   *
+   * The old reading of this was `host.isConnected`, and a false meant standing
+   * down for good. That is right for exactly one case, a newer injection of
+   * this file having replaced the panel, and wrong for every other way a panel
+   * comes down: a single-page site rebuilding the document under it, a player
+   * that empties the element the panel was appended to, a content blocker
+   * removing a node it took for an ad. In all of those the button appeared,
+   * went, and never came back, because nothing here ever asked again.
+   *
+   * So the question is asked properly. A newer panel in the document means
+   * this injection is the stale one and should stop; nothing there at all
+   * means put ours back. And a panel that is present but has been *hidden* —
+   * which is what a cosmetic filter rule does, rather than removing anything —
+   * is answered with the one thing that outranks a stylesheet, `!important` on
+   * the element itself. Bounded, because a blocker that means it will win, and
+   * losing quietly beats rebuilding a panel once a second for ever.
+   */
+  function standing() {
+    if (!host) return false;
+
+    if (!host.isConnected) return restore();
+
+    // Cosmetic hiding (content blocker, `display:none`, `visibility:hidden`)
+    // is answered by overriding the property on the host itself. This costs
+    // nothing against the rebuild budget: the blocker is hiding an empty
+    // inline element that carries no style attributes worth matching on, and
+    // the `!important` on the host overrides its stylesheet rule. A blocker
+    // that keeps re-hiding the element is a fight we win on every tick,
+    // which is exactly what the panel was built for — see `build`.
+    const cs = getComputedStyle(host);
+    if (cs.display === "none" || cs.visibility === "hidden") {
+      host.style.setProperty("display", "block", "important");
+      host.style.setProperty("visibility", "visible", "important");
+    }
+    return true;
+  }
+
+  /**
+   * Put the panel back after it was taken out of the DOM.
+   *
+   * The one path every recovery takes, so the poll and the observer count
+   * against the same budget and neither can loop behind the other's back.
+   */
+  function restore() {
+    if (!host) return false;
+    if (host.isConnected) return true;
+    // A newer injection has its own panel up: this one is finished.
+    if (document.querySelector(`[${PANEL_MARK}]`)) return false;
+    if (rebuilds++ >= MAX_REBUILDS) return false;
+    build();
+    schedule();
+    return true;
+  }
+
   /* ---------------------------------------------------------------- *
    * Wiring
    * ---------------------------------------------------------------- */
@@ -832,12 +976,30 @@
     addEventListener("resize", schedule, { passive: true });
     document.addEventListener("fullscreenchange", schedule, true);
 
+    // Watch for the host being pulled out of the DOM — a SPA rebuilding its
+    // content, a player replacing its container, a blocker removing what it
+    // took for an ad.  The 1-second poll in `setInterval` catches this too,
+    // but a page that rebuilds its video section rebuilds it faster: the poll
+    // finds the host gone, rebuilds, and the next rebuild is already needed
+    // before the second tick fires.  An observer fires the instant the node
+    // vanishes, which is the difference between a button that flickers and
+    // one that never leaves.
+    //
+    // `restore` shares its rebuild budget with the poll, so a page that keeps
+    // taking the panel down is argued with the same number of times either
+    // way, and stopped just as decisively.
+    if (typeof MutationObserver !== "undefined") {
+      const observer = new MutationObserver(() => restore());
+      observer.observe(document.documentElement || document.body, {
+        childList: true,
+        subtree: true,
+      });
+    }
+
     // SPA navigation (YouTube) swaps the player without any page load, and
     // layout shifts do not raise events, so a slow poll backs up the listeners.
     setInterval(() => {
-      // A newer injection will have taken our host out of the document and put
-      // its own up; stop touching a panel nobody can see any more.
-      if (host && !host.isConnected) return;
+      if (!standing()) return;
       schedule();
     }, 1000);
   }
