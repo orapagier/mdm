@@ -45,7 +45,7 @@ def main():
 
     messages = [
         {"id": "1", "type": "ping"},
-        {"id": "2", "type": "hello", "version": "1.0.0"},
+        {"id": "2", "type": "hello", "version": "1.1.0"},
         {
             "id": "3",
             "type": "download",

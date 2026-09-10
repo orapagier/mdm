@@ -765,8 +765,8 @@ is.
 `./bundle.sh` is the other half, and installs nothing. It produces two
 packages:
 
-    target/release/bundle/rpm/My Download Manager-1.0.0-1.x86_64.rpm
-    target/release/bundle/deb/My Download Manager_1.0.0_amd64.deb
+    target/release/bundle/rpm/My Download Manager-1.1.0-1.x86_64.rpm
+    target/release/bundle/deb/My Download Manager_1.1.0_amd64.deb
 
 Each is one self-contained file, in the same sense the Windows `setup.exe` is:
 it carries the app, the native host and the signed extension, and nothing has
@@ -832,7 +832,7 @@ Administrator prompt at any point.
 For a machine that is not this one, `.\install.ps1 -Installer` additionally
 produces a double-click setup:
 
-    target\release\bundle\nsis\My Download Manager_1.0.0_x64-setup.exe
+    target\release\bundle\nsis\My Download Manager_1.1.0_x64-setup.exe
 
 It carries the app, the native host and the signed extension, and its NSIS
 hooks do the same registration the script does — so a machine that runs the
@@ -963,13 +963,13 @@ release, along with a `latest.json` naming the version and the signature — the
 shape Tauri's updater expects:
 
     {
-      "version": "1.0.1",
+      "version": "1.1.1",
       "notes": "What changed",
       "pub_date": "2026-09-08T00:00:00Z",
       "platforms": {
         "windows-x86_64": {
           "signature": "<contents of the .sig file>",
-          "url": "https://github.com/orapagier/mdm/releases/download/v1.0.1/My.Download.Manager_1.0.1_x64-setup.exe"
+          "url": "https://github.com/orapagier/mdm/releases/download/v1.1.1/My.Download.Manager_1.1.1_x64-setup.exe"
         }
       }
     }

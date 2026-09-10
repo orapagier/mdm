@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "My Download Manager",
   "short_name": "MDM",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Capture every download — binaries, archives, documents, media — and hand it to MDM for accelerated multi-connection downloading.",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA2Z9pWiFUrkU+N8oW9OZa7LOIEH+1WS8t3v9768JUIi0fHeFUWPu+XGrNe1UXmWBqjPwulmwA6OujMo8prwdSPU21WZtK+3bHbNJy+O2HC9xh186Bx05pc2+wd6Ig8MyLR6l3IsmvOMKhyM18l9U8Cjly7km8DxDltASbl8hc68YKrwRu86b2JCkzMaDk0bxCIT5aEplCxpvIR7OZCxyhzoLdXZqp1AHOh7xkUjp47kUqcaSGSR2PnyERoMsUAigqXr8pgGhwbJASBNqVPLH529x7RnsYUCgPb0jfF3h/dHSgpVlsV8dm+0Z/BSb8FwFIdQsEdKcK/zYqlvkbMtU0bQIDAQAB",
   "minimum_chrome_version": "116",
@@ -57,7 +57,9 @@
         "src/content/streams.js"
       ],
       "run_at": "document_start",
-      "all_frames": true
+      "all_frames": true,
+      "match_about_blank": true,
+      "match_origin_as_fallback": true
     },
     {
       "matches": [
@@ -69,7 +71,9 @@
         "src/content/video-panel.js"
       ],
       "run_at": "document_idle",
-      "all_frames": true
+      "all_frames": true,
+      "match_about_blank": true,
+      "match_origin_as_fallback": true
     }
   ],
   "web_accessible_resources": [

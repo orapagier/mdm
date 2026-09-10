@@ -5,7 +5,7 @@ to get the browser extension talking to it.
 
 Two ways in:
 
-- **[Installing](#installing)** — you have `My Download Manager_1.0.0_x64-setup.exe`
+- **[Installing](#installing)** — you have `My Download Manager_1.1.0_x64-setup.exe`
   and want it working. No toolchain, no Administrator prompt.
 - **[Building](#building-from-source)** — you have the repository and want to
   produce that `.exe`, or run your own build.
@@ -16,7 +16,7 @@ Two ways in:
 
 ### 1. Run the installer
 
-Double-click **`My Download Manager_1.0.0_x64-setup.exe`**.
+Double-click **`My Download Manager_1.1.0_x64-setup.exe`**.
 
 Windows will show a blue **"Windows protected your PC"** box. That is
 SmartScreen, and it appears because the installer is not code-signed — not
@@ -159,7 +159,7 @@ extensions from when it finishes.
 Produces:
 
 ```
-target\release\bundle\nsis\My Download Manager_1.0.0_x64-setup.exe
+target\release\bundle\nsis\My Download Manager_1.1.0_x64-setup.exe
 ```
 
 `-BundleOnly` leaves this machine untouched: no binaries copied, no registry
@@ -372,13 +372,13 @@ on every launch behind a firewall is noise, not information.
 
 ```json
 {
-  "version": "1.0.1",
+  "version": "1.1.1",
   "notes": "What changed",
   "pub_date": "2026-09-08T00:00:00Z",
   "platforms": {
     "windows-x86_64": {
       "signature": "<contents of the .sig file>",
-      "url": "https://github.com/orapagier/mdm/releases/download/v1.0.1/My.Download.Manager_1.0.1_x64-setup.exe"
+      "url": "https://github.com/orapagier/mdm/releases/download/v1.1.1/My.Download.Manager_1.1.1_x64-setup.exe"
     }
   }
 }
