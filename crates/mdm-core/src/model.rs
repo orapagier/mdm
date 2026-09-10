@@ -170,6 +170,19 @@ pub struct Download {
     /// Queue this download belongs to; queues are what the scheduler acts on.
     pub queue: String,
     pub use_ytdlp: bool,
+    /// This download's format URLs must be fetched by yt-dlp itself.
+    ///
+    /// `use_ytdlp` puts the row on yt-dlp's turf, but the engine still prefers
+    /// to fetch the resolved formats with its own fetcher and muxer. That is
+    /// the better path most of the time and it fails cleanly where a CDN
+    /// signs its media to the browser that asked for it — TikTok serves its
+    /// video off `*-webapp-prime.tiktok.com` with an address bound to the
+    /// session (and the challenge cookie) only yt-dlp's own request carries,
+    /// so MDM's plain fetch of a resolved rung answers 403. Set from the
+    /// first refusal, so the retry goes out the way that works instead of
+    /// exhausting itself against a path that can never answer.
+    #[serde(default)]
+    pub no_native: bool,
     /// Preserved so a retry re-uses the name the user chose.
     pub output_name: Option<String>,
     /// The format expression the user picked, for the same reason.

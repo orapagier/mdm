@@ -347,6 +347,7 @@ impl Engine {
             finished_at: None,
             queue: "main".into(),
             use_ytdlp,
+            no_native: false,
             output_name,
             format_id: job.format_id.clone(),
             mirrors: job.mirrors.clone(),
@@ -810,6 +811,23 @@ impl Engine {
             }
         };
 
+        // Some CDNs sign the resolved addresses to the session that asked for
+        // them, so a replay from another request is refused before a byte
+        // lands. TikTok's rungs come off `*-webapp-prime.tiktok.com` carrying
+        // `tk=tt_chain_token` — the challenge cookie — and answer a plain
+        // fetch of the URL that just resolved them with 403 every time.
+        // Fetching such a plan here would spend a retry (and show the user a
+        // failure) on an attempt that can never become a download, so the plan
+        // stays with the tool whose request the address was issued to.
+        if plan.tracks.iter().any(|t| Self::cdn_signs_to_session(&t.url)) {
+            log::info!(
+                "#{}: {} — its addresses are session-signed; yt-dlp will download it",
+                d.id,
+                plan.describe()
+            );
+            return None;
+        }
+
         // The name is settled here, before a byte lands, rather than
         // whenever yt-dlp gets round to announcing one — so the row stops
         // showing a bare video id immediately, and the file is written
@@ -884,25 +902,32 @@ impl Engine {
             .clone()
             .unwrap_or_else(|| settings.ytdlp_format.clone());
 
-        // Ask what that expression actually names before handing the job
-        // over. Where every stream it picked is a plain HTTPS file in an
-        // MP4-family container, MDM can do the whole download itself: fetch
-        // them with its own connections, resume and progress, and rebuild
-        // them with its own muxer — which is the entirety of what ffmpeg was
-        // being carried for. Anything else, WebM sound or a fragment list or
-        // a live stream, stays yt-dlp's to download.
-        //
-        // Selection itself is left to yt-dlp. A format selector is a small
-        // language with years of behaviour behind it, and reimplementing it
-        // would be precisely the borrowed rot this arrangement avoids.
-        if let Some(streams) = self.native_plan(d, &format, &settings).await {
-            // Re-read: the planner has just given the row the video's own
-            // title, and the file has to be written under that rather than
-            // under whatever the URL's last path segment was.
-            let named = self.store.get(d.id)?.unwrap_or_else(|| d.clone());
-            return self
-                .dispatch_fetch(&named, &settings, Fetcher::Merged(streams))
-                .await;
+        // A download that was once refused at the fetch is never offered the
+        // native path again. `no_native` is set from the first refusal of
+        // that shape — see `on_failure` — so the retry goes straight to
+        // yt-dlp, which is the only request that carries the session a
+        // signed CDN address was issued to.
+        if !d.no_native {
+            // Ask what that expression actually names before handing the job
+            // over. Where every stream it picked is a plain HTTPS file in an
+            // MP4-family container, MDM can do the whole download itself: fetch
+            // them with its own connections, resume and progress, and rebuild
+            // them with its own muxer — which is the entirety of what ffmpeg was
+            // being carried for. Anything else, WebM sound or a fragment list or
+            // a live stream, stays yt-dlp's to download.
+            //
+            // Selection itself is left to yt-dlp. A format selector is a small
+            // language with years of behaviour behind it, and reimplementing it
+            // would be precisely the borrowed rot this arrangement avoids.
+            if let Some(streams) = self.native_plan(d, &format, &settings).await {
+                // Re-read: the planner has just given the row the video's own
+                // title, and the file has to be written under that rather than
+                // under whatever the URL's last path segment was.
+                let named = self.store.get(d.id)?.unwrap_or_else(|| d.clone());
+                return self
+                    .dispatch_fetch(&named, &settings, Fetcher::Merged(streams))
+                    .await;
+            }
         }
 
         let (tx, mut rx) = mpsc::channel(16);
@@ -1198,6 +1223,46 @@ impl Engine {
         Ok(())
     }
 
+    /// Did the download's own fetcher get turned away by the server?
+    ///
+    /// Matches the status the stream downloader reports when a CDN refuses a
+    /// request that reached it, which it writes as `"{url} answered {status}"`
+    /// or `"connection {slot} answered {status}"`. `401`, `403` and `429` are
+    /// the refusals that mean *this* request is not welcome — the URL is a
+    /// "who" problem (signed to a session only the extractor's own request
+    /// carries, throttled, or challenged), not a "what" problem a retry of
+    /// the same shape would fix. A 404, by contrast, says the address itself
+    /// is dead; the retry earns its keep there too, but it is for yt-dlp to
+    /// re-find it, and the native path is no surer than it was.
+    fn refused_by_server(message: &str) -> bool {
+        const REFUSED: &[u16] = &[401, 403, 429];
+        message
+            .split("answered ")
+            .nth(1)
+            .and_then(|rest| rest.split_whitespace().next())
+            .and_then(|code| code.parse::<u16>().ok())
+            .is_some_and(|status| REFUSED.contains(&status))
+    }
+
+    /// Media CDN hosts whose resolved addresses are bound to the session that
+    /// asked for them — carrying the challenge cookie only that request has —
+    /// so replays from another request never succeed.
+    ///
+    /// The native path's pre-plan resolves a format to its addresses and then
+    /// downloads the address with a fresh, cookie-less connection. That is a
+    /// sound plan for an ordinary signed URL (expiry, fingerprint) but not for
+    /// a session-bound one: the CDN answers 403 before a byte lands. Rather
+    /// than burn a retry on such addresses every run, the plan is declined up
+    /// front and the whole download stays with the request that was issued
+    /// them. Three-letter insight: `v19-webapp-prime.tiktok.com` today.
+    fn cdn_signs_to_session(url: &str) -> bool {
+        const SIGNED_CDN_HOSTS: &[&str] = &["tiktok.com", "tiktokcdn.com"];
+        let host = host_of(url).trim_start_matches("www.").to_lowercase();
+        SIGNED_CDN_HOSTS
+            .iter()
+            .any(|s| host == *s || host.ends_with(&format!(".{s}")))
+    }
+
     async fn on_failure(&self, d: &Download, message: &str) -> Result<()> {
         let settings = self.settings();
         // Said in the user's terms rather than the tool's. A Python transport
@@ -1210,6 +1275,7 @@ impl Engine {
         // Read before the message is rewritten: the marker is in the raw text,
         // and `plain_error` is under no obligation to keep it.
         let was_page = crate::fetch::is_page_response(message);
+        let refused = Self::refused_by_server(message);
 
         // A page found where the browser had *watched a file arrive* is not a
         // page an extractor can read. It is a link that has been spent.
@@ -1284,6 +1350,46 @@ impl Engine {
                 }
             );
             self.store.set_use_ytdlp(d.id, true)?;
+        }
+
+        // A yt-dlp-backed row whose *formats* MDM tried to fetch itself and the
+        // server refused — 401, 403, 429 off the CDN. The resolved address is
+        // bound to the session (and, on media like TikTok's `*-webapp-prime`
+        // rungs, the challenge cookie) that only the extractor's own request
+        // carries; a plain connection to the signed URL can never answer. The
+        // retry is already about to happen, so `no_native` is the whole fix:
+        // persisted, the next attempt skips the native fetch and goes out
+        // through yt-dlp, which is the only path that can redeem the address.
+        if d.use_ytdlp && !d.no_native && refused {
+            log::info!(
+                "#{}: the server refused MDM's own fetch ({message}) — the retry will use yt-dlp itself",
+                d.id
+            );
+            self.store.set_no_native(d.id)?;
+            // The native attempt is abandoned, so its scratch directory serves
+            // no purpose but clutter in the user's download folder. The muxer
+            // normally clears it on success only, so the refusal's leftover
+            // has to be retired here.
+            let dir = Path::new(&d.directory);
+            let mut stems: Vec<&str> = Vec::new();
+            if let Some(name) = d.output_name.as_deref() {
+                if !name.trim().is_empty() {
+                    stems.push(name.trim());
+                }
+            }
+            if let Some(stem) = Path::new(&d.filename).file_stem().and_then(|s| s.to_str()) {
+                stems.push(stem);
+            }
+            for stem in stems {
+                let work = dir.join(format!("{stem}.mdmstream"));
+                if work.is_dir() {
+                    match std::fs::remove_dir_all(&work) {
+                        Ok(()) => log::info!("#{}: cleared the abandoned native scratch {work:?}", d.id),
+                        Err(e) => log::warn!("#{}: could not clear {work:?}: {e}", d.id),
+                    }
+                    break;
+                }
+            }
         }
         let attempts = {
             let mut r = self.retries.lock().unwrap();
@@ -2225,7 +2331,7 @@ pub fn job_from_url(url: &str) -> Job {
 
 #[cfg(test)]
 mod tests {
-    use super::{single_use_match, Tally};
+    use super::{single_use_match, Engine, Tally};
 
     fn hosts(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| (*s).to_string()).collect()
@@ -2345,5 +2451,31 @@ mod tests {
         tally.advance(60_000_000, 100_000_000);
         assert_eq!(tally.downloaded, 60_000_000);
         assert_eq!(tally.total, 100_000_000);
+    }
+
+    /// Session-signed media hosts must never be fetched by a fresh connection.
+    #[test]
+    fn session_signed_cdn_hosts_are_recognised() {
+        for url in [
+            "https://v19-webapp-prime.tiktok.com/video/tos/alisg/ok8Q9Afi2wSa1Smq4EAiI8A4BJIbioCOB2urcV/?tk=tt_chain_token",
+            "https://v16-webapp-prime.tiktok.com/video/tos/abcd.mp4",
+            "https://example.tiktokcdn.com/video/tos/xyz.mp4",
+        ] {
+            assert!(
+                Engine::cdn_signs_to_session(url),
+                "{url} should be left to the extractor's own request"
+            );
+        }
+        // A suffix is not a subdomain, and ordinary CDNs are unaffected.
+        for url in [
+            "https://notliketok.com/video/1.mp4",
+            "https://cdn.example.com/tiktok.com/embed.mp4",
+            "https://media.vimeo.com/video/1.mp4",
+        ] {
+            assert!(
+                !Engine::cdn_signs_to_session(url),
+                "{url} should stay on the native path"
+            );
+        }
     }
 }

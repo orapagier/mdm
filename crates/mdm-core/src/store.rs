@@ -31,7 +31,8 @@ CREATE TABLE IF NOT EXISTS downloads (
     created_at      INTEGER NOT NULL,
     finished_at     INTEGER,
     queue           TEXT    NOT NULL DEFAULT 'main',
-    use_ytdlp       INTEGER NOT NULL DEFAULT 0
+    use_ytdlp       INTEGER NOT NULL DEFAULT 0,
+    no_native       INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_downloads_status  ON downloads(status);
@@ -57,6 +58,7 @@ fn migrate(conn: &Connection) -> Result<()> {
         ("output_name", "ALTER TABLE downloads ADD COLUMN output_name TEXT"),
         ("format_id", "ALTER TABLE downloads ADD COLUMN format_id TEXT"),
         ("mirrors", "ALTER TABLE downloads ADD COLUMN mirrors TEXT NOT NULL DEFAULT '[]'"),
+        ("no_native", "ALTER TABLE downloads ADD COLUMN no_native INTEGER NOT NULL DEFAULT 0"),
     ] {
         let present = conn
             .prepare(&format!("SELECT {column} FROM downloads LIMIT 1"))
@@ -172,6 +174,19 @@ impl Store {
         Ok(())
     }
 
+    /// Remember that this row's formats must be fetched by yt-dlp itself.
+    ///
+    /// Written to the database rather than kept in memory because it has to
+    /// survive the retry that acts on it, exactly like `set_use_ytdlp`.
+    pub fn set_no_native(&self, id: i64) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE downloads SET no_native = 1 WHERE id = ?1",
+            params![id],
+        )?;
+        Ok(())
+    }
+
     pub fn set_status(&self, id: i64, status: Status, error: Option<&str>) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         let finished = status.is_terminal().then(|| crate::now());
@@ -268,7 +283,7 @@ impl Store {
         let mut stmt = conn.prepare(
             "SELECT id, url, filename, directory, category, status, total_bytes,
                     completed_bytes, mime, referrer, headers, error, sha256,
-                    created_at, finished_at, queue, use_ytdlp, output_name,
+                    created_at, finished_at, queue, use_ytdlp, no_native, output_name,
                     format_id, mirrors
                FROM downloads
               ORDER BY (status IN ('active','queued','paused')) DESC, created_at DESC
@@ -303,7 +318,7 @@ impl Store {
         let mut stmt = conn.prepare(
             "SELECT id, url, filename, directory, category, status, total_bytes,
                     completed_bytes, mime, referrer, headers, error, sha256,
-                    created_at, finished_at, queue, use_ytdlp, output_name,
+                    created_at, finished_at, queue, use_ytdlp, no_native, output_name,
                     format_id, mirrors
                FROM downloads
               WHERE url = ?1 AND format_id IS ?2
@@ -360,7 +375,7 @@ impl Store {
         let mut stmt = conn.prepare(
             "SELECT id, url, filename, directory, category, status, total_bytes,
                     completed_bytes, mime, referrer, headers, error, sha256,
-                    created_at, finished_at, queue, use_ytdlp, output_name,
+                    created_at, finished_at, queue, use_ytdlp, no_native, output_name,
                     format_id, mirrors
                FROM downloads
               WHERE status = 'queued' AND queue = ?1
@@ -447,12 +462,12 @@ impl Store {
 
 const SELECT_COLS: &str = "SELECT id, url, filename, directory, category, status,
      total_bytes, completed_bytes, mime, referrer, headers, error, sha256,
-     created_at, finished_at, queue, use_ytdlp, output_name, format_id, mirrors \
+     created_at, finished_at, queue, use_ytdlp, no_native, output_name, format_id, mirrors \
      FROM downloads WHERE id = ?1";
 
 const SELECT_ALL: &str = "SELECT id, url, filename, directory, category, status,
      total_bytes, completed_bytes, mime, referrer, headers, error, sha256,
-     created_at, finished_at, queue, use_ytdlp, output_name, format_id, mirrors \
+     created_at, finished_at, queue, use_ytdlp, no_native, output_name, format_id, mirrors \
      FROM downloads WHERE {where}";
 
 fn row_to_download(r: &Row<'_>) -> rusqlite::Result<Download> {
@@ -480,9 +495,10 @@ fn row_to_download(r: &Row<'_>) -> rusqlite::Result<Download> {
         finished_at: r.get(14)?,
         queue: r.get(15)?,
         use_ytdlp: r.get::<_, i64>(16)? != 0,
-        output_name: r.get(17)?,
-        format_id: r.get(18)?,
+        no_native: r.get::<_, i64>(17)? != 0,
+        output_name: r.get(18)?,
+        format_id: r.get(19)?,
         // A row written before this column existed reads as an empty list.
-        mirrors: serde_json::from_str(&r.get::<_, String>(19)?).unwrap_or_default(),
+        mirrors: serde_json::from_str(&r.get::<_, String>(20)?).unwrap_or_default(),
     })
 }
