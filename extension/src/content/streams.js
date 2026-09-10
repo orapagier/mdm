@@ -44,12 +44,24 @@ const MANIFEST_PATH = /\.(?:m3u8|m3u|mpd)(?:[?#/]|$)/i;
  *
  * A CDN is under no obligation to give its playlist a file extension, and the
  * ones that hide it behind a token are the ones this whole file exists for.
- * These are the two shapes that are still unambiguous: a path segment that *is*
- * the word, and a query parameter naming the format. Anything looser than this
- * starts matching ordinary API calls, and a candidate list with an API call at
- * the top of it is worse than one with nothing.
+ * These are the shapes that are still unambiguous: a path segment that *is*
+ * the word (with, or now without, the extension it conventionally has), and a
+ * query parameter naming the format. Anything looser than this starts matching
+ * ordinary API calls, and a candidate list with an API call at the top of it
+ * is worse than one with nothing.
+ *
+ * The bare `/hls/` and `/dash/` path segments are the ordinary argument for
+ * letting a token in: the very sites whose playlists arrive as an opaque
+ * token serve them from a dedicated HLS or DASH tree (`/hls/<session>/index`),
+ * and an API endpoint does not route through one. The catch that goes with
+ * them is honest about staying out — a *segment*, which shares the tree, is
+ * not kept whatever it ends in. A media-continuation extension is what a
+ * segment has and a tokenized playlist does not, so any URL whose `/hls/` or
+ * `/dash/` path leads to one is left alone. The two shapes between them match
+ * the manifest most streams play from, which is fetched once at the start —
+ * exactly the entry this file is here to keep.
  */
-const MANIFEST_HINT = /(?:^|[/?&=])(?:master|playlist|index|manifest|hls|dash)(?:[-_.][^/?&]*)?\.(?:m3u8|m3u|mpd)|[?&](?:type|format|ext)=(?:m3u8|mpd|hls|dash)\b/i;
+const MANIFEST_HINT = /(?:^|[/?&=])(?:master|playlist|index|manifest|hls|dash)(?:[-_.][^/?&]*)?\.(?:m3u8|m3u|mpd)|[?&](?:type|format|ext)=(?:m3u8|mpd|hls|dash)\b|\/(?:hls|dash)\/(?!.*\.(?:ts|m4s|mp4|m4a|aac|webm|vtt|mp3|ogg|opus|flv|3gp|3gpp)(?:[?#]|$))/i;
 
 function looksLikeManifest(url) {
   if (!/^https?:\/\//i.test(url)) return false;

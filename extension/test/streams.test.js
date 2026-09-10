@@ -79,6 +79,19 @@ check("a playlist named by the query rather than by the path", () => {
   keeps("https://cdn.example.com/api/stream?format=hls");
 });
 
+check("a tokenized playlist served from an HLS or DASH tree", () => {
+  // The address says nothing at all — no extension, no query, no hint — but
+  // it lives in the tree the site only routes manifests through. This is the
+  // shape a download button on a streaming embed most often hands the player.
+  keeps("https://100.wowstreamingsofast.lol/hls/9tR4vXQ0zLpKm");
+  keeps("https://cdn.example.com/dash/stream/a1b2c3?token=xyz");
+  keeps("https://cdn.example.com/hls/index-f1-v1-a1.m3u8");
+  // The same trees hold the *segments*, which must still be thrown away
+  // whatever their address pretends to be.
+  drops("https://100.wowstreamingsofast.lol/hls/9tR4vXQ0zLpKm.ts");
+  drops("https://cdn.example.com/dash/stream/a1b2c3.m4s");
+});
+
 check("segments are not the stream, whatever they end in", () => {
   // The reported download: one of these, complete, 2.7 MB, and six seconds of
   // a film. Keeping it here would put it back at the top of the candidates.

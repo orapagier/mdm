@@ -47,20 +47,6 @@
   /** Narrower than this and there is no room to sit on the player at all. */
   const MIN_BUTTON = 88;
 
-  /**
-   * How many times the panel may be *removed* before it stops trying.
-   *
-   * Counted only when the host element is taken out of the DOM (a page
-   * rebuilding itself, a SPA swapping a section) — not when a content
-   * blocker merely hides it with CSS. Cosmetic hiding is answered with
-   * `!important` on the host itself and costs nothing, because that is a
-   * fight the panel can win every time; removal is the page restructuring
-   * under it, and after enough of those the panel is better off standing
-   * down.
-   */
-  const MAX_REBUILDS = 10;
-  let rebuilds = 0;
-
   let host = null;
   let shadow = null;
   let button = null;
@@ -69,6 +55,8 @@
   let hideTimer = null;
   let rafPending = false;
   let enabled = true;
+  /** The geometry the button was last grounded on, for the transition hold. */
+  let shownAt = null;
 
   /* ---------------------------------------------------------------- *
    * Panel construction
@@ -105,7 +93,6 @@
       .btn {
         position: fixed;
         z-index: 2147483647;
-        display: none;
         box-sizing: border-box;
         max-width: 100%;
         white-space: nowrap;
@@ -119,15 +106,29 @@
         color: #fff;
         font: 500 13px/1 system-ui, -apple-system, "Segoe UI", sans-serif;
         cursor: pointer;
-        pointer-events: auto;
+        pointer-events: none;
         box-shadow: 0 3px 14px rgba(0, 0, 0, .45);
-        backdrop-filter: blur(6px);
-        transition: opacity .12s ease, transform .12s ease;
-        opacity: .92;
+        /* Off by default; .up brings it on. Hiding is opacity rather than
+           display: flipping display drops the element out of the tree and
+           redraws it whole the next tick, which is a hard blink on every feed
+           transition. An opacity fade is a compositor-only repaint, and the
+           transition is split so showing appears immediately (visibility flips
+           at once, opacity fades in) while hiding stays visible for the fade
+           and is taken away only at the end — so a momentary dip in the
+           reading never makes the button blink off screen. */
+        opacity: 0;
+        visibility: hidden;
+        transition: opacity .12s ease, visibility 0s linear .12s;
       }
-      .btn:hover { opacity: 1; transform: translateY(-1px); background: #2f6feb; }
+      .btn.up {
+        opacity: .92;
+        visibility: visible;
+        pointer-events: auto;
+        transition: opacity .12s ease, visibility 0s;
+      }
+      .btn:hover { opacity: 1; background: #2f6feb; }
       .btn[data-state="busy"] { opacity: .7; cursor: default; }
-      .btn[data-state="busy"]:hover { background: rgba(20,22,28,.86); transform: none; }
+      .btn[data-state="busy"]:hover { background: rgba(20,22,28,.86); }
       .arrow { font-size: 14px; line-height: 1; flex: none; }
       .words { overflow: hidden; text-overflow: ellipsis; }
     `;
@@ -195,60 +196,152 @@
     return best;
   }
 
+  /** How long a bad reading must persist before the button believes it. */
+  const SETTLE_MS = 350;
+
+  let visibleUp = false;
+
+  function setVisible(up) {
+    if (!button || visibleUp === up) return;
+    visibleUp = up;
+    button.classList.toggle("up", up);
+  }
+
+  /**
+   * Put the button where the player it is for sits.
+   *
+   * The reading it runs on is taken a frame at a time, and a frame of a feed
+   * transition is not the feed: as autoplay slides the next post in, the
+   * current player's box is momentarily too small to seat the button — the
+   * exact geometry this function would otherwise read as "hide". Reacting to
+   * each such frame is how the button blinked mid-transition, so this keeps
+   * the last good position and only gives it up once a bad reading has held
+   * for `SETTLE_MS` — which is a state, not a frame.
+   */
   function place() {
     rafPending = false;
-    if (!enabled || !button) return;
+    if (!enabled || !button) { setVisible(false); return; }
 
     // Fullscreen has its own UI layer and the button would sit over controls.
-    if (document.fullscreenElement) {
-      button.style.display = "none";
-      return;
-    }
+    if (document.fullscreenElement) { setVisible(false); return; }
 
+    let target = null;
     const video = primary();
-    tracked = video;
-    if (!video) {
-      button.style.display = "none";
+    if (video) {
+      const r = video.getBoundingClientRect();
+
+      // Work against the part of the player actually on screen. Clamping to the
+      // viewport instead would park the button above a half-scrolled video —
+      // floating on the page rather than sitting on the player.
+      const top = Math.max(r.top, 0);
+      const bottom = Math.min(r.bottom, innerHeight);
+      const left = Math.max(r.left, 0);
+      const right = Math.min(r.right, innerWidth);
+
+      const PAD = 12;
+      const room = right - left - PAD * 2;
+
+      // Too little of the player visible to sit on top of. Measured against what
+      // a button needs rather than against what this one currently is, so a long
+      // message cannot talk the panel off the screen.
+      const h = button.offsetHeight || 32;
+      if (bottom - top >= h + PAD * 2 && room >= MIN_BUTTON) {
+        // Never wider than the player it is sitting on.
+        target = { video, top, left, right, room, w: button.offsetWidth || 140 };
+      }
+    }
+
+    if (target) {
+      shownAt = { at: performance.now(), target };
+      tracked = video;
+    } else if (shownAt && performance.now() - shownAt.at < SETTLE_MS) {
+      // A transition, not a state: stay put on the last good grounding rather
+      // than vanishing for a frame or two.
+      target = shownAt.target;
+    } else if (tracked && tracked.isConnected) {
+      // The reading just went bad on the video the button is already for.
+      // Chromium's `content-visibility: auto` — which TikTok's feed rows are
+      // padded with — reports an *empty* box for an element its engine takes
+      // to be outside the relevancy margin, and on Brave/Chromium that margin
+      // is more eager than on Firefox, so a video the user is plainly staring
+      // at can read as a 0×0 rectangle most of the time. An empty box is no
+      // ground for hiding anything: the button holds the last good place, and
+      // only a rect that explicitly parks the whole video outside the
+      // viewport — the user having scrolled on — unsits it.
+      const r = tracked.getBoundingClientRect();
+      const blank = r.width === 0 && r.height === 0;
+      if (blank) {
+        target = shownAt && shownAt.target;
+      } else {
+        const off =
+          r.bottom <= 0 || r.top >= innerHeight || r.right <= 0 || r.left >= innerWidth;
+        if (!off) target = shownAt && shownAt.target;
+      }
+    } else {
+      // Nothing placed, nothing held — this is the frame that would hide the
+      // button. The video the user is actually watching can still be the very
+      // one whose geometry is unreadable: a feed row padded with Chromium's
+      // `content-visibility: auto` reports an empty box for a video its engine
+      // deems outside the relevancy margin, even while that same video is the
+      // one being autoplayed on screen. A *playing* video is the strongest
+      // statement of "the thing on screen" a feed makes — the browser only
+      // autoplays what it can see — so the button grounds on it at a plain
+      // position rather than vanishing. The click reads the page afresh anyway
+      // (`onClick` re-runs `targets`), so the download is the right post even
+      // when the placement itself is a guess.
+      const PAD = 12;
+      for (const v of document.querySelectorAll("video")) {
+        if (!v.isConnected || v.paused || v.ended || v.readyState < 2) continue;
+        const cs = getComputedStyle(v);
+        if (cs.visibility === "hidden" || cs.display === "none") continue;
+        const r = v.getBoundingClientRect();
+        const blank = r.width <= 1 && r.height <= 1;
+        const off =
+          r.bottom <= 0 || r.top >= innerHeight || r.right <= 0 || r.left >= innerWidth;
+        if (!blank && off) continue;
+        const w = button.offsetWidth || 140;
+        target = blank
+          ? { video: v, top: PAD, left: PAD, right: innerWidth - PAD, room: innerWidth - PAD * 2, w }
+          : {
+              video: v,
+              top: Math.max(r.top, 0),
+              left: Math.max(r.left, 0),
+              right: Math.min(r.right, innerWidth),
+              room: Math.min(r.right, innerWidth) - Math.max(r.left, 0) - PAD * 2,
+              w,
+            };
+        tracked = v;
+        shownAt = { at: performance.now(), target };
+        break;
+      }
+    }
+
+    if (!target) {
+      tracked = null;
+      shownAt = null;
+      setVisible(false);
       return;
     }
 
-    const r = video.getBoundingClientRect();
+    setVisible(true);
 
-    // Work against the part of the player actually on screen. Clamping to the
-    // viewport instead would park the button above a half-scrolled video —
-    // floating on the page rather than sitting on the player.
-    const top = Math.max(r.top, 0);
-    const bottom = Math.min(r.bottom, innerHeight);
-    const left = Math.max(r.left, 0);
-    const right = Math.min(r.right, innerWidth);
-
-    const PAD = 12;
-    button.style.display = "inline-flex";
-
-    // Never wider than the player it is sitting on.
-    //
     // The button says more than "Download": it reports what happened to a
     // click, and what happened can be a whole sentence from the app. Left to
     // size itself it grew to fit that sentence, went wider than a portrait
-    // video, and was hidden by the test below — a second after the click that
+    // video, and was hidden by the test above — a second after the click that
     // produced the message, which reads exactly like the button vanishing of
     // its own accord. Clamped and ellipsised instead; the whole text is still
     // on the tooltip, which is where the long version was always going.
-    const room = right - left - PAD * 2;
-    button.style.maxWidth = `${Math.max(0, room)}px`;
-    const w = button.offsetWidth || 140;
-    const h = button.offsetHeight || 32;
-
-    // Too little of the player visible to sit on top of. Measured against what
-    // a button needs rather than against what this one currently is, so a long
-    // message cannot talk the panel off the screen.
-    if (bottom - top < h + PAD * 2 || room < MIN_BUTTON) {
-      button.style.display = "none";
-      return;
-    }
-
-    button.style.top = `${top + PAD}px`;
-    button.style.left = `${right - w - PAD}px`;
+    const { top, left, right, room, w } = target;
+    const PAD = 12;
+    const nextMaxWidth = `${Math.max(0, room)}px`;
+    const nextTop = `${top + PAD}px`;
+    const nextLeft = `${right - w - PAD}px`;
+    // Touch the geometry only when it moved: writing the same values every
+    // frame is what keeps the compositor repainting the panel in place.
+    if (button.style.maxWidth !== nextMaxWidth) button.style.maxWidth = nextMaxWidth;
+    if (button.style.top !== nextTop) button.style.top = nextTop;
+    if (button.style.left !== nextLeft) button.style.left = nextLeft;
   }
 
   function schedule() {
@@ -920,8 +1013,7 @@
    * means put ours back. And a panel that is present but has been *hidden* —
    * which is what a cosmetic filter rule does, rather than removing anything —
    * is answered with the one thing that outranks a stylesheet, `!important` on
-   * the element itself. Bounded, because a blocker that means it will win, and
-   * losing quietly beats rebuilding a panel once a second for ever.
+   * the element itself.
    */
   function standing() {
     if (!host) return false;
@@ -946,16 +1038,25 @@
   /**
    * Put the panel back after it was taken out of the DOM.
    *
-   * The one path every recovery takes, so the poll and the observer count
-   * against the same budget and neither can loop behind the other's back.
+   * The host is a node we hold a reference to; detachment does not destroy it,
+   * only takes it out of the document. So "put back" is re-appending the same
+   * element — its shadow root and button come with it, nothing is rebuilt, and
+   * re-appearance is invisible rather than a fresh draw. That is also why
+   * there is no rebuild budget: re-appending a node costs nothing, so there is
+   * nothing to spend, and a page that keeps taking the panel down is argued
+   * with as long as the page itself lasts instead of given up on after a
+   * handful of rounds. The only reason to ever stand down is a newer
+   * injection of this file having put its own panel up.
+   *
+   * The poll and the observer both land here, so they share one recovery
+   * path and cannot loop behind each other's back.
    */
   function restore() {
     if (!host) return false;
     if (host.isConnected) return true;
     // A newer injection has its own panel up: this one is finished.
     if (document.querySelector(`[${PANEL_MARK}]`)) return false;
-    if (rebuilds++ >= MAX_REBUILDS) return false;
-    build();
+    (document.documentElement || document.body).appendChild(host);
     schedule();
     return true;
   }
@@ -985,11 +1086,15 @@
     // vanishes, which is the difference between a button that flickers and
     // one that never leaves.
     //
-    // `restore` shares its rebuild budget with the poll, so a page that keeps
-    // taking the panel down is argued with the same number of times either
-    // way, and stopped just as decisively.
+    // A mutation of anything else — which on a live feed is nearly every
+    // mutation — is ignored: the panel is still connected and standing, and
+    // the events listeners and the poll already cover repositioning. Asking
+    // `isConnected` on every mutation is one cheap bit, far cheaper than even
+    // beginning a recovery that the next check would call off.
     if (typeof MutationObserver !== "undefined") {
-      const observer = new MutationObserver(() => restore());
+      const observer = new MutationObserver(() => {
+        if (host && !host.isConnected) restore();
+      });
       observer.observe(document.documentElement || document.body, {
         childList: true,
         subtree: true,
@@ -1015,7 +1120,7 @@
   browser.storage.onChanged.addListener((changes, area) => {
     if (area !== "local" || !changes.settings) return;
     enabled = (changes.settings.newValue || {}).videoButton !== false;
-    if (!enabled && button) button.style.display = "none";
+    if (!enabled) setVisible(false);
     else schedule();
   });
 })();

@@ -610,11 +610,13 @@ const PREEMPT_RULE_ID = 9001;
  * How long an arming lasts.
  *
  * Long enough for a download button that asks its own API where the file is
- * before navigating — a couple of round trips — and short enough that a click
- * which turned out not to be a download leaves nothing behind. Whichever comes
- * first, the rule is also removed the instant the handoff page loads.
+ * before navigating — which for these hosts routinely includes a seconds-long
+ * free-user countdown between the button and the address that answers once —
+ * and short enough that a click which turned out not to be a download leaves
+ * nothing behind. Whichever comes first, the rule is also removed the instant
+ * the handoff page loads.
  */
-const ARM_MS = 12_000;
+const ARM_MS = 30_000;
 
 let disarmTimer = null;
 

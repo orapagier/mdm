@@ -226,3 +226,32 @@ if (!CAN_BLOCK) {
     true
   );
 }
+
+/* The request net is also armed the moment the button goes down, a beat
+ * before the click this file cannot catch. Two reasons, both of them about
+ * Brave and neither of them available anywhere else:
+ *
+ * On Click, the worker behind `armPreempt` is cold. The message that arms
+ * the net has to wake a service worker that was stopped thirty seconds of
+ * idleness ago, and only after it wakes does `updateSessionRules` run — a
+ * couple of hundred milliseconds on a good day. A download button that
+ * navigates the instant it is clicked sends its request out in that window;
+ * the net lands, armed and empty, after the one request it exists for has
+ * already gone. Pressing, rather than clicking, is how the arming is told
+ * what is about to happen, and it spends the worker's whole wake-up running
+ * before the button fires a single handler.
+ *
+ * And a file host's free-user flow routinely sits on the click for a while —
+ * a "your download will begin shortly" countdown, a slot in the queue — then
+ * navigates seconds later. The net held for a burst would have gone down by
+ * then. Arming at the press gives that window from the moment the user turns
+ * the download loose.
+ *
+ * `button === 0` only, so a right-click that opens a menu arms nothing, and
+ * the click handler that follows is left to do its own deciding. */
+{
+  const pressArms = (e) => {
+    if (e.button === 0 && onSingleUsePage()) armRequestNet();
+  };
+  addEventListener("pointerdown", pressArms, true);
+}
