@@ -2,10 +2,9 @@
 //! filename safety and the credentials a download is sent with.
 
 use mdm_core::categories::{categorize, extension_of};
-use mdm_core::engine::{
-    authorization_for, filename_from_url, job_from_url, queue_open_at, sanitize, stem_taken,
-    strip_userinfo, unique_filename, unique_name, wants_ytdlp,
-};
+use mdm_core::engine::{authorization_for, job_from_url, strip_userinfo, wants_ytdlp};
+use mdm_core::naming::{filename_from_url, sanitize, stem_taken, unique_filename, unique_name};
+use mdm_core::rules::queue_open_at;
 use mdm_core::human_bytes;
 use mdm_core::model::{Credential, Queue, Settings, Status};
 

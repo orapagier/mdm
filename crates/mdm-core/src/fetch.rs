@@ -1026,7 +1026,7 @@ pub async fn probe(client: &reqwest::Client, url: &str) -> Result<Probe> {
         .get(reqwest::header::CONTENT_DISPOSITION)
         .and_then(|v| v.to_str().ok())
         .and_then(filename_from_disposition)
-        .unwrap_or_else(|| crate::engine::filename_from_url(&final_url));
+        .unwrap_or_else(|| crate::naming::filename_from_url(&final_url));
 
     Ok(Probe { url: final_url, size, resumable, filename, mime, validator })
 }
@@ -1046,13 +1046,13 @@ fn filename_from_disposition(value: &str) -> Option<String> {
         )
     });
     if let Some(name) = extended.filter(|n| !n.is_empty()) {
-        return Some(crate::engine::sanitize(name));
+        return Some(crate::naming::sanitize(name));
     }
     let plain = value.split(';').find_map(|part| {
         let rest = part.trim().strip_prefix("filename=")?;
         Some(rest.trim_matches('"').to_owned())
     })?;
-    Some(crate::engine::sanitize(plain)).filter(|n| !n.is_empty())
+    Some(crate::naming::sanitize(plain)).filter(|n| !n.is_empty())
 }
 
 /// Whether an address answers with a web page rather than a file.
@@ -1136,7 +1136,7 @@ pub async fn open(spec: &Spec) -> Result<Option<(reqwest::Response, Probe)>> {
     let filename = disposition
         .as_deref()
         .and_then(filename_from_disposition)
-        .unwrap_or_else(|| crate::engine::filename_from_url(&final_url));
+        .unwrap_or_else(|| crate::naming::filename_from_url(&final_url));
 
     if answered_with_a_page(&mime, disposition.as_deref()) {
         return Ok(None);
@@ -1195,7 +1195,7 @@ pub async fn download_open(
     if let Some(size) = probe.size {
         check_space(&spec.dir, size)?;
     }
-    let target = spec.dir.join(crate::engine::sanitize(name));
+    let target = spec.dir.join(crate::naming::sanitize(name));
     let part = PathBuf::from({
         let mut p = target.as_os_str().to_owned();
         p.push(PART_SUFFIX);
@@ -1322,7 +1322,7 @@ pub async fn download(
     }
     std::fs::create_dir_all(&spec.dir)
         .with_context(|| format!("creating {}", spec.dir.display()))?;
-    let target = spec.dir.join(crate::engine::sanitize(name));
+    let target = spec.dir.join(crate::naming::sanitize(name));
     let part = PathBuf::from({
         let mut p = target.as_os_str().to_owned();
         p.push(PART_SUFFIX);

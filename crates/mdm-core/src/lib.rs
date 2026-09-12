@@ -10,9 +10,13 @@ pub mod engine;
 pub mod fetch;
 pub mod ipc;
 pub mod model;
+/// What a download is called on disk.
+pub mod naming;
 pub mod paths;
 /// DNS with a budget of its own, and addresses this machine can reach.
 pub mod resolve;
+/// What a failed download calls for, decided without carrying any of it out.
+pub mod rules;
 pub mod store;
 /// HLS and DASH, fetched and remuxed without an external tool.
 pub mod stream;
