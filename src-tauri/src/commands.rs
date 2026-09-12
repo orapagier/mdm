@@ -25,10 +25,7 @@ pub fn get_settings(engine: State<'_, Arc<Engine>>) -> Settings {
 }
 
 #[tauri::command]
-pub async fn set_settings(
-    engine: State<'_, Arc<Engine>>,
-    settings: Settings,
-) -> Cmd<()> {
+pub async fn set_settings(engine: State<'_, Arc<Engine>>, settings: Settings) -> Cmd<()> {
     engine
         .update_settings(settings)
         .await
@@ -131,11 +128,7 @@ pub async fn retry(engine: State<'_, Arc<Engine>>, id: i64) -> Cmd<()> {
 }
 
 #[tauri::command]
-pub async fn remove(
-    engine: State<'_, Arc<Engine>>,
-    id: i64,
-    delete_file: bool,
-) -> Cmd<()> {
+pub async fn remove(engine: State<'_, Arc<Engine>>, id: i64, delete_file: bool) -> Cmd<()> {
     engine
         .remove(id, delete_file)
         .await
@@ -421,11 +414,26 @@ pub fn chromium_browsers() -> Vec<String> {
 #[tauri::command]
 pub fn chromium_browsers() -> Vec<String> {
     const BROWSERS: [(&str, &str); 5] = [
-        (r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe", "Brave"),
-        (r"C:\Program Files\Google\Chrome\Application\chrome.exe", "Chrome"),
-        (r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe", "Chrome"),
-        (r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe", "Edge"),
-        (r"C:\Program Files\Vivaldi\Application\vivaldi.exe", "Vivaldi"),
+        (
+            r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe",
+            "Brave",
+        ),
+        (
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+            "Chrome",
+        ),
+        (
+            r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+            "Chrome",
+        ),
+        (
+            r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+            "Edge",
+        ),
+        (
+            r"C:\Program Files\Vivaldi\Application\vivaldi.exe",
+            "Vivaldi",
+        ),
     ];
     let mut found: Vec<String> = Vec::new();
     for (path, name) in BROWSERS {
@@ -452,7 +460,9 @@ pub fn open_video_window(app: AppHandle) {
 /// A window that is still loading cannot receive an event, so it collects the
 /// request itself once its scripts are running.
 #[tauri::command]
-pub fn take_pending_video(pending: State<'_, crate::video::Pending>) -> Option<crate::video::Request> {
+pub fn take_pending_video(
+    pending: State<'_, crate::video::Pending>,
+) -> Option<crate::video::Request> {
     pending.take()
 }
 

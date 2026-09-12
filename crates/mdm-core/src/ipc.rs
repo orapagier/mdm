@@ -14,10 +14,10 @@ use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc;
 
-#[cfg(unix)]
-use tokio::net::{UnixListener, UnixStream};
 #[cfg(windows)]
 use tokio::net::windows::named_pipe::ServerOptions;
+#[cfg(unix)]
+use tokio::net::{UnixListener, UnixStream};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Link {
@@ -178,8 +178,8 @@ pub async fn serve(engine: Arc<Engine>, ui: mpsc::Sender<UiRequest>) -> Result<(
             .with_context(|| format!("removing stale socket {}", path.display()))?;
     }
 
-    let listener = UnixListener::bind(&path)
-        .with_context(|| format!("binding {}", path.display()))?;
+    let listener =
+        UnixListener::bind(&path).with_context(|| format!("binding {}", path.display()))?;
     log::info!("ipc listening on {}", path.display());
 
     loop {
@@ -305,11 +305,7 @@ where
 /// answered nothing would stall the browser-to-app bridge for its whole read
 /// timeout and then make it re-send — and the next thing the user asked for
 /// would time out instead of arriving.
-async fn dispatch(
-    msg: &Value,
-    engine: &Arc<Engine>,
-    ui: &mpsc::Sender<UiRequest>,
-) -> Value {
+async fn dispatch(msg: &Value, engine: &Arc<Engine>, ui: &mpsc::Sender<UiRequest>) -> Value {
     match msg.get("type").and_then(Value::as_str).unwrap_or("") {
         // The list travels with every pong because it is what tells the
         // extension which hosts to hold a request on — see the `preempt`
@@ -352,11 +348,8 @@ async fn dispatch(
             // not be allowed to hold up the click. Giving up here costs
             // nothing that was not already lost: a server that has sent no
             // headers has served nothing.
-            let taken = tokio::time::timeout(
-                std::time::Duration::from_secs(8),
-                engine.preempt(job),
-            )
-            .await;
+            let taken =
+                tokio::time::timeout(std::time::Duration::from_secs(8), engine.preempt(job)).await;
             match taken {
                 Ok(Ok(Some(id))) => {
                     // Brought forward rather than offered. An ordinary capture

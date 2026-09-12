@@ -58,7 +58,12 @@ const SEGMENT_RETRIES: u32 = 4;
 /// fetch and a fall back to yt-dlp; the real decision is made by looking at
 /// what comes back, in [`download`].
 pub fn looks_like_manifest(url: &str, mime: &str) -> bool {
-    let mime = mime.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
+    let mime = mime
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
     if matches!(
         mime.as_str(),
         "application/vnd.apple.mpegurl"
@@ -69,7 +74,11 @@ pub fn looks_like_manifest(url: &str, mime: &str) -> bool {
     ) {
         return true;
     }
-    let path = url.split(['?', '#']).next().unwrap_or(url).to_ascii_lowercase();
+    let path = url
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(url)
+        .to_ascii_lowercase();
     path.ends_with(".m3u8") || path.ends_with(".m3u") || path.ends_with(".mpd")
 }
 
@@ -277,11 +286,7 @@ fn plan_dash(body: &str, url: &str) -> Result<Streams> {
  * Downloading
  * ------------------------------------------------------------------ */
 
-async fn fetch_part(
-    client: &reqwest::Client,
-    part: &Part,
-    stop: &AtomicBool,
-) -> Result<Vec<u8>> {
+async fn fetch_part(client: &reqwest::Client, part: &Part, stop: &AtomicBool) -> Result<Vec<u8>> {
     let mut last = None;
     for attempt in 0..SEGMENT_RETRIES {
         if stop.load(Ordering::Relaxed) {
@@ -300,12 +305,10 @@ async fn fetch_part(
             );
         }
         match request.send().await {
-            Ok(response) if response.status().is_success() => {
-                match response.bytes().await {
-                    Ok(bytes) => return Ok(bytes.to_vec()),
-                    Err(e) => last = Some(anyhow::anyhow!("{e}")),
-                }
-            }
+            Ok(response) if response.status().is_success() => match response.bytes().await {
+                Ok(bytes) => return Ok(bytes.to_vec()),
+                Err(e) => last = Some(anyhow::anyhow!("{e}")),
+            },
             Ok(response) => last = Some(anyhow::anyhow!("answered {}", response.status())),
             Err(e) => last = Some(anyhow::anyhow!("{e}")),
         }
@@ -362,9 +365,9 @@ async fn fetch_track(
             let client = client.clone();
             let part = part.clone();
             let stop = stop.clone();
-            window.push(tokio::spawn(
-                async move { fetch_part(&client, &part, &stop).await },
-            ));
+            window.push(tokio::spawn(async move {
+                fetch_part(&client, &part, &stop).await
+            }));
         }
         for handle in window {
             let bytes = handle.await.context("a segment task failed")??;
@@ -443,11 +446,14 @@ pub async fn merge(
         bail!("nothing to merge");
     }
     let base = spec.filename.clone().unwrap_or_else(|| "video".into());
-    let stem = base.rsplit_once('.').map(|(s, _)| s).unwrap_or(&base).to_string();
+    let stem = base
+        .rsplit_once('.')
+        .map(|(s, _)| s)
+        .unwrap_or(&base)
+        .to_string();
     let output = spec.dir.join(format!("{stem}.mp4"));
     let work = spec.dir.join(format!("{stem}{WORK_SUFFIX}"));
-    std::fs::create_dir_all(&work)
-        .with_context(|| format!("creating {}", work.display()))?;
+    std::fs::create_dir_all(&work).with_context(|| format!("creating {}", work.display()))?;
 
     // Stated rather than estimated: every part weighed itself at extraction.
     let total: Option<u64> = streams.iter().map(|p| p.size).sum();
@@ -568,7 +574,11 @@ pub async fn merge(
             .iter()
             .map(|path| mkv::read(path).with_context(|| format!("reading {}", path.display())))
             .collect::<Result<Vec<_>>>()?;
-        log::info!("merging {} stream(s) into {}", sources.len(), output.display());
+        log::info!(
+            "merging {} stream(s) into {}",
+            sources.len(),
+            output.display()
+        );
         mkv::remux(&sources, &output).context("rebuilding the streams as one WebM")?;
         output
     } else {
@@ -576,9 +586,16 @@ pub async fn merge(
         for path in &files {
             let tracks = mp4::read_fragmented(path)
                 .with_context(|| format!("reading {}", path.display()))?;
-            sources.push(mp4::Source { path: path.clone(), tracks });
+            sources.push(mp4::Source {
+                path: path.clone(),
+                tracks,
+            });
         }
-        log::info!("merging {} stream(s) into {}", sources.len(), output.display());
+        log::info!(
+            "merging {} stream(s) into {}",
+            sources.len(),
+            output.display()
+        );
         mp4::remux(&mut sources, &output).context("rebuilding the streams as one MP4")?;
         output
     };
@@ -610,15 +627,15 @@ pub async fn download(
 
     // Named for what it will be, not for what it is: the container is settled
     // by the remux, and every path this takes ends in MP4.
-    let base = spec
-        .filename
-        .clone()
-        .unwrap_or_else(|| "stream".into());
-    let stem = base.rsplit_once('.').map(|(s, _)| s).unwrap_or(&base).to_string();
+    let base = spec.filename.clone().unwrap_or_else(|| "stream".into());
+    let stem = base
+        .rsplit_once('.')
+        .map(|(s, _)| s)
+        .unwrap_or(&base)
+        .to_string();
     let output = spec.dir.join(format!("{stem}.mp4"));
     let work = spec.dir.join(format!("{stem}{WORK_SUFFIX}"));
-    std::fs::create_dir_all(&work)
-        .with_context(|| format!("creating {}", work.display()))?;
+    std::fs::create_dir_all(&work).with_context(|| format!("creating {}", work.display()))?;
 
     log::info!(
         "{}: {} track(s) at {}, {} segments",
@@ -726,7 +743,11 @@ pub async fn download(
         }
     }
 
-    log::info!("remuxing {} track file(s) into {}", sources.len(), output.display());
+    log::info!(
+        "remuxing {} track file(s) into {}",
+        sources.len(),
+        output.display()
+    );
     mp4::remux(&mut sources, &output).context("rebuilding the stream as MP4")?;
 
     // Only once the output exists: a failed remux leaves everything in place
@@ -752,7 +773,10 @@ mod tests {
             "https://x.test/playlist",
             "application/vnd.apple.mpegurl; charset=utf-8"
         ));
-        assert!(looks_like_manifest("https://x.test/m", "application/dash+xml"));
+        assert!(looks_like_manifest(
+            "https://x.test/m",
+            "application/dash+xml"
+        ));
     }
 
     #[test]
@@ -760,7 +784,10 @@ mod tests {
         // The query string carrying ".m3u8" must not be enough: this is an
         // mp4, and routing it through the stream path would fetch a manifest
         // that is not there.
-        assert!(!looks_like_manifest("https://x.test/v.mp4?from=a.m3u8", "video/mp4"));
+        assert!(!looks_like_manifest(
+            "https://x.test/v.mp4?from=a.m3u8",
+            "video/mp4"
+        ));
         assert!(!looks_like_manifest("https://x.test/v.mp4", "video/mp4"));
     }
 }

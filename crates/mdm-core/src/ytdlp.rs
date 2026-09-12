@@ -110,7 +110,11 @@ const MIN_KEY: usize = 16;
 /// Facebook's `/o1/v/t2/f2/m366/AQNCN9aky-….mp4` — so that is what identifies
 /// one stream as another.
 fn stream_key(url: &str) -> Option<String> {
-    let path = url::Url::parse(url).ok()?.path().trim_end_matches('/').to_owned();
+    let path = url::Url::parse(url)
+        .ok()?
+        .path()
+        .trim_end_matches('/')
+        .to_owned();
     let name = path.rsplit('/').next()?;
     (name.len() >= MIN_KEY).then(|| name.to_ascii_lowercase())
 }
@@ -192,7 +196,9 @@ fn cookie_jar(url: &str, headers: &[crate::model::Header]) -> Option<String> {
     let mut written = 0usize;
     for header in headers.iter().filter(|h| is_cookie_header(h)) {
         for pair in header.value.split(';') {
-            let Some((name, value)) = pair.split_once('=') else { continue };
+            let Some((name, value)) = pair.split_once('=') else {
+                continue;
+            };
             let (name, value) = (name.trim(), value.trim());
             // The format is one cookie per line, fields split on tabs, so a
             // tab or a newline inside one would end the field early and shift
@@ -211,7 +217,9 @@ fn cookie_jar(url: &str, headers: &[crate::model::Header]) -> Option<String> {
             // Dated to 2038 rather than the 0 that means "session cookie":
             // whether a jar keeps an expired entry is a flag on the loader,
             // and this file outlives nothing but the run that writes it.
-            jar.push_str(&format!("{host}\tFALSE\t/\tFALSE\t2147483647\t{name}\t{value}\n"));
+            jar.push_str(&format!(
+                "{host}\tFALSE\t/\tFALSE\t2147483647\t{name}\t{value}\n"
+            ));
             written += 1;
         }
     }
@@ -305,7 +313,8 @@ fn apply_js_runtimes(cmd: &mut Command) {
         }
     }
     if let Some(path) = crate::tools::owned_quickjs() {
-        cmd.arg("--js-runtimes").arg(format!("quickjs:{}", path.display()));
+        cmd.arg("--js-runtimes")
+            .arg(format!("quickjs:{}", path.display()));
     }
 }
 
@@ -425,7 +434,9 @@ fn store_info_json(url: &str, json: &[u8]) {
 /// Drop entries no download can still use, so the directory cannot grow
 /// without bound across a long-running session.
 fn sweep_info_cache(dir: &Path) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
     for entry in entries.flatten() {
         let stale = entry
             .metadata()
@@ -453,7 +464,12 @@ pub fn forget_info(url: &str) {
 /// The probe's result for this URL, if it is recent enough to download from.
 fn fresh_info_json(url: &str) -> Option<std::path::PathBuf> {
     let path = info_cache_path(url);
-    let age = std::fs::metadata(&path).ok()?.modified().ok()?.elapsed().ok()?;
+    let age = std::fs::metadata(&path)
+        .ok()?
+        .modified()
+        .ok()?
+        .elapsed()
+        .ok()?;
     (age <= INFO_REUSE).then_some(path)
 }
 
@@ -687,7 +703,11 @@ impl Plan {
             })
             .collect();
         match self.size() {
-            Some(size) => format!("{} ({})", parts.join(" + "), crate::human_bytes(size as i64)),
+            Some(size) => format!(
+                "{} ({})",
+                parts.join(" + "),
+                crate::human_bytes(size as i64)
+            ),
             None => parts.join(" + "),
         }
     }
@@ -733,12 +753,21 @@ fn fetchable(t: &Track) -> bool {
 /// streams it means to merge and leaves it off the ones it does not, in
 /// which case the extension is the only thing that says.
 fn packaging(t: &Track) -> &str {
-    if t.container.is_empty() { &t.ext } else { &t.container }
+    if t.container.is_empty() {
+        &t.ext
+    } else {
+        &t.container
+    }
 }
 
 /// Read one format out of yt-dlp's JSON.
 fn track_from(v: &serde_json::Value) -> Track {
-    let text = |key: &str| v.get(key).and_then(serde_json::Value::as_str).unwrap_or("").to_string();
+    let text = |key: &str| {
+        v.get(key)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_string()
+    };
     Track {
         url: text("url"),
         headers: v
@@ -806,7 +835,14 @@ pub async fn plan(
     let mut cmd = Command::new(&bin);
     #[cfg(windows)]
     cmd.creation_flags(CREATE_NO_WINDOW);
-    cmd.args(["-J", "--no-warnings", "--no-playlist", "--simulate", "-f", format]);
+    cmd.args([
+        "-J",
+        "--no-warnings",
+        "--no-playlist",
+        "--simulate",
+        "-f",
+        format,
+    ]);
     apply_cookies(&mut cmd, cookies_from);
     apply_js_runtimes(&mut cmd);
     for arg in extra {
@@ -850,7 +886,10 @@ pub async fn plan(
 
     // Two shapes: a merge names its parts, a single format is the object
     // itself. Both arrive here as a list of tracks.
-    let tracks = match v.get("requested_formats").and_then(serde_json::Value::as_array) {
+    let tracks = match v
+        .get("requested_formats")
+        .and_then(serde_json::Value::as_array)
+    {
         Some(formats) => formats.iter().map(track_from).collect(),
         None => vec![track_from(&v)],
     };
@@ -898,7 +937,10 @@ pub async fn probe(
         }
         // Backing off rather than hammering: what refused is a bot wall, and
         // an immediate repeat is the shape it is watching for.
-        tokio::time::sleep(std::time::Duration::from_millis(600 * u64::from(attempt - 1))).await;
+        tokio::time::sleep(std::time::Duration::from_millis(
+            600 * u64::from(attempt - 1),
+        ))
+        .await;
         log::info!("{url}: no usable answer, asking again ({attempt} of {attempts})");
         out = run_probe(&bin, url, cookies_from, extra, true).await?;
     }
@@ -1001,7 +1043,11 @@ fn media_info(v: &serde_json::Value) -> Result<MediaInfo> {
             .and_then(|t| t.as_str())
             .unwrap_or("Untitled")
             .to_owned(),
-        id: v.get("id").and_then(|t| t.as_str()).unwrap_or("").to_owned(),
+        id: v
+            .get("id")
+            .and_then(|t| t.as_str())
+            .unwrap_or("")
+            .to_owned(),
         uploader: v
             .get("uploader")
             .or_else(|| v.get("channel"))
@@ -1056,13 +1102,20 @@ fn parse_format(v: &serde_json::Value) -> Option<Format> {
     }
     Some(Format {
         format_id: id,
-        ext: v.get("ext").and_then(|e| e.as_str()).unwrap_or("").to_owned(),
+        ext: v
+            .get("ext")
+            .and_then(|e| e.as_str())
+            .unwrap_or("")
+            .to_owned(),
         resolution: v
             .get("resolution")
             .and_then(|r| r.as_str())
             .map(str::to_owned)
             .unwrap_or_else(|| {
-                match (v.get("width").and_then(|w| w.as_i64()), v.get("height").and_then(|h| h.as_i64())) {
+                match (
+                    v.get("width").and_then(|w| w.as_i64()),
+                    v.get("height").and_then(|h| h.as_i64()),
+                ) {
                     (Some(w), Some(h)) => format!("{w}x{h}"),
                     // Unstated dimensions are not evidence of silence. TikTok
                     // reports none for its `download` format, which is the
@@ -1106,7 +1159,10 @@ const TAG: &str = "@MDM@";
 fn print_file_paths() -> (std::path::PathBuf, std::path::PathBuf) {
     let token = token();
     let dir = crate::paths::runtime_dir().join("print");
-    (dir.join(format!("{token}.name.txt")), dir.join(format!("{token}.file.txt")))
+    (
+        dir.join(format!("{token}.name.txt")),
+        dir.join(format!("{token}.file.txt")),
+    )
 }
 
 /// A name no concurrent run can collide with.
@@ -1208,8 +1264,11 @@ pub async fn download(
         // slower than it needs to be. There is no external downloader to hand
         // it any more, so this is the only lever left.
         .arg("--concurrent-fragments")
-        .arg(connections.clamp(1, crate::fetch::MAX_CONNECTIONS).to_string());
-
+        .arg(
+            connections
+                .clamp(1, crate::fetch::MAX_CONNECTIONS)
+                .to_string(),
+        );
 
     let (name_file, file_file) = print_file_paths();
     if let Some(dir) = name_file.parent() {
@@ -1256,7 +1315,10 @@ pub async fn download(
     if let Some(path) = &jar {
         cmd.arg("--cookies").arg(path);
     }
-    for h in headers.iter().filter(|h| jar.is_none() || !is_cookie_header(h)) {
+    for h in headers
+        .iter()
+        .filter(|h| jar.is_none() || !is_cookie_header(h))
+    {
         cmd.arg("--add-header").arg(h.to_arg());
     }
 
@@ -1288,7 +1350,8 @@ pub async fn download(
             // silently dropped — which is how a failure reached the UI as a
             // bare exit status. Keeping the tail of everything printed means
             // the reason survives into the message the user is shown.
-            let mut recent: std::collections::VecDeque<String> = std::collections::VecDeque::with_capacity(16);
+            let mut recent: std::collections::VecDeque<String> =
+                std::collections::VecDeque::with_capacity(16);
             while let Ok(Some(line)) = lines.next_line().await {
                 if line.contains("ERROR:") {
                     // Strip yt-dlp's own prefixes so the UI shows the cause.
@@ -1302,7 +1365,10 @@ pub async fn download(
                         // The external downloader's own diagnostic, printed
                         // just before this summary line, is more specific
                         // than the summary itself.
-                        format!("{raw}: {}", recent.iter().cloned().collect::<Vec<_>>().join(" | "))
+                        format!(
+                            "{raw}: {}",
+                            recent.iter().cloned().collect::<Vec<_>>().join(" | ")
+                        )
                     } else {
                         raw.to_string()
                     };
@@ -1395,7 +1461,9 @@ pub async fn download(
         if let Ok(path) = tokio::fs::read_to_string(&file_file).await {
             let path = path.trim();
             if !path.is_empty() {
-                let _ = tx.send(Event::Finished(std::path::PathBuf::from(path))).await;
+                let _ = tx
+                    .send(Event::Finished(std::path::PathBuf::from(path)))
+                    .await;
             }
         }
         let _ = tokio::fs::remove_file(&name_file).await;
@@ -1547,7 +1615,11 @@ pub fn plain_error(message: &str) -> String {
 
     if lower.contains("timed out") || lower.contains("timeout") {
         let who = site.trim().to_owned();
-        let who = if who.is_empty() { "The server".to_owned() } else { who };
+        let who = if who.is_empty() {
+            "The server".to_owned()
+        } else {
+            who
+        };
         return format!("{who} stopped responding — the request timed out.");
     }
 
@@ -1591,10 +1663,24 @@ pub fn is_permanent_error(message: &str) -> bool {
 /// tool even though the URL looks ordinary.
 pub fn looks_like_streaming_site(url: &str) -> bool {
     const HOSTS: &[&str] = &[
-        "youtube.com", "youtu.be", "vimeo.com", "dailymotion.com", "twitch.tv",
-        "twitter.com", "x.com", "reddit.com", "tiktok.com", "instagram.com",
-        "facebook.com", "soundcloud.com", "bandcamp.com", "bilibili.com",
-        "odysee.com", "rumble.com", "nebula.tv", "ted.com",
+        "youtube.com",
+        "youtu.be",
+        "vimeo.com",
+        "dailymotion.com",
+        "twitch.tv",
+        "twitter.com",
+        "x.com",
+        "reddit.com",
+        "tiktok.com",
+        "instagram.com",
+        "facebook.com",
+        "soundcloud.com",
+        "bandcamp.com",
+        "bilibili.com",
+        "odysee.com",
+        "rumble.com",
+        "nebula.tv",
+        "ted.com",
     ];
     let Ok(parsed) = url::Url::parse(url) else {
         return false;
@@ -1620,7 +1706,12 @@ pub fn looks_like_streaming_site(url: &str) -> bool {
 /// `application/vnd.apple.mpegurl`: it is a *description* of a stream, and
 /// turning one into a file is exactly what yt-dlp is for.
 pub fn is_media_response(mime: &str) -> bool {
-    let mime = mime.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
+    let mime = mime
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
     mime.starts_with("video/") || mime.starts_with("audio/")
 }
 
@@ -1640,7 +1731,10 @@ mod tests {
     }
 
     fn header(name: &str, value: &str) -> crate::model::Header {
-        crate::model::Header { name: name.into(), value: value.into() }
+        crate::model::Header {
+            name: name.into(),
+            value: value.into(),
+        }
     }
 
     /// The whole point of the jar is that yt-dlp reads it without complaining,
@@ -1681,7 +1775,11 @@ mod tests {
     /// Nothing to scope a cookie to, and nothing to say.
     #[test]
     fn a_request_with_no_session_gets_no_jar() {
-        assert!(cookie_jar("https://example.com/f.mkv", &[header("Referer", "https://x/")]).is_none());
+        assert!(cookie_jar(
+            "https://example.com/f.mkv",
+            &[header("Referer", "https://x/")]
+        )
+        .is_none());
         assert!(cookie_jar("https://example.com/f.mkv", &[]).is_none());
         // A header that is present but empty is still no session.
         assert!(cookie_jar("https://example.com/f.mkv", &[header("Cookie", " ")]).is_none());
@@ -1700,13 +1798,21 @@ mod tests {
             "Deprecated Feature: Passing cookies as a header is a potential \
              security risk; they will be scoped to the domain of the downloaded urls."
         ));
-        assert!(is_advisory("WARNING: [generic] Falling back on generic information extractor"));
-        assert!(is_advisory("[debug] Command-line config: ['--no-warnings']"));
+        assert!(is_advisory(
+            "WARNING: [generic] Falling back on generic information extractor"
+        ));
+        assert!(is_advisory(
+            "[debug] Command-line config: ['--no-warnings']"
+        ));
 
         // What the tail exists for: the downloader's own diagnostic, which is
         // more specific than the summary that follows it.
-        assert!(!is_advisory("ERROR: unable to download video data: HTTP Error 403: Forbidden"));
-        assert!(!is_advisory("[download] Got error: The read operation timed out"));
+        assert!(!is_advisory(
+            "ERROR: unable to download video data: HTTP Error 403: Forbidden"
+        ));
+        assert!(!is_advisory(
+            "[download] Got error: The read operation timed out"
+        ));
     }
 
     /// "Unsupported URL" is yt-dlp quoting back the address it was given.
@@ -1717,7 +1823,10 @@ mod tests {
     fn an_unsupported_url_names_the_site_and_a_way_forward() {
         let said = plain_error("Unsupported URL: https://filekeeper.net/download");
         assert!(said.contains("filekeeper.net"), "{said}");
-        assert!(!said.contains("http"), "the URL is what the user already had: {said}");
+        assert!(
+            !said.contains("http"),
+            "the URL is what the user already had: {said}"
+        );
 
         // The player link from the bug report: 200 characters of signed token,
         // every one of which used to be printed inside the error about it.
@@ -1762,8 +1871,9 @@ mod tests {
         assert_eq!(a.resolution, "audio only");
 
         // Dimensions, where given, still win.
-        let v = fmt(r#"{"format_id":"v","vcodec":"h265","acodec":"none","width":720,"height":1194}"#)
-            .unwrap();
+        let v =
+            fmt(r#"{"format_id":"v","vcodec":"h265","acodec":"none","width":720,"height":1194}"#)
+                .unwrap();
         assert_eq!(v.resolution, "720x1194");
     }
 
@@ -1776,13 +1886,17 @@ mod tests {
         assert!(!is_permanent_error(
             "ERROR: [TikTok] 7678211224177282322: Unable to extract universal data for rehydration"
         ));
-        assert!(!is_permanent_error("ERROR: unable to download webpage: timed out"));
+        assert!(!is_permanent_error(
+            "ERROR: unable to download webpage: timed out"
+        ));
 
         // These will answer identically however many times they are asked.
         assert!(is_permanent_error(
             "ERROR: [TikTok] 7089074849308151082: Your IP address is blocked from accessing this post"
         ));
-        assert!(is_permanent_error("ERROR: Unsupported URL: https://example.com/"));
+        assert!(is_permanent_error(
+            "ERROR: Unsupported URL: https://example.com/"
+        ));
         assert!(is_permanent_error("ERROR: [youtube] abc: Private video"));
     }
 
@@ -1812,7 +1926,10 @@ mod tests {
         let elsewhere = serde_json::json!({
             "formats": [{ "url": "https://video.xx.fbcdn.net/o1/v/t2/f2/m366/AQPZoRFr7Gcg_uZCATKOdye.mp4" }]
         });
-        assert_eq!(matches_stream(&elsewhere, &[played.to_string()]), Some(false));
+        assert_eq!(
+            matches_stream(&elsewhere, &[played.to_string()]),
+            Some(false)
+        );
 
         // Nothing fetched yet is not evidence that the page is wrong.
         assert_eq!(matches_stream(&elsewhere, &[]), None);
@@ -1827,8 +1944,10 @@ mod tests {
         assert_eq!(stream_key("https://cdn.test/x/video.mp4"), None);
         // A real token is long and survives a different bucket and query.
         assert_eq!(
-            stream_key("https://v16-webapp-prime.tiktok.com/video/tos/alisg/\
-                        tos-alisg-pve-0037c001/osCfA6CgmLS1AIOaQUIGepe6IsbcAoEXD4A5Gj/?a=1988"),
+            stream_key(
+                "https://v16-webapp-prime.tiktok.com/video/tos/alisg/\
+                        tos-alisg-pve-0037c001/osCfA6CgmLS1AIOaQUIGepe6IsbcAoEXD4A5Gj/?a=1988"
+            ),
             Some("oscfa6cgmls1aioaquigepe6isbcaoexd4a5gj".into())
         );
     }
@@ -1852,11 +1971,17 @@ mod tests {
         let f = crate::model::Settings::default().ytdlp_format;
         // Written across several source lines; it has to reach yt-dlp as one
         // expression, with no whitespace smuggled into the middle of it.
-        assert!(!f.contains(char::is_whitespace), "the selector was broken up: {f}");
+        assert!(
+            !f.contains(char::is_whitespace),
+            "the selector was broken up: {f}"
+        );
         assert!(f.contains("[vcodec!*=hev]"), "HEVC is not ruled out: {f}");
         // And it must still end in the plain expression, so a page offering
         // nothing but HEVC — which is TikTok on some videos — still resolves.
-        assert!(f.ends_with("/bestvideo*+bestaudio/best"), "no fallback left: {f}");
+        assert!(
+            f.ends_with("/bestvideo*+bestaudio/best"),
+            "no fallback left: {f}"
+        );
     }
 
     #[test]
@@ -1885,7 +2010,6 @@ mod tests {
             assert!(parse_already_downloaded(line).is_none(), "parsed {line:?}");
         }
     }
-
 }
 
 #[cfg(test)]
@@ -1905,7 +2029,10 @@ mod plan_tests {
     }
 
     fn plan(tracks: Vec<Track>) -> Plan {
-        Plan { title: "A video".into(), tracks }
+        Plan {
+            title: "A video".into(),
+            tracks,
+        }
     }
 
     /// The case this whole path exists for: YouTube's picture and sound, both

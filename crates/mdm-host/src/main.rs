@@ -32,7 +32,10 @@ fn connect_sock(path: &std::path::Path) -> io::Result<Sock> {
 /// `io::Error` here, which the caller's own retry loop already handles.
 #[cfg(windows)]
 fn connect_sock(path: &std::path::Path) -> io::Result<Sock> {
-    std::fs::OpenOptions::new().read(true).write(true).open(path)
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
 }
 
 /// Firefox will not send us anything larger than this, and refusing to

@@ -47,14 +47,18 @@ const LANDING: &str = "<!doctype html><title>Download</title><h1>Link expired</h
 /// request with the file — the host that was put on the list by one bad
 /// capture and has been refused ever since.
 async fn spawn_host() -> (String, Arc<AtomicUsize>) {
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind loopback");
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind loopback");
     let addr = listener.local_addr().expect("local addr");
     let hits = Arc::new(AtomicUsize::new(0));
     let counted = hits.clone();
 
     tokio::spawn(async move {
         loop {
-            let Ok((mut sock, _)) = listener.accept().await else { return };
+            let Ok((mut sock, _)) = listener.accept().await else {
+                return;
+            };
             let hits = counted.clone();
             tokio::spawn(async move {
                 let mut buf = vec![0u8; 8192];
@@ -63,11 +67,7 @@ async fn spawn_host() -> (String, Arc<AtomicUsize>) {
                     Ok(n) => n,
                 };
                 let head = String::from_utf8_lossy(&buf[..n]).to_string();
-                let path = head
-                    .split_whitespace()
-                    .nth(1)
-                    .unwrap_or("/")
-                    .to_string();
+                let path = head.split_whitespace().nth(1).unwrap_or("/").to_string();
 
                 // A range request is one connection of a multi-part download,
                 // and it is not a fresh visit to the address. Counting it as
@@ -142,7 +142,12 @@ async fn a_single_use_host_is_asked_rather_than_assumed_about() {
     std::fs::create_dir_all(&tmp).expect("temp dir");
     // Every directory the engine might touch, so the test cannot reach the
     // database or the settings of whoever is running it.
-    for var in ["XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_RUNTIME_DIR"] {
+    for var in [
+        "XDG_DATA_HOME",
+        "XDG_CONFIG_HOME",
+        "XDG_CACHE_HOME",
+        "XDG_RUNTIME_DIR",
+    ] {
         std::env::set_var(var, &tmp);
     }
 
@@ -186,9 +191,16 @@ async fn a_single_use_host_is_asked_rather_than_assumed_about() {
     let spend = reqwest::get(&url).await.expect("the browser's own request");
     assert_eq!(spend.status(), 200);
     let _ = spend.bytes().await;
-    assert_eq!(hits.load(Ordering::SeqCst), 1, "the server did not count the first request");
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        1,
+        "the server did not count the first request"
+    );
 
-    let verdict = engine.preempt(capture(&url)).await.expect("preempt does not error on a page");
+    let verdict = engine
+        .preempt(capture(&url))
+        .await
+        .expect("preempt does not error on a page");
     assert!(
         verdict.is_none(),
         "a spent address was taken off the browser, which is the one way to lose the file"

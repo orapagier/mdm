@@ -74,7 +74,10 @@ mod tests {
     use crate::model::Credential;
 
     fn with_format(format: &str) -> Settings {
-        Settings { ytdlp_format: format.to_string(), ..Settings::default() }
+        Settings {
+            ytdlp_format: format.to_string(),
+            ..Settings::default()
+        }
     }
 
     /// Every default this project has shipped has to be recognised as one, or
@@ -105,7 +108,10 @@ best[vcodec!*=hev][vcodec!*=h265]/bestvideo*+bestaudio/best";
             SUPERSEDED_FORMATS.contains(&stored),
             "the format the last release saved is no longer recognised"
         );
-        assert_eq!(migrate(with_format(stored)).ytdlp_format, Settings::default().ytdlp_format);
+        assert_eq!(
+            migrate(with_format(stored)).ytdlp_format,
+            Settings::default().ytdlp_format
+        );
     }
 
     /// A learned host has to survive being written down.

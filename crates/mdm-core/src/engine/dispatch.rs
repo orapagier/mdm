@@ -11,7 +11,10 @@ impl Engine {
             log::debug!("#{} is already being started; leaving it to that", d.id);
             return Ok(());
         }
-        let _claim = Claim { set: &self.claimed, id: d.id };
+        let _claim = Claim {
+            set: &self.claimed,
+            id: d.id,
+        };
         self.dispatch_claimed(d, job).await
     }
 
@@ -67,12 +70,18 @@ impl Engine {
             let _ = std::fs::remove_file(stash);
         }
 
-        let size = std::fs::metadata(&target).map(|m| m.len() as i64).unwrap_or(-1);
+        let size = std::fs::metadata(&target)
+            .map(|m| m.len() as i64)
+            .unwrap_or(-1);
         self.store.update_progress(d.id, size, size, None, None)?;
         let mut done = d.clone();
         done.total_bytes = size;
         done.completed_bytes = size;
-        log::info!("#{} saved from the page: {} ({size} bytes)", d.id, d.filename);
+        log::info!(
+            "#{} saved from the page: {} ({size} bytes)",
+            d.id,
+            d.filename
+        );
         self.on_complete(&done).await
     }
 
@@ -114,7 +123,9 @@ impl Engine {
         // The user's connection setting is a ceiling for the governor rather
         // than a target: it says how many are acceptable, and measurement says
         // how many actually help.
-        spec.concurrency = fetch::Concurrency::Auto { max: settings.connections };
+        spec.concurrency = fetch::Concurrency::Auto {
+            max: settings.connections,
+        };
 
         let (tx, mut rx) = mpsc::channel(64);
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -134,7 +145,13 @@ impl Engine {
             Fetcher::Direct => tokio::spawn(fetch::download(spec, tx, stop.clone())),
             Fetcher::Held(held) => {
                 let (response, probe) = *held;
-                tokio::spawn(fetch::download_open(spec, response, probe, tx, stop.clone()))
+                tokio::spawn(fetch::download_open(
+                    spec,
+                    response,
+                    probe,
+                    tx,
+                    stop.clone(),
+                ))
             }
         };
 
@@ -161,7 +178,9 @@ impl Engine {
             while let Some(event) = rx.recv().await {
                 let Some(engine) = weak.upgrade() else { break };
                 let mut jobs = engine.fetch_jobs.lock().unwrap();
-                let Some(state) = jobs.get_mut(&id) else { break };
+                let Some(state) = jobs.get_mut(&id) else {
+                    break;
+                };
                 match event {
                     fetch::Event::Progress(p) => {
                         state.downloaded = p.downloaded as i64;
@@ -214,7 +233,10 @@ impl Engine {
             Err(e) => {
                 // Whatever went wrong here will go wrong again in a moment,
                 // in the download, which is the place that reports it.
-                log::debug!("#{}: could not resolve the formats ({e:#}); leaving it to yt-dlp", d.id);
+                log::debug!(
+                    "#{}: could not resolve the formats ({e:#}); leaving it to yt-dlp",
+                    d.id
+                );
                 return None;
             }
         };
@@ -259,7 +281,11 @@ impl Engine {
         // Fetching such a plan here would spend a retry (and show the user a
         // failure) on an attempt that can never become a download, so the plan
         // stays with the tool whose request the address was issued to.
-        if plan.tracks.iter().any(|t| rules::cdn_signs_to_session(&t.url)) {
+        if plan
+            .tracks
+            .iter()
+            .any(|t| rules::cdn_signs_to_session(&t.url))
+        {
             log::info!(
                 "#{}: {} — its addresses are session-signed; yt-dlp will download it",
                 d.id,
@@ -308,7 +334,9 @@ impl Engine {
         }
         // What the whole job weighs, before a byte of it has arrived.
         if let Some(size) = plan.size() {
-            let _ = self.store.update_progress(d.id, size as i64, d.completed_bytes, None, None);
+            let _ = self
+                .store
+                .update_progress(d.id, size as i64, d.completed_bytes, None, None);
         }
 
         log::info!(
@@ -391,7 +419,10 @@ impl Engine {
                 // figure is on the row before yt-dlp is started; a
                 // job that arrived without one starts at nothing and
                 // learns its weight a stream at a time.
-                tally: Tally { total: d.total_bytes, ..Tally::default() },
+                tally: Tally {
+                    total: d.total_bytes,
+                    ..Tally::default()
+                },
                 speed: 0,
                 child: handle.child,
                 last_error: handle.last_error,

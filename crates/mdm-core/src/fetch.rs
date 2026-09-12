@@ -88,7 +88,9 @@ pub enum Concurrency {
 
 impl Default for Concurrency {
     fn default() -> Self {
-        Concurrency::Auto { max: MAX_CONNECTIONS }
+        Concurrency::Auto {
+            max: MAX_CONNECTIONS,
+        }
     }
 }
 
@@ -165,7 +167,10 @@ pub enum Event {
     /// The governor changed its mind about how many connections to run, with
     /// the throughput that convinced it. Surfaced because "why is this using
     /// three connections?" deserves an answer better than "it decided to".
-    Concurrency { connections: u8, speed: u64 },
+    Concurrency {
+        connections: u8,
+        speed: u64,
+    },
     Done(PathBuf),
 }
 
@@ -436,7 +441,9 @@ fn note_pushback(host: &str) {
 /// if the free space cannot be read, the download proceeds, because failing a
 /// download over a failed statfs would be worse than the case it prevents.
 fn check_space(dir: &Path, needed: u64) -> Result<()> {
-    let Some(free) = free_space(dir) else { return Ok(()) };
+    let Some(free) = free_space(dir) else {
+        return Ok(());
+    };
     // A margin, because a filesystem at absolute zero is a different and worse
     // problem for everything else running on the machine.
     const MARGIN: u64 = 64 << 20;
@@ -566,7 +573,10 @@ struct Limiter {
 
 impl Limiter {
     fn new(rate: u64) -> Self {
-        Self { rate, state: Mutex::new((rate as f64, Instant::now())) }
+        Self {
+            rate,
+            state: Mutex::new((rate as f64, Instant::now())),
+        }
     }
 
     /// How long to wait before spending `n` bytes.
@@ -671,7 +681,10 @@ fn wind_down(work: &Work, excess: usize) {
 /// Stop adjusting, and tell the UI what the number ended up being.
 async fn settle(tx: &tokio::sync::mpsc::Sender<Event>, at: usize, speed: f64) -> Phase {
     let _ = tx
-        .send(Event::Concurrency { connections: at as u8, speed: speed as u64 })
+        .send(Event::Concurrency {
+            connections: at as u8,
+            speed: speed as u64,
+        })
         .await;
     Phase::Settled(Instant::now())
 }
@@ -709,7 +722,10 @@ async fn govern(
         if stop.load(Ordering::Relaxed) {
             return;
         }
-        let moved = counters.received.load(Ordering::Relaxed).saturating_sub(before);
+        let moved = counters
+            .received
+            .load(Ordering::Relaxed)
+            .saturating_sub(before);
         let speed = moved as f64 / started.elapsed().as_secs_f64();
 
         // A window with no connections running measures nothing about the
@@ -744,7 +760,10 @@ async fn govern(
                     let next = (current * 2).min(max);
                     governor.target.store(next, Ordering::Relaxed);
                     let _ = tx
-                        .send(Event::Concurrency { connections: next as u8, speed: speed as u64 })
+                        .send(Event::Concurrency {
+                            connections: next as u8,
+                            speed: speed as u64,
+                        })
                         .await;
                     Phase::Climbing
                 } else {
@@ -763,7 +782,10 @@ async fn govern(
                     if held > 1 {
                         governor.target.store(held / 2, Ordering::Relaxed);
                         wind_down(work, held - held / 2);
-                        Phase::Trimming { reference: speed.max(last), good: held }
+                        Phase::Trimming {
+                            reference: speed.max(last),
+                            good: held,
+                        }
                     } else {
                         settle(&tx, held, speed).await
                     }
@@ -776,7 +798,10 @@ async fn govern(
                     if current > 1 {
                         governor.target.store(current / 2, Ordering::Relaxed);
                         wind_down(work, current - current / 2);
-                        Phase::Trimming { reference, good: current }
+                        Phase::Trimming {
+                            reference,
+                            good: current,
+                        }
                     } else {
                         settle(&tx, current, speed).await
                     }
@@ -790,7 +815,9 @@ async fn govern(
             Phase::Settled(at) if at.elapsed() >= REPROBE && current < max => {
                 // The link is not what it was a minute ago. Try double and
                 // see; if it does not help, this settles again straight away.
-                governor.target.store((current * 2).min(max), Ordering::Relaxed);
+                governor
+                    .target
+                    .store((current * 2).min(max), Ordering::Relaxed);
                 Phase::Climbing
             }
             settled => settled,
@@ -904,8 +931,10 @@ async fn client(spec: &Spec) -> Result<reqwest::Client> {
             let port = url.port_or_known_default().unwrap_or(443);
             match crate::resolve::addresses(host, port).await {
                 Ok(addrs) => builder = builder.resolve_to_addrs(host, addrs.as_slice()),
-                Err(e) => log::debug!("pre-resolving {host} failed ({e:#}); \
-                                       letting the request try for itself"),
+                Err(e) => log::debug!(
+                    "pre-resolving {host} failed ({e:#}); \
+                                       letting the request try for itself"
+                ),
             }
         }
     }
@@ -957,7 +986,12 @@ pub fn capture_saw_a_file(total_bytes: i64, mime: &str) -> bool {
 }
 
 fn is_html(mime: &str) -> bool {
-    let mime = mime.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
+    let mime = mime
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
     mime == "text/html" || mime == "application/xhtml+xml"
 }
 
@@ -1028,7 +1062,14 @@ pub async fn probe(client: &reqwest::Client, url: &str) -> Result<Probe> {
         .and_then(filename_from_disposition)
         .unwrap_or_else(|| crate::naming::filename_from_url(&final_url));
 
-    Ok(Probe { url: final_url, size, resumable, filename, mime, validator })
+    Ok(Probe {
+        url: final_url,
+        size,
+        resumable,
+        filename,
+        mime,
+        validator,
+    })
 }
 
 /// The name out of `attachment; filename="thing.iso"`, preferring RFC 5987's
@@ -1145,7 +1186,14 @@ pub async fn open(spec: &Spec) -> Result<Option<(reqwest::Response, Probe)>> {
     // `resumable` stays false whatever the server would have allowed: this is
     // the one request there is, so there is nothing to resume into and nothing
     // to split.
-    let probe = Probe { url: final_url, size, resumable: false, filename, mime, validator };
+    let probe = Probe {
+        url: final_url,
+        size,
+        resumable: false,
+        filename,
+        mime,
+        validator,
+    };
     Ok(Some((response, probe)))
 }
 
@@ -1162,7 +1210,11 @@ pub async fn open(spec: &Spec) -> Result<Option<(reqwest::Response, Probe)>> {
 /// the one thing pre-emption exists to stop.
 fn answered_with_a_page(mime: &str, disposition: Option<&str>) -> bool {
     let attachment = disposition
-        .map(|d| d.trim_start().to_ascii_lowercase().starts_with("attachment"))
+        .map(|d| {
+            d.trim_start()
+                .to_ascii_lowercase()
+                .starts_with("attachment")
+        })
         .unwrap_or(false);
     !attachment && is_html(mime)
 }
@@ -1246,7 +1298,10 @@ pub async fn download_open(
         // is nothing to write: a state file here would describe a resume that
         // cannot happen, and would be read by one that then asks the spent
         // address for the rest of the file.
-        Probe { size: None, ..probe.clone() },
+        Probe {
+            size: None,
+            ..probe.clone()
+        },
         stop.clone(),
     ));
     let outcome = drain(&shared, response, 0, false).await;
@@ -1343,7 +1398,11 @@ pub async fn download(
     let size = probe.size.unwrap_or(0);
     let splittable = probe.resumable && size > spec.min_split;
 
-    let resumed = if splittable { load_state(&part, &probe).unwrap_or_default() } else { Vec::new() };
+    let resumed = if splittable {
+        load_state(&part, &probe).unwrap_or_default()
+    } else {
+        Vec::new()
+    };
     if resumed.is_empty() {
         // Nothing to keep: start the file clean rather than writing over
         // whatever a previous, unrelated attempt left.
@@ -1686,10 +1745,7 @@ async fn segment(
 
     let mut request = client.get(url);
     if splittable {
-        request = request.header(
-            reqwest::header::RANGE,
-            format!("bytes={start}-{}", end - 1),
-        );
+        request = request.header(reqwest::header::RANGE, format!("bytes={start}-{}", end - 1));
     }
 
     // Queued behind however many connections this host already has open, from
@@ -1776,7 +1832,10 @@ async fn drain(
         // this buffer until it fills or the stream ends, and counting at the
         // write made a download that was moving report 0 B/s and a frozen
         // percentage before jumping to 100%.
-        shared.counters.received.fetch_add(take as u64, Ordering::Relaxed);
+        shared
+            .counters
+            .received
+            .fetch_add(take as u64, Ordering::Relaxed);
 
         if let Some(limiter) = &shared.limiter {
             let wait = limiter.take(take as u64);
@@ -1827,7 +1886,8 @@ fn flush(
 #[cfg(unix)]
 fn write_at(file: &std::fs::File, buffer: &[u8], offset: u64) -> Result<()> {
     use std::os::unix::fs::FileExt;
-    file.write_all_at(buffer, offset).context("writing to the file")
+    file.write_all_at(buffer, offset)
+        .context("writing to the file")
 }
 
 #[cfg(windows)]
@@ -1954,7 +2014,10 @@ mod tests {
         // A player page that was always a page. The extractor is the right
         // next step for this one, and it must stay reachable.
         assert!(!super::capture_saw_a_file(15_000, "text/html"));
-        assert!(!super::capture_saw_a_file(15_000, "text/html; charset=UTF-8"));
+        assert!(!super::capture_saw_a_file(
+            15_000,
+            "text/html; charset=UTF-8"
+        ));
     }
 
     /// The one judgement `open` makes, and the reason pre-emption is safe: a
@@ -1964,12 +2027,18 @@ mod tests {
     fn a_pre_empted_request_tells_a_page_from_a_download() {
         // The landing page of the very file host this exists for. Cancelling
         // this navigation would leave the tab showing nothing.
-        assert!(super::answered_with_a_page("text/html; charset=UTF-8", None));
+        assert!(super::answered_with_a_page(
+            "text/html; charset=UTF-8",
+            None
+        ));
         assert!(super::answered_with_a_page("application/xhtml+xml", None));
 
         // Anything that is not a page is a download to be taken.
         assert!(!super::answered_with_a_page("video/webm", None));
-        assert!(!super::answered_with_a_page("application/octet-stream", None));
+        assert!(!super::answered_with_a_page(
+            "application/octet-stream",
+            None
+        ));
         assert!(!super::answered_with_a_page("", None));
 
         // A file host that labels its bytes text/html and says "attachment"
@@ -1979,7 +2048,10 @@ mod tests {
             "text/html",
             Some("attachment; filename=\"Moana.mkv\"")
         ));
-        assert!(!super::answered_with_a_page("text/html", Some("  ATTACHMENT")));
+        assert!(!super::answered_with_a_page(
+            "text/html",
+            Some("  ATTACHMENT")
+        ));
 
         // `inline` is not that statement: it is how a server says "show this".
         assert!(super::answered_with_a_page("text/html", Some("inline")));
@@ -2004,7 +2076,11 @@ mod tests {
         // the list — that difference is the whole point of stealing.
         let work = work_with(vec![(90, 100), (0, 8 << 20), (95, 100)]);
         let (start, end) = work.steal(MIN_SPLIT).expect("a segment worth splitting");
-        assert_eq!(start, 4 << 20, "the split lands halfway through the remainder");
+        assert_eq!(
+            start,
+            4 << 20,
+            "the split lands halfway through the remainder"
+        );
         assert_eq!(end, 8 << 20);
         assert_eq!(
             work.claims[1].end.load(Ordering::Acquire),
@@ -2020,7 +2096,10 @@ mod tests {
         let work = work_with(vec![(0, MIN_SPLIT), (0, 512)]);
         assert!(work.steal(MIN_SPLIT).is_none());
         let done = work_with(vec![(100, 100)]);
-        assert!(done.steal(MIN_SPLIT).is_none(), "a finished segment has nothing to give");
+        assert!(
+            done.steal(MIN_SPLIT).is_none(),
+            "a finished segment has nothing to give"
+        );
     }
 
     #[test]
@@ -2043,8 +2122,15 @@ mod tests {
         // at zero bytes with the supervisor respawning workers forever.
         let work = Work::new(VecDeque::from(vec![(0, 8 << 20)]), Vec::new());
         assert!(work.has_work(MIN_SPLIT));
-        assert!(work.has_work(MIN_SPLIT), "asking twice must not empty the pool");
-        assert_eq!(work.next(MIN_SPLIT), Some((0, 8 << 20)), "the work is still there");
+        assert!(
+            work.has_work(MIN_SPLIT),
+            "asking twice must not empty the pool"
+        );
+        assert_eq!(
+            work.next(MIN_SPLIT),
+            Some((0, 8 << 20)),
+            "the work is still there"
+        );
         assert!(!work.has_work(MIN_SPLIT), "and now it is genuinely gone");
     }
 
@@ -2055,7 +2141,10 @@ mod tests {
         // pool was empty would leave the last segments single-threaded.
         let work = work_with(vec![(0, 8 << 20)]);
         assert!(work.pool.lock().unwrap().is_empty());
-        assert!(work.has_work(MIN_SPLIT), "a big live claim is stealable work");
+        assert!(
+            work.has_work(MIN_SPLIT),
+            "a big live claim is stealable work"
+        );
 
         // Once what is left is too small to split, there is nothing to add.
         let nearly = work_with(vec![(0, MIN_SPLIT)]);
@@ -2074,8 +2163,14 @@ mod tests {
         let claim = &work.claims[0];
 
         // What the worker does when the body ends.
-        claim.end.store(claim.cursor.load(Ordering::Acquire), Ordering::Release);
-        assert_eq!(claim.remaining(), 0, "a finished stream still looks unfinished");
+        claim
+            .end
+            .store(claim.cursor.load(Ordering::Acquire), Ordering::Release);
+        assert_eq!(
+            claim.remaining(),
+            0,
+            "a finished stream still looks unfinished"
+        );
 
         work.give_back((
             claim.cursor.load(Ordering::Acquire),
@@ -2169,8 +2264,14 @@ mod tests {
         // leading dot goes too — a server should not get to drop a hidden file
         // into someone's downloads either.
         let name = filename_from_disposition(r#"attachment; filename="../../.bashrc""#).unwrap();
-        assert!(!name.contains(".."), "traversal survived sanitising: {name}");
-        assert!(!name.starts_with('.'), "a server named a hidden file: {name}");
+        assert!(
+            !name.contains(".."),
+            "traversal survived sanitising: {name}"
+        );
+        assert!(
+            !name.starts_with('.'),
+            "a server named a hidden file: {name}"
+        );
         assert_eq!(name, "bashrc");
         let windows =
             filename_from_disposition(r#"attachment; filename="..\..\evil.exe""#).unwrap();
@@ -2191,9 +2292,15 @@ mod tests {
 
     #[test]
     fn an_unsplittable_response_gets_exactly_one_connection() {
-        assert!(!worth_splitting(Some(10 << 20), false, MIN_SPLIT), "no range support");
+        assert!(
+            !worth_splitting(Some(10 << 20), false, MIN_SPLIT),
+            "no range support"
+        );
         assert!(!worth_splitting(None, true, MIN_SPLIT), "unknown length");
-        assert!(!worth_splitting(Some(1024), true, MIN_SPLIT), "smaller than one split");
+        assert!(
+            !worth_splitting(Some(1024), true, MIN_SPLIT),
+            "smaller than one split"
+        );
         assert!(worth_splitting(Some(10 << 20), true, MIN_SPLIT));
     }
 
@@ -2217,11 +2324,17 @@ mod tests {
 
         // A new ETag means these bytes belong to a different file, and
         // splicing the two would produce something that is neither.
-        let changed = Probe { validator: Some("\"xyz\"".into()), ..probe.clone() };
+        let changed = Probe {
+            validator: Some("\"xyz\"".into()),
+            ..probe.clone()
+        };
         assert_eq!(load_state(&part, &changed), None);
 
         // A different length says the same thing without needing an ETag.
-        let resized = Probe { size: Some(9999), ..probe.clone() };
+        let resized = Probe {
+            size: Some(9999),
+            ..probe.clone()
+        };
         assert_eq!(load_state(&part, &resized), None);
 
         std::fs::remove_dir_all(&dir).ok();

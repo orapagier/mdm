@@ -30,7 +30,9 @@ impl Engine {
     }
 
     pub async fn resume(&self, id: i64) -> Result<()> {
-        let Some(d) = self.store.get(id)? else { return Ok(()) };
+        let Some(d) = self.store.get(id)? else {
+            return Ok(());
+        };
         // Every downloader MDM has left resumes from what is already on disk
         // rather than from a handle held by something else, so resuming is
         // simply dispatching again: the fetcher picks up from its range state,
@@ -53,7 +55,9 @@ impl Engine {
         directory: Option<&str>,
         filename: Option<&str>,
     ) -> Result<()> {
-        let Some(d) = self.store.get(id)? else { return Ok(()) };
+        let Some(d) = self.store.get(id)? else {
+            return Ok(());
+        };
         if d.completed_bytes > 0 {
             return Ok(());
         }
@@ -64,8 +68,7 @@ impl Engine {
             .map(|v| sanitize(v.to_string()));
 
         if let Some(dir) = directory {
-            std::fs::create_dir_all(dir)
-                .with_context(|| format!("creating {dir}"))?;
+            std::fs::create_dir_all(dir).with_context(|| format!("creating {dir}"))?;
         }
 
         // Whichever of the two the caller changed, the name has to be free in
@@ -81,18 +84,15 @@ impl Engine {
             self.free_filename(Path::new(dir), &wanted, id)?
         };
 
-        self.store.update_progress(
-            id,
-            d.total_bytes,
-            d.completed_bytes,
-            Some(&name),
-            directory,
-        )?;
+        self.store
+            .update_progress(id, d.total_bytes, d.completed_bytes, Some(&name), directory)?;
         Ok(())
     }
 
     pub async fn retry(&self, id: i64) -> Result<()> {
-        let Some(d) = self.store.get(id)? else { return Ok(()) };
+        let Some(d) = self.store.get(id)? else {
+            return Ok(());
+        };
         self.retries.lock().unwrap().remove(&id);
         // Asked for by hand, so it goes now — whatever backoff an automatic
         // attempt was still sitting out is not the user's to wait through.
@@ -107,7 +107,9 @@ impl Engine {
 
     /// Remove a download, optionally deleting whatever was written so far.
     pub async fn remove(&self, id: i64, delete_file: bool) -> Result<()> {
-        let Some(d) = self.store.get(id)? else { return Ok(()) };
+        let Some(d) = self.store.get(id)? else {
+            return Ok(());
+        };
         if let Some(mut state) = self.ytdlp_jobs.lock().unwrap().remove(&id) {
             let _ = state.child.start_kill();
         }
@@ -129,7 +131,6 @@ impl Engine {
             let mut state = part.into_os_string();
             state.push(".state");
             let _ = std::fs::remove_file(PathBuf::from(state));
-
         }
         self.store.delete(id)?;
         self.live.lock().unwrap().remove(&id);
@@ -190,7 +191,11 @@ impl Engine {
         }
         let host = host.to_ascii_lowercase();
         let mut settings = self.settings();
-        if settings.single_use_hosts.iter().any(|h| rules::host_matches(&host, h)) {
+        if settings
+            .single_use_hosts
+            .iter()
+            .any(|h| rules::host_matches(&host, h))
+        {
             return;
         }
         log::info!("{host} serves single-use links; captures from it stay with the browser");

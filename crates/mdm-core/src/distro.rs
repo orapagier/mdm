@@ -134,7 +134,10 @@ pub fn install(package: &str) -> String {
         PackageManager::Zypper => format!("sudo zypper install {package}"),
         PackageManager::Apk => format!("sudo apk add {package}"),
         PackageManager::Winget => {
-            format!("winget install --id {} -e --source winget", winget_id(package))
+            format!(
+                "winget install --id {} -e --source winget",
+                winget_id(package)
+            )
         }
         PackageManager::Unknown => {
             format!("your package manager (the package is called {package})")
@@ -155,7 +158,10 @@ pub fn upgrade(package: &str) -> String {
         PackageManager::Zypper => format!("sudo zypper update {package}"),
         PackageManager::Apk => format!("sudo apk upgrade {package}"),
         PackageManager::Winget => {
-            format!("winget upgrade --id {} -e --source winget", winget_id(package))
+            format!(
+                "winget upgrade --id {} -e --source winget",
+                winget_id(package)
+            )
         }
         PackageManager::Unknown => {
             format!("your package manager (the package is called {package})")

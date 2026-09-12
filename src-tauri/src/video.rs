@@ -52,7 +52,10 @@ pub fn grow(app: &AppHandle, extra: f64) -> tauri::Result<()> {
     }
     let scale = window.scale_factor()?;
     let inner = window.inner_size()?.to_logical::<f64>(scale);
-    log::debug!("download window short by {extra:.0}px; growing from {:.0}", inner.height);
+    log::debug!(
+        "download window short by {extra:.0}px; growing from {:.0}",
+        inner.height
+    );
     window.set_size(LogicalSize::new(
         inner.width,
         (inner.height + extra).min(screen_limit(&window, scale)),
@@ -114,13 +117,7 @@ impl Pending {
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Show the format picker for a page.
-pub fn open(
-    app: &AppHandle,
-    url: String,
-    title: String,
-    seconds: f64,
-    candidates: Vec<Candidate>,
-) {
+pub fn open(app: &AppHandle, url: String, title: String, seconds: f64, candidates: Vec<Candidate>) {
     deliver(
         app,
         Request {

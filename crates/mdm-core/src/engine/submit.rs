@@ -148,11 +148,13 @@ impl Engine {
         settings: &Settings,
         use_ytdlp: bool,
     ) -> Result<(PathBuf, String, &'static str)> {
-        let rules::Destination { dir: base, filename, category } =
-            rules::destination(job, settings, use_ytdlp);
+        let rules::Destination {
+            dir: base,
+            filename,
+            category,
+        } = rules::destination(job, settings, use_ytdlp);
 
-        std::fs::create_dir_all(&base)
-            .with_context(|| format!("creating {}", base.display()))?;
+        std::fs::create_dir_all(&base).with_context(|| format!("creating {}", base.display()))?;
 
         // Only for a direct download is this the name that will appear on
         // disk. A yt-dlp job carries a placeholder here until it reports the
@@ -181,13 +183,10 @@ impl Engine {
     /// `except` is the row asking, which must not be counted as competition
     /// with itself.
     pub(super) fn free_filename(&self, dir: &Path, name: &str, except: i64) -> Result<String> {
-        let claimed = self
-            .store
-            .names_in_flight(&dir.to_string_lossy(), except)?;
+        let claimed = self.store.names_in_flight(&dir.to_string_lossy(), except)?;
         Ok(unique_filename(name, |candidate| {
             let path = dir.join(candidate);
-            claimed.iter().any(|held| held == candidate)
-                || path.exists()
+            claimed.iter().any(|held| held == candidate) || path.exists()
         }))
     }
 
@@ -249,7 +248,11 @@ impl Engine {
         spec.referrer = Some(job.referrer.clone()).filter(|r| !r.is_empty());
         spec.proxy = settings.proxy.clone();
         if let Some(header) = authorization_for(&job.url, &settings) {
-            if !spec.headers.iter().any(|h| h.name.eq_ignore_ascii_case("authorization")) {
+            if !spec
+                .headers
+                .iter()
+                .any(|h| h.name.eq_ignore_ascii_case("authorization"))
+            {
                 spec.headers.push(header);
             }
         }

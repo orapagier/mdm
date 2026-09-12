@@ -37,7 +37,14 @@ fn be32(b: &[u8], o: usize) -> u32 {
 
 fn be64(b: &[u8], o: usize) -> u64 {
     u64::from_be_bytes([
-        b[o], b[o + 1], b[o + 2], b[o + 3], b[o + 4], b[o + 5], b[o + 6], b[o + 7],
+        b[o],
+        b[o + 1],
+        b[o + 2],
+        b[o + 3],
+        b[o + 4],
+        b[o + 5],
+        b[o + 6],
+        b[o + 7],
     ])
 }
 
@@ -299,7 +306,11 @@ fn parse_moov(moov: &[u8]) -> Vec<Track> {
     // media_time in track time, and only the first needs converting.
     let movie_timescale = find(moov, b"mvhd")
         .and_then(|mvhd| {
-            let at = if mvhd.first().copied().unwrap_or(0) == 1 { 20 } else { 12 };
+            let at = if mvhd.first().copied().unwrap_or(0) == 1 {
+                20
+            } else {
+                12
+            };
             (mvhd.len() >= at + 4).then(|| be32(mvhd, at))
         })
         .unwrap_or(1000)
@@ -696,7 +707,9 @@ pub fn remux(sources: &mut [Source], out: &Path) -> Result<()> {
     if origin.is_finite() {
         for source in sources.iter_mut() {
             for track in &mut source.tracks {
-                let Some(start) = track.media_start else { continue };
+                let Some(start) = track.media_start else {
+                    continue;
+                };
                 let offset = start as f64 / track.timescale as f64 - origin;
                 if offset > 0.0 {
                     track.edit_delay += offset;
@@ -726,9 +739,7 @@ pub fn remux(sources: &mut [Source], out: &Path) -> Result<()> {
             let start = elapsed;
             let mut count = 0usize;
             let mut span = 0u64;
-            while sample + count < track.samples.len()
-                && (count == 0 || span < per_chunk.max(1))
-            {
+            while sample + count < track.samples.len() && (count == 0 || span < per_chunk.max(1)) {
                 span += track.samples[sample + count].duration as u64;
                 count += 1;
             }
@@ -745,7 +756,11 @@ pub fn remux(sources: &mut [Source], out: &Path) -> Result<()> {
     }
     // Stable, so two chunks starting at the same instant keep track order and
     // the picture is written before the sound that accompanies it.
-    chunks.sort_by(|a, b| a.start.partial_cmp(&b.start).unwrap_or(std::cmp::Ordering::Equal));
+    chunks.sort_by(|a, b| {
+        a.start
+            .partial_cmp(&b.start)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     let payload: u64 = tracks
         .iter()
@@ -819,9 +834,9 @@ pub fn remux(sources: &mut [Source], out: &Path) -> Result<()> {
             let mut left = sample.size as usize;
             while left > 0 {
                 let want = left.min(buf.len());
-                reader.read_exact(&mut buf[..want]).with_context(|| {
-                    format!("reading {} bytes of sample data", sample.size)
-                })?;
+                reader
+                    .read_exact(&mut buf[..want])
+                    .with_context(|| format!("reading {} bytes of sample data", sample.size))?;
                 w.write_all(&buf[..want])?;
                 left -= want;
             }
@@ -853,13 +868,7 @@ fn build_moov(tracks: &[(usize, &Track)], chunks: &[Chunk], large: bool) -> Vec<
     body.extend_from_slice(&full(b"mvhd", 0, 0, &mvhd));
 
     for (index, (_, track)) in tracks.iter().enumerate() {
-        body.extend_from_slice(&build_trak(
-            index,
-            track,
-            chunks,
-            large,
-            movie_duration,
-        ));
+        body.extend_from_slice(&build_trak(index, track, chunks, large, movie_duration));
     }
     bx(b"moov", &body)
 }
@@ -873,8 +882,8 @@ fn build_trak(
 ) -> Vec<u8> {
     let track_id = index as u32 + 1;
     let media_duration = track.duration();
-    let in_movie = ((media_duration as f64 / track.timescale as f64)
-        * MOVIE_TIMESCALE as f64) as u32;
+    let in_movie =
+        ((media_duration as f64 / track.timescale as f64) * MOVIE_TIMESCALE as f64) as u32;
 
     let mut tkhd = Vec::new();
     tkhd.extend_from_slice(&0u32.to_be_bytes()); // creation
@@ -886,7 +895,12 @@ fn build_trak(
     tkhd.extend_from_slice(&0u16.to_be_bytes()); // layer
     tkhd.extend_from_slice(&0u16.to_be_bytes()); // alternate_group
     tkhd.extend_from_slice(
-        &if track.kind == Kind::Audio { 0x0100u16 } else { 0 }.to_be_bytes(),
+        &if track.kind == Kind::Audio {
+            0x0100u16
+        } else {
+            0
+        }
+        .to_be_bytes(),
     );
     tkhd.extend_from_slice(&0u16.to_be_bytes()); // reserved
     tkhd.extend_from_slice(&UNITY_MATRIX);
@@ -951,7 +965,12 @@ fn build_trak(
     };
     // A self-contained file: the data is in this very file, which is what the
     // "URL is empty" flag on `url ` means.
-    let dref = full(b"dref", 0, 0, &[&1u32.to_be_bytes()[..], &full(b"url ", 0, 1, &[])].concat());
+    let dref = full(
+        b"dref",
+        0,
+        0,
+        &[&1u32.to_be_bytes()[..], &full(b"url ", 0, 1, &[])].concat(),
+    );
     let dinf = bx(b"dinf", &dref);
 
     let stbl = build_stbl(index, track, chunks, large);
@@ -1118,9 +1137,17 @@ pub fn mp4a_entry(channels: u16, sample_rate: u32, config: &[u8]) -> Vec<u8> {
         (13 + dec_specific.len()) as u8,
         0x40, // MPEG-4 audio
         0x15, // audio stream
-        0, 0, 0, // buffer size
-        0, 0, 0, 0, // max bitrate
-        0, 0, 0, 0, // average bitrate
+        0,
+        0,
+        0, // buffer size
+        0,
+        0,
+        0,
+        0, // max bitrate
+        0,
+        0,
+        0,
+        0, // average bitrate
     ];
     dec_config.extend_from_slice(&dec_specific);
 
@@ -1142,10 +1169,14 @@ pub fn mp4a_entry(channels: u16, sample_rate: u32, config: &[u8]) -> Vec<u8> {
     body.extend_from_slice(&16u16.to_be_bytes()); // sample size
     body.extend_from_slice(&0u16.to_be_bytes()); // pre_defined
     body.extend_from_slice(&0u16.to_be_bytes()); // reserved
-    // 16.16 fixed point, and so unable to carry 96 kHz. Sample rates above
-    // 65535 are written as 0 here; the real rate is in the `esds` config,
-    // which is where a decoder looks anyway.
-    let rate16 = if sample_rate > u16::MAX as u32 { 0 } else { sample_rate };
+                                                 // 16.16 fixed point, and so unable to carry 96 kHz. Sample rates above
+                                                 // 65535 are written as 0 here; the real rate is in the `esds` config,
+                                                 // which is where a decoder looks anyway.
+    let rate16 = if sample_rate > u16::MAX as u32 {
+        0
+    } else {
+        sample_rate
+    };
     body.extend_from_slice(&(rate16 << 16).to_be_bytes());
     body.extend_from_slice(&full(b"esds", 0, 0, &es));
     bx(b"mp4a", &body)
@@ -1179,7 +1210,13 @@ mod tests {
     }
 
     fn sample(duration: u32, cto: i32) -> Sample {
-        Sample { offset: 0, size: 1, duration, cto, sync: true }
+        Sample {
+            offset: 0,
+            size: 1,
+            duration,
+            cto,
+            sync: true,
+        }
     }
 
     fn track_with(samples: Vec<Sample>) -> Track {

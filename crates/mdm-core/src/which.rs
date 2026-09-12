@@ -10,11 +10,13 @@
 pub fn which(program: &str) -> Option<std::path::PathBuf> {
     use std::os::unix::fs::PermissionsExt;
     let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path).map(|dir| dir.join(program)).find(|p| {
-        p.metadata()
-            .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-            .unwrap_or(false)
-    })
+    std::env::split_paths(&path)
+        .map(|dir| dir.join(program))
+        .find(|p| {
+            p.metadata()
+                .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+                .unwrap_or(false)
+        })
 }
 
 /// Windows resolves a bare command through `%PATHEXT%` (`.EXE`, `.CMD`, …) the

@@ -55,10 +55,22 @@ CREATE TABLE IF NOT EXISTS queues (
 /// otherwise never gain new columns.
 fn migrate(conn: &Connection) -> Result<()> {
     for (column, ddl) in [
-        ("output_name", "ALTER TABLE downloads ADD COLUMN output_name TEXT"),
-        ("format_id", "ALTER TABLE downloads ADD COLUMN format_id TEXT"),
-        ("mirrors", "ALTER TABLE downloads ADD COLUMN mirrors TEXT NOT NULL DEFAULT '[]'"),
-        ("no_native", "ALTER TABLE downloads ADD COLUMN no_native INTEGER NOT NULL DEFAULT 0"),
+        (
+            "output_name",
+            "ALTER TABLE downloads ADD COLUMN output_name TEXT",
+        ),
+        (
+            "format_id",
+            "ALTER TABLE downloads ADD COLUMN format_id TEXT",
+        ),
+        (
+            "mirrors",
+            "ALTER TABLE downloads ADD COLUMN mirrors TEXT NOT NULL DEFAULT '[]'",
+        ),
+        (
+            "no_native",
+            "ALTER TABLE downloads ADD COLUMN no_native INTEGER NOT NULL DEFAULT 0",
+        ),
     ] {
         let present = conn
             .prepare(&format!("SELECT {column} FROM downloads LIMIT 1"))
@@ -73,8 +85,8 @@ fn migrate(conn: &Connection) -> Result<()> {
 impl Store {
     pub fn open() -> Result<Self> {
         let path = crate::paths::db_path();
-        let conn = Connection::open(&path)
-            .with_context(|| format!("opening {}", path.display()))?;
+        let conn =
+            Connection::open(&path).with_context(|| format!("opening {}", path.display()))?;
         // WAL keeps the UI's reads from blocking the poll loop's writes.
         //
         // execute_batch rather than pragma_update: `PRAGMA journal_mode` answers
@@ -157,7 +169,6 @@ impl Store {
         )?;
         Ok(conn.last_insert_rowid())
     }
-
 
     /// Move a row between the native stream downloader and yt-dlp.
     ///
@@ -271,9 +282,7 @@ impl Store {
     pub fn get(&self, id: i64) -> Result<Option<Download>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(SELECT_COLS)?;
-        let row = stmt
-            .query_row(params![id], row_to_download)
-            .optional()?;
+        let row = stmt.query_row(params![id], row_to_download).optional()?;
         Ok(row)
     }
 
@@ -454,7 +463,10 @@ impl Store {
             anyhow::bail!("the main queue cannot be deleted");
         }
         let conn = self.conn.lock().unwrap();
-        conn.execute("UPDATE downloads SET queue = 'main' WHERE queue = ?1", params![name])?;
+        conn.execute(
+            "UPDATE downloads SET queue = 'main' WHERE queue = ?1",
+            params![name],
+        )?;
         conn.execute("DELETE FROM queues WHERE name = ?1", params![name])?;
         Ok(())
     }

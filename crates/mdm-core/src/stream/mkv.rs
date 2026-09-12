@@ -74,7 +74,16 @@ const ATTACHMENTS: u32 = 0x1941_A469;
 /// Needed for one case, and a real one: a Cluster of *unknown* length, which
 /// anything writing as it records has to use. Its end is wherever the next
 /// top-level element starts.
-const TOP_LEVEL: &[u32] = &[SEEK_HEAD, INFO, TRACKS, CLUSTER, CUES, TAGS, CHAPTERS, ATTACHMENTS];
+const TOP_LEVEL: &[u32] = &[
+    SEEK_HEAD,
+    INFO,
+    TRACKS,
+    CLUSTER,
+    CUES,
+    TAGS,
+    CHAPTERS,
+    ATTACHMENTS,
+];
 
 /// The output's timestamp scale: one millisecond, in nanoseconds.
 ///
@@ -216,7 +225,11 @@ impl<R: Read + Seek> Cursor<R> {
 /// no value at all, which is a shift of eight on a byte and so has to be
 /// said outright rather than computed.
 fn value_mask(len: usize) -> u8 {
-    if len >= 8 { 0 } else { 0xFFu8 >> len }
+    if len >= 8 {
+        0
+    } else {
+        0xFFu8 >> len
+    }
 }
 
 /// How many bytes this first byte says its id or length occupies.
@@ -249,7 +262,10 @@ fn uint(bytes: &[u8]) -> u64 {
 pub fn read(path: &Path) -> Result<Source> {
     let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
     let len = file.metadata()?.len();
-    let mut cur = Cursor { inner: BufReader::with_capacity(1 << 16, file), at: 0 };
+    let mut cur = Cursor {
+        inner: BufReader::with_capacity(1 << 16, file),
+        at: 0,
+    };
 
     let mut tracks: Vec<Track> = Vec::new();
     let mut numbers: Vec<u64> = Vec::new();
@@ -282,7 +298,14 @@ pub fn read(path: &Path) -> Result<Source> {
                     }
                 }
             }
-            CLUSTER => read_cluster(&mut cur, end, size.is_none(), scale_ns, &numbers, &mut frames)?,
+            CLUSTER => read_cluster(
+                &mut cur,
+                end,
+                size.is_none(),
+                scale_ns,
+                &numbers,
+                &mut frames,
+            )?,
             _ => cur.skip(end.saturating_sub(cur.at))?,
         }
     }
@@ -294,7 +317,11 @@ pub fn read(path: &Path) -> Result<Source> {
         bail!("{} holds no frames", path.display());
     }
     frames.sort_by_key(|f| f.timestamp_ns);
-    Ok(Source { path: path.to_path_buf(), tracks, frames })
+    Ok(Source {
+        path: path.to_path_buf(),
+        tracks,
+        frames,
+    })
 }
 
 /// Read one cluster's blocks. `open` says its length was left unstated, in
@@ -325,7 +352,16 @@ fn read_cluster<R: Read + Seek>(
             }
             SIMPLE_BLOCK => {
                 let head = block_head(cur, stop)?;
-                push_frames(&head, cur.at, stop, cluster_ts, scale_ns, numbers, head.keyframe, frames);
+                push_frames(
+                    &head,
+                    cur.at,
+                    stop,
+                    cluster_ts,
+                    scale_ns,
+                    numbers,
+                    head.keyframe,
+                    frames,
+                );
                 cur.skip(stop.saturating_sub(cur.at))?;
             }
             // A block that needed something said about it. Which frames it
@@ -339,7 +375,9 @@ fn read_cluster<R: Read + Seek>(
                     let Ok(inner) = cur.id() else { break };
                     let Ok(inner_size) = cur.size() else { break };
                     let inner_body = cur.at;
-                    let inner_stop = inner_size.map(|s| (inner_body + s).min(stop)).unwrap_or(stop);
+                    let inner_stop = inner_size
+                        .map(|s| (inner_body + s).min(stop))
+                        .unwrap_or(stop);
                     if inner == BLOCK {
                         let head = block_head(cur, inner_stop)?;
                         pending = Some((head, cur.at, inner_stop));
@@ -353,7 +391,16 @@ fn read_cluster<R: Read + Seek>(
                 }
                 if let Some((head, at, data_end)) = pending {
                     let first = frames.len();
-                    push_frames(&head, at, data_end, cluster_ts, scale_ns, numbers, !referenced, frames);
+                    push_frames(
+                        &head,
+                        at,
+                        data_end,
+                        cluster_ts,
+                        scale_ns,
+                        numbers,
+                        !referenced,
+                        frames,
+                    );
                     // On the last of the block's frames, since that is the
                     // end the padding is at.
                     if discard_ns != 0 {
@@ -440,7 +487,12 @@ fn block_head<R: Read + Seek>(cur: &mut Cursor<R>, end: u64) -> Result<BlockHead
             sizes
         }
     };
-    Ok(BlockHead { track, relative, keyframe, lacing })
+    Ok(BlockHead {
+        track,
+        relative,
+        keyframe,
+        lacing,
+    })
 }
 
 /// A variable-length integer, and how many bytes it took.
@@ -487,7 +539,14 @@ fn push_frames(
     // codec's own frame length, which is what every other muxer relies on too.
     let mut at = data_at;
     for size in &head.lacing {
-        frames.push(Frame { track, timestamp_ns: ts, offset: at, size: *size, keyframe, discard_ns: 0 });
+        frames.push(Frame {
+            track,
+            timestamp_ns: ts,
+            offset: at,
+            size: *size,
+            keyframe,
+            discard_ns: 0,
+        });
         at += *size as u64;
     }
 }
@@ -508,12 +567,19 @@ fn track_from(entry: &[u8]) -> Option<Track> {
             fields.extend_from_slice(whole);
         }
     }
-    Some(Track { kind, number, fields })
+    Some(Track {
+        kind,
+        number,
+        fields,
+    })
 }
 
 /// The payload of the first `id` directly inside `parent`.
 fn child(parent: &[u8], id: u32) -> Option<Vec<u8>> {
-    walk(parent).into_iter().find(|(this, _, _)| *this == id).map(|(_, body, _)| body.to_vec())
+    walk(parent)
+        .into_iter()
+        .find(|(this, _, _)| *this == id)
+        .map(|(_, body, _)| body.to_vec())
 }
 
 /// Every `id` directly inside `parent`, as payloads.
@@ -531,7 +597,9 @@ fn walk(buf: &[u8]) -> Vec<(u32, &[u8], &[u8])> {
     let mut out = Vec::new();
     let mut at = 0usize;
     while at < buf.len() {
-        let Some(id_len) = leading_length(buf[at]) else { break };
+        let Some(id_len) = leading_length(buf[at]) else {
+            break;
+        };
         if at + id_len >= buf.len() {
             break;
         }
@@ -540,7 +608,9 @@ fn walk(buf: &[u8]) -> Vec<(u32, &[u8], &[u8])> {
             id = (id << 8) | buf[at + i] as u32;
         }
         let size_at = at + id_len;
-        let Some(size_len) = leading_length(buf[size_at]) else { break };
+        let Some(size_len) = leading_length(buf[size_at]) else {
+            break;
+        };
         if size_at + size_len > buf.len() {
             break;
         }
@@ -773,7 +843,8 @@ pub fn remux(sources: &[Source], out: &Path) -> Result<()> {
         // bits relative to its cluster, and there is no writing a frame that
         // sits outside that.
         let too_far = ms - cluster_ms > CLUSTER_MS || ms < cluster_ms;
-        let keyframe_break = frame.keyframe && sources[pick].tracks[frame.track].kind == Kind::Video;
+        let keyframe_break =
+            frame.keyframe && sources[pick].tracks[frame.track].kind == Kind::Video;
         if !cluster.is_empty() && (too_far || cluster.len() > CLUSTER_BYTES || keyframe_break) {
             let (at, before_blocks) = flush_cluster(&mut writer, segment_at, cluster_ms, &cluster)?;
             for mut cue in cluster_cues.drain(..) {
@@ -803,7 +874,12 @@ pub fn remux(sources: &[Source], out: &Path) -> Result<()> {
         while left > 0 {
             let want = left.min(copy.len());
             reader.read_exact(&mut copy[..want]).with_context(|| {
-                format!("reading {} bytes at {} of {}", want, frame.offset, sources[pick].path.display())
+                format!(
+                    "reading {} bytes at {} of {}",
+                    want,
+                    frame.offset,
+                    sources[pick].path.display()
+                )
             })?;
             payload.extend_from_slice(&copy[..want]);
             left -= want;
@@ -913,7 +989,10 @@ mod tests {
     fn what_is_written_is_what_is_read() {
         for value in [0u64, 1, 63, 126, 127, 1000, 65_535, 1 << 20, (1 << 35) - 2] {
             let encoded = vint(value);
-            let mut cur = Cursor { inner: std::io::Cursor::new(encoded.clone()), at: 0 };
+            let mut cur = Cursor {
+                inner: std::io::Cursor::new(encoded.clone()),
+                at: 0,
+            };
             let (back, width) = read_vint(&mut cur).unwrap();
             assert_eq!(back, value, "{value} came back as {back}");
             assert_eq!(width as usize, encoded.len());
@@ -923,16 +1002,25 @@ mod tests {
     #[test]
     fn a_fixed_width_length_is_still_a_length() {
         let bytes = vint_fixed(1234);
-        let mut cur = Cursor { inner: std::io::Cursor::new(bytes.to_vec()), at: 0 };
+        let mut cur = Cursor {
+            inner: std::io::Cursor::new(bytes.to_vec()),
+            at: 0,
+        };
         assert_eq!(cur.size().unwrap(), Some(1234));
     }
 
     #[test]
     fn an_unknown_length_is_told_apart_from_a_long_one() {
         // All ones is "unknown"; one bit short of it is a real, large length.
-        let mut unknown = Cursor { inner: std::io::Cursor::new(vec![0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]), at: 0 };
+        let mut unknown = Cursor {
+            inner: std::io::Cursor::new(vec![0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]),
+            at: 0,
+        };
         assert_eq!(unknown.size().unwrap(), None);
-        let mut known = Cursor { inner: std::io::Cursor::new(vec![0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFE]), at: 0 };
+        let mut known = Cursor {
+            inner: std::io::Cursor::new(vec![0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFE]),
+            at: 0,
+        };
         assert_eq!(known.size().unwrap(), Some((1u64 << 56) - 2));
     }
 
@@ -967,7 +1055,10 @@ mod tests {
         let track = track_from(&entry).expect("an audio track");
         assert_eq!(track.number, 3);
         assert_eq!(track.kind, Kind::Audio);
-        assert!(child(&track.fields, TRACK_NUMBER).is_none(), "the number is rewritten");
+        assert!(
+            child(&track.fields, TRACK_NUMBER).is_none(),
+            "the number is rewritten"
+        );
         assert!(child(&track.fields, TRACK_UID).is_none(), "so is the uid");
         assert_eq!(child(&track.fields, 0x86), Some(b"A_OPUS".to_vec()));
         assert_eq!(child(&track.fields, 0x63A2), Some(vec![1, 2, 3, 4]));
@@ -982,7 +1073,18 @@ mod tests {
     /// not survive the round trip would trim the wrong end of a track.
     #[test]
     fn signed_values_keep_their_sign_and_their_width() {
-        for value in [0i64, 1, -1, 127, -128, 255, -256, 6_500_000, -6_500_000, i32::MIN as i64] {
+        for value in [
+            0i64,
+            1,
+            -1,
+            127,
+            -128,
+            255,
+            -256,
+            6_500_000,
+            -6_500_000,
+            i32::MIN as i64,
+        ] {
             let bytes = sint_bytes(value);
             assert_eq!(sint(&bytes), value, "{value} came back as {}", sint(&bytes));
             assert!(bytes.len() <= 8);

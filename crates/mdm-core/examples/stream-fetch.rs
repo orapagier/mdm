@@ -14,10 +14,8 @@ use std::time::Instant;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    env_logger::Builder::from_env(
-        env_logger::Env::default().default_filter_or("mdm_core=info"),
-    )
-    .init();
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("mdm_core=info"))
+        .init();
 
     let mut args = std::env::args().skip(1);
     let url = args.next().unwrap_or_else(|| {

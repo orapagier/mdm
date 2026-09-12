@@ -59,7 +59,11 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
     println!(
         "serving {mb} MB at http://127.0.0.1:{port}/file.bin{}",
-        if kbs == 0 { String::new() } else { format!(", capped at {kbs} KB/s in total") }
+        if kbs == 0 {
+            String::new()
+        } else {
+            format!(", capped at {kbs} KB/s in total")
+        }
     );
 
     loop {
@@ -77,7 +81,8 @@ async fn main() -> anyhow::Result<()> {
                 let head = String::from_utf8_lossy(&buf[..n]).to_string();
                 let head_only = head.starts_with("HEAD");
                 let range = head.lines().find_map(|l| {
-                    l.strip_prefix("Range: bytes=").or_else(|| l.strip_prefix("range: bytes="))
+                    l.strip_prefix("Range: bytes=")
+                        .or_else(|| l.strip_prefix("range: bytes="))
                 });
                 let total = body.len();
                 let (status, from, to) = match range {

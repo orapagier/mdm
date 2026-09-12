@@ -77,9 +77,8 @@ pub fn sanitize(name: String) -> String {
     /// Names MS-DOS gave to devices, which Windows will not let a file take —
     /// with or without an extension, in any case.
     const RESERVED: &[&str] = &[
-        "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5",
-        "com6", "com7", "com8", "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5",
-        "lpt6", "lpt7", "lpt8", "lpt9",
+        "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8",
+        "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
     ];
     /// Long enough for any real title, short enough to leave room for the
     /// `.f251.webm.part` an extractor hangs off the stem.
@@ -88,7 +87,13 @@ pub fn sanitize(name: String) -> String {
     let base = name.rsplit(['/', '\\']).next().unwrap_or("").to_string();
     let mut out: String = base
         .chars()
-        .map(|c| if c.is_control() || "<>:\"|?*".contains(c) { '_' } else { c })
+        .map(|c| {
+            if c.is_control() || "<>:\"|?*".contains(c) {
+                '_'
+            } else {
+                c
+            }
+        })
         .collect();
     out = out
         .trim()
@@ -144,13 +149,12 @@ pub fn filename_from_url(url: &str) -> String {
 /// know.
 fn strip_page_extension(name: &str) -> String {
     const PAGE_EXTENSIONS: &[&str] = &[
-        "php", "php3", "php4", "php5", "asp", "aspx", "jsp", "jspx", "cgi",
-        "pl", "do", "action", "html", "htm", "xhtml", "shtml",
+        "php", "php3", "php4", "php5", "asp", "aspx", "jsp", "jspx", "cgi", "pl", "do", "action",
+        "html", "htm", "xhtml", "shtml",
     ];
     match name.rsplit_once('.') {
         Some((stem, ext))
-            if !stem.is_empty()
-                && PAGE_EXTENSIONS.contains(&ext.to_ascii_lowercase().as_str()) =>
+            if !stem.is_empty() && PAGE_EXTENSIONS.contains(&ext.to_ascii_lowercase().as_str()) =>
         {
             stem.to_string()
         }

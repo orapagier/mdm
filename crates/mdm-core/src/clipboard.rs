@@ -85,12 +85,7 @@ async fn poll_windows(tx: mpsc::Sender<String>) {
 async fn watch_wayland(tx: mpsc::Sender<String>) {
     loop {
         let mut child = match Command::new("wl-paste")
-            .args([
-                "--watch",
-                "sh",
-                "-c",
-                r#"cat; printf '\0'"#,
-            ])
+            .args(["--watch", "sh", "-c", r#"cat; printf '\0'"#])
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .stdin(Stdio::null())
@@ -226,7 +221,10 @@ mod tests {
 
     #[test]
     fn rejects_prose_containing_a_url() {
-        assert_eq!(extract_url("see https://example.com/a.zip for details"), None);
+        assert_eq!(
+            extract_url("see https://example.com/a.zip for details"),
+            None
+        );
     }
 
     #[test]
@@ -251,4 +249,3 @@ mod tests {
         assert_eq!(extract_url(signed), Some(signed.to_string()));
     }
 }
-

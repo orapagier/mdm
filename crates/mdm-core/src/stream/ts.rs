@@ -187,7 +187,10 @@ fn sps_dimensions(sps: &[u8]) -> Option<(u16, u16)> {
         width = width.saturating_sub((left + right) * 2);
         height = height.saturating_sub((top + bottom) * 2 * (2 - frame_mbs_only));
     }
-    Some((width.min(u16::MAX as u32) as u16, height.min(u16::MAX as u32) as u16))
+    Some((
+        width.min(u16::MAX as u32) as u16,
+        height.min(u16::MAX as u32) as u16,
+    ))
 }
 
 /// Assemble the `avcC` that `avc1` needs, from the parameter sets found in
@@ -251,8 +254,7 @@ struct AudioOut {
 /// they were found; the returned tracks point into it.
 pub fn demux(ts: &Path, payloads: &Path) -> Result<Vec<Track>> {
     let mut input = File::open(ts).with_context(|| format!("opening {}", ts.display()))?;
-    let out = File::create(payloads)
-        .with_context(|| format!("creating {}", payloads.display()))?;
+    let out = File::create(payloads).with_context(|| format!("creating {}", payloads.display()))?;
     let mut w = BufWriter::with_capacity(1 << 20, out);
     let mut written = 0u64;
 
@@ -333,7 +335,9 @@ pub fn demux(ts: &Path, payloads: &Path) -> Result<Vec<Track>> {
             pending.pts = pts;
             pending.dts = dts;
             pending.data.clear();
-            pending.data.extend_from_slice(&body[header.min(body.len())..]);
+            pending
+                .data
+                .extend_from_slice(&body[header.min(body.len())..]);
         } else if !pending.data.is_empty() || pending.pts.is_some() {
             pending.data.extend_from_slice(body);
         }
@@ -549,9 +553,8 @@ fn flush_audio(
             audio.channels = channels.max(1);
             // AudioSpecificConfig: five bits of object type, four of sample
             // rate index, four of channel configuration.
-            let asc = ((object_type as u16) << 11)
-                | ((rate_index as u16) << 7)
-                | (audio.channels << 3);
+            let asc =
+                ((object_type as u16) << 11) | ((rate_index as u16) << 7) | (audio.channels << 3);
             audio.config = asc.to_be_bytes().to_vec();
         }
         let header = if protection_absent { 7 } else { 9 };
@@ -699,9 +702,8 @@ mod tests {
     fn sps_dimensions_survive_a_real_parameter_set() {
         // A 1280x720 baseline SPS as a browser would emit it.
         let sps = [
-            0x67, 0x42, 0xc0, 0x1f, 0xd9, 0x00, 0x50, 0x05, 0xbb, 0x01, 0x6a, 0x02, 0x02,
-            0x02, 0x80, 0x00, 0x00, 0x03, 0x00, 0x80, 0x00, 0x00, 0x1e, 0x07, 0x8c, 0x18,
-            0xcb,
+            0x67, 0x42, 0xc0, 0x1f, 0xd9, 0x00, 0x50, 0x05, 0xbb, 0x01, 0x6a, 0x02, 0x02, 0x02,
+            0x80, 0x00, 0x00, 0x03, 0x00, 0x80, 0x00, 0x00, 0x1e, 0x07, 0x8c, 0x18, 0xcb,
         ];
         let (w, h) = sps_dimensions(&sps).expect("a valid SPS should parse");
         assert_eq!((w, h), (1280, 720));

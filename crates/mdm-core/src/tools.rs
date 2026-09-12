@@ -77,9 +77,15 @@ const ASSET: (&str, &str) = ("yt-dlp_linux", "yt-dlp");
 const ASSET: (&str, &str) = ("yt-dlp_linux_aarch64", "yt-dlp");
 
 #[cfg(not(any(
-    all(windows, any(target_arch = "x86_64", target_arch = "x86", target_arch = "aarch64")),
+    all(
+        windows,
+        any(target_arch = "x86_64", target_arch = "x86", target_arch = "aarch64")
+    ),
     target_os = "macos",
-    all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64")),
+    all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ),
 )))]
 compile_error!(
     "no yt-dlp release is published for this platform, so MDM cannot fetch one \
@@ -129,7 +135,12 @@ fn stamp_path() -> PathBuf {
 
 /// Whether enough time has passed to be worth another look.
 pub fn check_due() -> bool {
-    due_at(std::fs::metadata(stamp_path()).and_then(|m| m.modified()).ok(), SystemTime::now())
+    due_at(
+        std::fs::metadata(stamp_path())
+            .and_then(|m| m.modified())
+            .ok(),
+        SystemTime::now(),
+    )
 }
 
 /// The decision itself, separated from the filesystem so it can be tested.
@@ -141,7 +152,10 @@ fn due_at(last: Option<SystemTime>, now: SystemTime) -> bool {
         // written, or has been put right since. Either way the honest reading
         // is "we do not know when we last looked", and asking once is cheaper
         // than never asking again until the future catches up.
-        Some(then) => now.duration_since(then).map(|since| since >= CHECK_EVERY).unwrap_or(true),
+        Some(then) => now
+            .duration_since(then)
+            .map(|since| since >= CHECK_EVERY)
+            .unwrap_or(true),
     }
 }
 
@@ -195,7 +209,12 @@ async fn latest_version() -> Result<String> {
     }
     // ".../releases/tag/2026.08.19" — the last segment is the version.
     let landed = response.url().to_string();
-    let tag = landed.rsplit('/').next().unwrap_or_default().trim().to_string();
+    let tag = landed
+        .rsplit('/')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_string();
     if tag.is_empty() || tag.eq_ignore_ascii_case("latest") {
         bail!("GitHub did not say which release is the latest one ({landed})");
     }
@@ -229,7 +248,9 @@ async fn fetch_release(dir: &Path) -> Result<PathBuf> {
         .context("downloading yt-dlp")?;
 
     make_runnable(&landed)?;
-    let version = version_of(&landed).await.context("the downloaded yt-dlp would not run")?;
+    let version = version_of(&landed)
+        .await
+        .context("the downloaded yt-dlp would not run")?;
     log::info!("fetched yt-dlp {version}");
     Ok(landed)
 }
@@ -387,7 +408,9 @@ pub async fn install_quickjs() -> Result<PathBuf> {
     // Proved before it is installed, the same way yt-dlp is: a runtime that
     // will not start would be reported by yt-dlp as a challenge it could not
     // solve, which is a long way from the truth.
-    let version = js_version(&landed).await.context("the downloaded QuickJS would not run")?;
+    let version = js_version(&landed)
+        .await
+        .context("the downloaded QuickJS would not run")?;
     std::fs::rename(&landed, &target)
         .with_context(|| format!("moving QuickJS into {}", target.display()))?;
     log::info!("installed QuickJS {version} at {}", target.display());
@@ -484,14 +507,20 @@ mod tests {
     fn a_copy_looked_at_a_moment_ago_is_not() {
         let now = SystemTime::now();
         assert!(!due_at(Some(now - Duration::from_secs(60)), now));
-        assert!(!due_at(Some(now - (CHECK_EVERY - Duration::from_secs(1))), now));
+        assert!(!due_at(
+            Some(now - (CHECK_EVERY - Duration::from_secs(1))),
+            now
+        ));
     }
 
     #[test]
     fn a_copy_looked_at_yesterday_is_due_again() {
         let now = SystemTime::now();
         assert!(due_at(Some(now - CHECK_EVERY), now));
-        assert!(due_at(Some(now - Duration::from_secs(30 * 24 * 60 * 60)), now));
+        assert!(due_at(
+            Some(now - Duration::from_secs(30 * 24 * 60 * 60)),
+            now
+        ));
     }
 
     /// A stamp dated in the future is a clock that was wrong. Reading it as
@@ -500,9 +529,11 @@ mod tests {
     #[test]
     fn a_stamp_from_the_future_does_not_park_the_check_for_ever() {
         let now = SystemTime::now();
-        assert!(due_at(Some(now + Duration::from_secs(365 * 24 * 60 * 60)), now));
+        assert!(due_at(
+            Some(now + Duration::from_secs(365 * 24 * 60 * 60)),
+            now
+        ));
     }
-
 
     /// The runtime is fetched under the name it will be run as, beside yt-dlp.
     /// On Windows that means keeping the extension, without which nothing will
@@ -535,7 +566,10 @@ mod tests {
         }
         // quickjs-ng publishes one asset per architecture under these exact
         // names; a mismatch here is a 404 at the moment someone needs a video.
-        assert!(asset.contains(std::env::consts::ARCH) || cfg!(target_arch = "aarch64"), "{asset}");
+        assert!(
+            asset.contains(std::env::consts::ARCH) || cfg!(target_arch = "aarch64"),
+            "{asset}"
+        );
     }
     /// The installed name is the one every other part of the app looks for,
     /// and on Windows an executable without its extension is not runnable.

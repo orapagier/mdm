@@ -117,7 +117,9 @@ fn attribute(attrs: &[(String, String)], name: &str) -> Option<String> {
 
 /// Resolve a playlist-relative URI against the playlist's own address.
 fn resolve(base: &Url, uri: &str) -> String {
-    base.join(uri).map(|u| u.to_string()).unwrap_or_else(|_| uri.to_string())
+    base.join(uri)
+        .map(|u| u.to_string())
+        .unwrap_or_else(|_| uri.to_string())
 }
 
 /// `<length>[@<offset>]`. A missing offset continues from the end of the
@@ -280,12 +282,14 @@ mod tests {
         assert_eq!(m.variants.len(), 2);
         assert_eq!(m.variants[1].height, Some(1080));
         assert_eq!(
-            m.variants[0].uri,
-            "https://example.test/hls/v720/index.m3u8",
+            m.variants[0].uri, "https://example.test/hls/v720/index.m3u8",
             "relative URIs resolve against the playlist"
         );
         assert_eq!(m.variants[0].audio_group.as_deref(), Some("aac"));
-        assert_eq!(m.media[0].uri.as_deref(), Some("https://example.test/hls/audio/en.m3u8"));
+        assert_eq!(
+            m.media[0].uri.as_deref(),
+            Some("https://example.test/hls/audio/en.m3u8")
+        );
     }
 
     #[test]

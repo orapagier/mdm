@@ -25,11 +25,8 @@ async fn main() -> anyhow::Result<()> {
 
     for a in &addrs {
         let started = Instant::now();
-        let result = tokio::time::timeout(
-            Duration::from_secs(15),
-            tokio::net::TcpStream::connect(a),
-        )
-        .await;
+        let result =
+            tokio::time::timeout(Duration::from_secs(15), tokio::net::TcpStream::connect(a)).await;
         match result {
             Ok(Ok(_)) => println!("  connect {a}: ok in {:?}", started.elapsed()),
             Ok(Err(e)) => println!("  connect {a}: failed in {:?} — {e}", started.elapsed()),

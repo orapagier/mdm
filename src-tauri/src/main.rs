@@ -334,13 +334,7 @@ fn main() {
                             directory,
                             url,
                         } => {
-                            video::show_download(
-                                &ui_handle,
-                                id,
-                                filename,
-                                directory,
-                                url.clone(),
-                            );
+                            video::show_download(&ui_handle, id, filename, directory, url.clone());
                             // A URL that answers with a *page* is a quality to
                             // choose rather than a file to save. The engine
                             // finds that out too, but only once the download
@@ -536,7 +530,11 @@ fn connect_to_running() -> Option<std::fs::File> {
     const ERROR_PIPE_BUSY: i32 = 231;
     let path = paths::socket_path();
     for _ in 0..50 {
-        match std::fs::OpenOptions::new().read(true).write(true).open(&path) {
+        match std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+        {
             Ok(pipe) => return Some(pipe),
             Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY) => {
                 std::thread::sleep(std::time::Duration::from_millis(20));
@@ -560,6 +558,5 @@ fn normalise_url(arg: String) -> Option<String> {
         Some(rest) => rest.trim_start_matches("//").to_string(),
         None => arg,
     };
-    (candidate.starts_with("http://") || candidate.starts_with("https://"))
-        .then_some(candidate)
+    (candidate.starts_with("http://") || candidate.starts_with("https://")).then_some(candidate)
 }

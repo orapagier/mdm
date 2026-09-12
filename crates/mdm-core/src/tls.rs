@@ -80,14 +80,22 @@ fn build() -> Option<ClientConfig> {
     // with a longer chain; none of it decides what is trusted.
     let inner = WebPkiServerVerifier::builder_with_provider(Arc::new(roots), provider.clone())
         .build()
-        .map_err(|e| log::warn!("building the certificate verifier failed ({e}); \
-                                 falling back to the default TLS setup"))
+        .map_err(|e| {
+            log::warn!(
+                "building the certificate verifier failed ({e}); \
+                                 falling back to the default TLS setup"
+            )
+        })
         .ok()?;
 
     let mut config = ClientConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()
-        .map_err(|e| log::warn!("no usable TLS versions ({e}); \
-                                 falling back to the default TLS setup"))
+        .map_err(|e| {
+            log::warn!(
+                "no usable TLS versions ({e}); \
+                                 falling back to the default TLS setup"
+            )
+        })
         .ok()?
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(ChaseMissingIssuers { inner }))
@@ -117,8 +125,10 @@ impl ServerCertVerifier for ChaseMissingIssuers {
         ocsp_response: &[u8],
         now: UnixTime,
     ) -> Result<ServerCertVerified, Error> {
-        let mut chain: Vec<CertificateDer<'static>> =
-            intermediates.iter().map(|c| c.clone().into_owned()).collect();
+        let mut chain: Vec<CertificateDer<'static>> = intermediates
+            .iter()
+            .map(|c| c.clone().into_owned())
+            .collect();
 
         let verify = |chain: &[CertificateDer<'static>]| {
             self.inner
@@ -215,7 +225,10 @@ fn is_unknown_issuer(result: &Result<ServerCertVerified, Error>) -> bool {
 }
 
 fn is_unknown_issuer_error(error: &Error) -> bool {
-    matches!(error, Error::InvalidCertificate(CertificateError::UnknownIssuer))
+    matches!(
+        error,
+        Error::InvalidCertificate(CertificateError::UnknownIssuer)
+    )
 }
 
 /// The certificates named by a certificate's own Authority Information Access
@@ -260,7 +273,9 @@ fn cached_fetch(url: &str) -> Vec<CertificateDer<'static>> {
         return certificates.clone();
     }
 
-    let certificates = fetch(url).map(|body| certificates_in(&body)).unwrap_or_default();
+    let certificates = fetch(url)
+        .map(|body| certificates_in(&body))
+        .unwrap_or_default();
     if certificates.is_empty() {
         log::debug!("no usable certificate at {url}");
     }
@@ -272,7 +287,9 @@ fn cached_fetch(url: &str) -> Vec<CertificateDer<'static>> {
 /// protecting: the value behind it is a cache, and the next caller can carry
 /// on with it exactly as it stands.
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// Fetch a URL from inside a handshake.
@@ -295,7 +312,9 @@ fn fetch(url: &str) -> Option<Vec<u8>> {
 
     // The request has a timeout of its own; this one only covers a thread that
     // somehow never reports back, so it is the same budget with room to spare.
-    rx.recv_timeout(FETCH_TIMEOUT + Duration::from_secs(5)).ok().flatten()
+    rx.recv_timeout(FETCH_TIMEOUT + Duration::from_secs(5))
+        .ok()
+        .flatten()
 }
 
 fn blocking_get(url: &str) -> Option<Vec<u8>> {
@@ -472,7 +491,10 @@ fn split(input: &[u8]) -> Option<(Element<'_>, &[u8])> {
             return None;
         }
         let (bytes, rest) = rest.split_at(count);
-        (bytes.iter().fold(0usize, |len, b| (len << 8) | *b as usize), rest)
+        (
+            bytes.iter().fold(0usize, |len, b| (len << 8) | *b as usize),
+            rest,
+        )
     };
 
     if rest.len() < len {
@@ -614,9 +636,16 @@ mod tests {
         // certificate would have a dozen of them.
         let other = der(
             SEQUENCE,
-            &[der(OID, &[0x55, 0x1d, 0x0f]), der(OCTET_STRING, &[0x03, 0x02, 0x01, 0x06])].concat(),
+            &[
+                der(OID, &[0x55, 0x1d, 0x0f]),
+                der(OCTET_STRING, &[0x03, 0x02, 0x01, 0x06]),
+            ]
+            .concat(),
         );
-        let extensions = der(EXTENSIONS, &der(SEQUENCE, &[other, der(SEQUENCE, &extension)].concat()));
+        let extensions = der(
+            EXTENSIONS,
+            &der(SEQUENCE, &[other, der(SEQUENCE, &extension)].concat()),
+        );
 
         // A stand-in for the fields a certificate carries before its
         // extensions: a serial number and a name, skipped by tag.
@@ -630,7 +659,10 @@ mod tests {
     #[test]
     fn the_address_of_the_missing_certificate_is_read_out_of_the_one_we_have() {
         let certificate = certificate_naming("http://yr1.i.lencr.org/", false);
-        assert_eq!(ca_issuer_urls(&certificate), vec!["http://yr1.i.lencr.org/"]);
+        assert_eq!(
+            ca_issuer_urls(&certificate),
+            vec!["http://yr1.i.lencr.org/"]
+        );
     }
 
     #[test]
@@ -638,7 +670,10 @@ mod tests {
         // Rare on this extension, but legal, and reading `critical` as the
         // value would lose the address on exactly those certificates.
         let certificate = certificate_naming("http://ca.example/i.crt", true);
-        assert_eq!(ca_issuer_urls(&certificate), vec!["http://ca.example/i.crt"]);
+        assert_eq!(
+            ca_issuer_urls(&certificate),
+            vec!["http://ca.example/i.crt"]
+        );
     }
 
     #[test]

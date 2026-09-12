@@ -22,7 +22,8 @@ impl Engine {
                 .collect()
         };
         for (id, downloaded, total, speed, connections) in live {
-            self.store.update_progress(id, total, downloaded, None, None)?;
+            self.store
+                .update_progress(id, total, downloaded, None, None)?;
             self.live.lock().unwrap().insert(id, (speed, connections));
         }
 
@@ -48,7 +49,9 @@ impl Engine {
                 Err(e) if e.is_cancelled() => continue,
                 Err(e) => Err(anyhow::anyhow!("the fetcher panicked: {e}")),
             };
-            let Some(mut d) = self.store.get(id)? else { continue };
+            let Some(mut d) = self.store.get(id)? else {
+                continue;
+            };
             if stopped {
                 // Paused on purpose: the partial file and its state stay, and
                 // the row already says Paused.
@@ -125,16 +128,35 @@ impl Engine {
         let live: Vec<(i64, i64, i64, i64, i64)> = {
             let jobs = self.ytdlp_jobs.lock().unwrap();
             jobs.iter()
-                .map(|(id, s)| (*id, s.tally.downloaded, s.tally.total, s.speed, s.connections))
+                .map(|(id, s)| {
+                    (
+                        *id,
+                        s.tally.downloaded,
+                        s.tally.total,
+                        s.speed,
+                        s.connections,
+                    )
+                })
                 .collect()
         };
         for (id, downloaded, total, speed, connections) in live {
-            self.store.update_progress(id, total, downloaded, None, None)?;
+            self.store
+                .update_progress(id, total, downloaded, None, None)?;
             self.live.lock().unwrap().insert(id, (speed, connections));
         }
 
-        for Exit { id, status, error, output, stopped, skipped } in finished {
-            let Some(mut d) = self.store.get(id)? else { continue };
+        for Exit {
+            id,
+            status,
+            error,
+            output,
+            stopped,
+            skipped,
+        } in finished
+        {
+            let Some(mut d) = self.store.get(id)? else {
+                continue;
+            };
             if stopped {
                 // Paused on purpose. The row already says so, and the partial
                 // fragments are picked up again when it resumes.
@@ -178,7 +200,9 @@ impl Engine {
                     // Its own claim on the name it is being moved off must
                     // not be what stops it moving.
                     let free = self.free_stem(Path::new(&d.directory), &stem, id)?;
-                    log::info!("#{id}: {existing} was already there — downloading it again as {free}");
+                    log::info!(
+                        "#{id}: {existing} was already there — downloading it again as {free}"
+                    );
                     self.store.set_output_name(id, &free)?;
                     d.output_name = Some(free);
                     let job = job_from(&d);
@@ -191,7 +215,8 @@ impl Engine {
                     // now the row carried a guess derived from the page URL,
                     // which would leave "Open file" pointing at nothing.
                     if let Some(path) = output {
-                        if let Some(name) = path.file_name().map(|n| n.to_string_lossy().into_owned())
+                        if let Some(name) =
+                            path.file_name().map(|n| n.to_string_lossy().into_owned())
                         {
                             let dir = path
                                 .parent()
@@ -200,13 +225,8 @@ impl Engine {
                             let size = std::fs::metadata(&path)
                                 .map(|m| m.len() as i64)
                                 .unwrap_or(d.total_bytes);
-                            self.store.update_progress(
-                                id,
-                                size,
-                                size,
-                                Some(&name),
-                                Some(&dir),
-                            )?;
+                            self.store
+                                .update_progress(id, size, size, Some(&name), Some(&dir))?;
                             let category = categories::categorize(&name, &d.mime);
                             self.store.set_category(id, category)?;
                             d.filename = name;
@@ -223,8 +243,7 @@ impl Engine {
                 }
                 Some(s) => {
                     // Prefer yt-dlp's own words; "exit status 1" helps nobody.
-                    let message =
-                        error.unwrap_or_else(|| format!("yt-dlp exited with {s}"));
+                    let message = error.unwrap_or_else(|| format!("yt-dlp exited with {s}"));
                     self.on_failure(&d, &message).await?
                 }
                 None => self.on_failure(&d, "yt-dlp could not be reaped").await?,
@@ -254,8 +273,13 @@ impl Engine {
         match std::fs::rename(&from, &to) {
             Ok(()) => {
                 let dir = wanted.to_string_lossy().into_owned();
-                self.store
-                    .update_progress(d.id, d.total_bytes, d.completed_bytes, None, Some(&dir))?;
+                self.store.update_progress(
+                    d.id,
+                    d.total_bytes,
+                    d.completed_bytes,
+                    None,
+                    Some(&dir),
+                )?;
                 d.directory = dir;
                 log::info!("#{} refiled into {}", d.id, d.category);
             }
@@ -413,7 +437,8 @@ impl Engine {
                     after.as_secs(),
                     settings.retry_limit
                 );
-                self.store.set_status(d.id, Status::Queued, Some(&waiting))?;
+                self.store
+                    .set_status(d.id, Status::Queued, Some(&waiting))?;
                 self.scheduler_held.lock().unwrap().remove(&d.id);
             }
             Next::Fail => {

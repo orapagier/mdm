@@ -8,7 +8,11 @@ impl Engine {
         let Some(q) = self.store.queues()?.into_iter().find(|q| q.name == queue) else {
             return Ok(true);
         };
-        Ok(rules::queue_open_at(&q, local_minute_of_day(), local_weekday()))
+        Ok(rules::queue_open_at(
+            &q,
+            local_minute_of_day(),
+            local_weekday(),
+        ))
     }
 
     /// Start or park downloads as scheduled windows open and close.
@@ -29,7 +33,6 @@ impl Engine {
                     continue;
                 }
                 for d in self.store.next_queued(&q.name, slots as i64)? {
-
                     // A failed attempt is holding this row back deliberately;
                     // dispatching it now would spend the retry inside the same
                     // outage that just consumed the last one.

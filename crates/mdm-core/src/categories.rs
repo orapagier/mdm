@@ -12,28 +12,28 @@ pub const CATEGORIES: &[&str] = &[
 ];
 
 const VIDEO: &[&str] = &[
-    "mp4", "mkv", "webm", "avi", "mov", "wmv", "flv", "m4v", "mpg", "mpeg", "ts", "m2ts",
-    "ogv", "3gp", "vob", "rmvb", "divx", "m3u8", "mpd",
+    "mp4", "mkv", "webm", "avi", "mov", "wmv", "flv", "m4v", "mpg", "mpeg", "ts", "m2ts", "ogv",
+    "3gp", "vob", "rmvb", "divx", "m3u8", "mpd",
 ];
 const MUSIC: &[&str] = &[
-    "mp3", "flac", "wav", "aac", "ogg", "oga", "opus", "m4a", "wma", "alac", "aiff", "ape",
-    "mid", "midi",
+    "mp3", "flac", "wav", "aac", "ogg", "oga", "opus", "m4a", "wma", "alac", "aiff", "ape", "mid",
+    "midi",
 ];
 const DOCUMENTS: &[&str] = &[
-    "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "odt", "ods", "odp", "rtf", "txt",
-    "epub", "mobi", "azw3", "djvu", "chm", "tex", "csv", "tsv", "md",
+    "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "odt", "ods", "odp", "rtf", "txt", "epub",
+    "mobi", "azw3", "djvu", "chm", "tex", "csv", "tsv", "md",
 ];
 const COMPRESSED: &[&str] = &[
-    "zip", "rar", "7z", "tar", "gz", "tgz", "bz2", "tbz", "xz", "txz", "zst", "lz4", "lzma",
-    "cab", "arj", "z", "iso", "img",
+    "zip", "rar", "7z", "tar", "gz", "tgz", "bz2", "tbz", "xz", "txz", "zst", "lz4", "lzma", "cab",
+    "arj", "z", "iso", "img",
 ];
 const PROGRAMS: &[&str] = &[
-    "exe", "msi", "deb", "rpm", "apk", "appimage", "flatpak", "snap", "dmg", "pkg", "bin",
-    "run", "jar", "whl", "crx", "xpi", "vsix", "so", "dll", "elf",
+    "exe", "msi", "deb", "rpm", "apk", "appimage", "flatpak", "snap", "dmg", "pkg", "bin", "run",
+    "jar", "whl", "crx", "xpi", "vsix", "so", "dll", "elf",
 ];
 const IMAGES: &[&str] = &[
-    "jpg", "jpeg", "png", "gif", "webp", "bmp", "tiff", "tif", "svg", "ico", "heic", "avif",
-    "raw", "cr2", "nef", "psd", "xcf",
+    "jpg", "jpeg", "png", "gif", "webp", "bmp", "tiff", "tif", "svg", "ico", "heic", "avif", "raw",
+    "cr2", "nef", "psd", "xcf",
 ];
 
 /// Pick a category from the filename first, falling back to the MIME type.

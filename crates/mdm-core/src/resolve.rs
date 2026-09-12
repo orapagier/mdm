@@ -164,10 +164,16 @@ mod tests {
     async fn a_literal_address_needs_no_lookup() {
         // Also the case that must not hang when DNS is down.
         let addrs = addresses("127.0.0.1", 8080).await.unwrap();
-        assert_eq!(addrs, vec![SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080)]);
+        assert_eq!(
+            addrs,
+            vec![SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080)]
+        );
 
         let addrs = addresses("::1", 8080).await.unwrap();
-        assert_eq!(addrs, vec![SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 8080)]);
+        assert_eq!(
+            addrs,
+            vec![SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 8080)]
+        );
     }
 
     #[test]
@@ -175,7 +181,11 @@ mod tests {
         // The ordering logic, exercised directly: whatever this machine's own
         // IPv6 situation is, a list that is v6-only must survive it.
         let only_v6 = prefer_reachable(vec![v6()]);
-        assert_eq!(only_v6, vec![v6()], "a v6-only host must still be attempted");
+        assert_eq!(
+            only_v6,
+            vec![v6()],
+            "a v6-only host must still be attempted"
+        );
 
         let mixed = prefer_reachable(vec![v6(), v4(1)]);
         assert!(!mixed.is_empty());

@@ -167,12 +167,12 @@ mod windows_impl {
 
 #[cfg(unix)]
 pub use unix::{
-    config_dir, data_dir, cache_dir, default_download_dir, ensure_dirs, runtime_dir, socket_path,
+    cache_dir, config_dir, data_dir, default_download_dir, ensure_dirs, runtime_dir, socket_path,
 };
 
 #[cfg(windows)]
 pub use windows_impl::{
-    config_dir, data_dir, cache_dir, default_download_dir, ensure_dirs, runtime_dir, socket_path,
+    cache_dir, config_dir, data_dir, default_download_dir, ensure_dirs, runtime_dir, socket_path,
 };
 
 pub fn db_path() -> PathBuf {

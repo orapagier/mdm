@@ -3,10 +3,10 @@
 
 use mdm_core::categories::{categorize, extension_of};
 use mdm_core::engine::{authorization_for, job_from_url, strip_userinfo, wants_ytdlp};
-use mdm_core::naming::{filename_from_url, sanitize, stem_taken, unique_filename, unique_name};
-use mdm_core::rules::queue_open_at;
 use mdm_core::human_bytes;
 use mdm_core::model::{Credential, Queue, Settings, Status};
+use mdm_core::naming::{filename_from_url, sanitize, stem_taken, unique_filename, unique_name};
+use mdm_core::rules::queue_open_at;
 
 /* ------------------------------- categories ------------------------------ */
 
@@ -96,7 +96,10 @@ fn sanitise_replaces_the_characters_windows_refuses() {
         sanitize("To Rescue a Sinner Like Me | Quennie Benabaye (Cover).mp4".into()),
         "To Rescue a Sinner Like Me _ Quennie Benabaye (Cover).mp4"
     );
-    assert_eq!(sanitize("what? <yes> \"x\" *.mp4".into()), "what_ _yes_ _x_ _.mp4");
+    assert_eq!(
+        sanitize("what? <yes> \"x\" *.mp4".into()),
+        "what_ _yes_ _x_ _.mp4"
+    );
     // A colon would also name an alternate data stream, not a file.
     assert_eq!(sanitize("9:41".into()), "9_41");
 }
@@ -129,8 +132,14 @@ fn a_long_name_is_cut_on_a_character_and_keeps_its_extension() {
 
 #[test]
 fn filename_from_url_decodes_and_drops_the_query() {
-    assert_eq!(filename_from_url("https://e.com/a/b/file.zip?sig=x"), "file.zip");
-    assert_eq!(filename_from_url("https://e.com/my%20file.pdf"), "my file.pdf");
+    assert_eq!(
+        filename_from_url("https://e.com/a/b/file.zip?sig=x"),
+        "file.zip"
+    );
+    assert_eq!(
+        filename_from_url("https://e.com/my%20file.pdf"),
+        "my file.pdf"
+    );
     assert_eq!(filename_from_url("https://e.com/"), "download");
     assert_eq!(filename_from_url("not a url"), "download");
     // A trailing slash must not yield an empty name.
@@ -140,9 +149,9 @@ fn filename_from_url_decodes_and_drops_the_query() {
 #[test]
 fn a_stem_is_taken_by_anything_derived_from_it() {
     let present: Vec<String> = [
-        "Hymns.webm",              // the muxed video already saved
-        "Sermon.f251.webm.part",   // a download still running
-        "Talk",                    // a row that has yet to write a byte
+        "Hymns.webm",            // the muxed video already saved
+        "Sermon.f251.webm.part", // a download still running
+        "Talk",                  // a row that has yet to write a byte
     ]
     .iter()
     .map(|s| s.to_string())
@@ -171,14 +180,20 @@ fn a_taken_name_is_counted_upwards() {
     // saved under this stem, and yt-dlp would call the job finished rather
     // than fetch anything.
     let taken = ["Hymns", "Hymns_2"];
-    assert_eq!(unique_name("Hymns", |name| taken.contains(&name)), "Hymns_3");
+    assert_eq!(
+        unique_name("Hymns", |name| taken.contains(&name)),
+        "Hymns_3"
+    );
 }
 
 #[test]
 fn a_predicate_that_never_yields_still_terminates() {
     let name = unique_name("Hymns", |_| true);
     assert!(name.starts_with("Hymns_"), "{name} kept the stem");
-    assert_ne!(name, "Hymns_2", "and did not settle on a name it was told was taken");
+    assert_ne!(
+        name, "Hymns_2",
+        "and did not settle on a name it was told was taken"
+    );
 }
 
 #[test]
@@ -196,9 +211,15 @@ fn a_filename_is_numbered_before_its_extension() {
 
 #[test]
 fn numbering_copes_with_names_that_carry_no_extension() {
-    assert_eq!(unique_filename("README", |name| name == "README"), "README_2");
+    assert_eq!(
+        unique_filename("README", |name| name == "README"),
+        "README_2"
+    );
     // A leading dot is a hidden file, not an extension to number in front of.
-    assert_eq!(unique_filename(".bashrc", |name| name == ".bashrc"), ".bashrc_2");
+    assert_eq!(
+        unique_filename(".bashrc", |name| name == ".bashrc"),
+        ".bashrc_2"
+    );
 }
 
 /* -------------------------------- scheduler ------------------------------ */
@@ -219,7 +240,10 @@ fn a_queue_without_a_window_is_always_open() {
 
 #[test]
 fn a_disabled_queue_is_never_open() {
-    let q = Queue { enabled: false, ..Queue::default() };
+    let q = Queue {
+        enabled: false,
+        ..Queue::default()
+    };
     assert!(!queue_open_at(&q, 720, 2));
 }
 
@@ -265,9 +289,13 @@ fn settled_media(url: &str) -> mdm_core::model::Job {
 
 #[test]
 fn a_streaming_page_nobody_has_looked_at_goes_to_ytdlp() {
-    assert!(wants_ytdlp(&job_from_url("https://www.tiktok.com/@someone/video/7123456789012345678")));
+    assert!(wants_ytdlp(&job_from_url(
+        "https://www.tiktok.com/@someone/video/7123456789012345678"
+    )));
     assert!(wants_ytdlp(&job_from_url("https://youtu.be/dQw4w9WgXcQ")));
-    assert!(!wants_ytdlp(&job_from_url("https://example.org/debian.iso")));
+    assert!(!wants_ytdlp(&job_from_url(
+        "https://example.org/debian.iso"
+    )));
 }
 
 #[test]
@@ -276,9 +304,16 @@ fn a_caller_that_has_already_looked_is_not_overruled() {
     // offered the file the player was using, which lives on TikTok's own CDN.
     // Guessing from the host put yt-dlp in front of an mp4, and the download
     // died, in the downloader of the day, as "exited with code 16".
-    let cdn = "https://v16-webapp.tiktok.com/ad2adb4e/6a9b818c/video/tos/alisg/tos-alisg-pv-0037/02ea";
-    assert!(wants_ytdlp(&job_from_url(cdn)), "the host alone still reads as TikTok");
-    assert!(!wants_ytdlp(&settled_media(cdn)), "an answer given outright must stand");
+    let cdn =
+        "https://v16-webapp.tiktok.com/ad2adb4e/6a9b818c/video/tos/alisg/tos-alisg-pv-0037/02ea";
+    assert!(
+        wants_ytdlp(&job_from_url(cdn)),
+        "the host alone still reads as TikTok"
+    );
+    assert!(
+        !wants_ytdlp(&settled_media(cdn)),
+        "an answer given outright must stand"
+    );
 }
 
 #[test]
@@ -388,7 +423,9 @@ fn a_page_response_is_recognised_from_its_failure() {
         mdm_core::fetch::PAGE_MARKER
     );
     assert!(mdm_core::fetch::is_page_response(&msg));
-    assert!(!mdm_core::fetch::is_page_response("connection reset by peer"));
+    assert!(!mdm_core::fetch::is_page_response(
+        "connection reset by peer"
+    ));
 }
 
 #[test]
@@ -400,11 +437,20 @@ fn a_player_page_does_not_become_a_php_download() {
         filename_from_url("https://site.test/view_video.php?viewkey=abc123"),
         "view_video"
     );
-    assert_eq!(filename_from_url("https://site.test/watch.aspx?v=1"), "watch");
+    assert_eq!(
+        filename_from_url("https://site.test/watch.aspx?v=1"),
+        "watch"
+    );
 
     // A real file keeps its extension, including one that merely looks odd.
-    assert_eq!(filename_from_url("https://site.test/debian.iso"), "debian.iso");
-    assert_eq!(filename_from_url("https://site.test/a/archive.tar.gz"), "archive.tar.gz");
+    assert_eq!(
+        filename_from_url("https://site.test/debian.iso"),
+        "debian.iso"
+    );
+    assert_eq!(
+        filename_from_url("https://site.test/a/archive.tar.gz"),
+        "archive.tar.gz"
+    );
     // A dotfile-shaped name has no stem to keep, so it is left alone.
     assert_eq!(filename_from_url("https://site.test/.htm"), ".htm");
 }
@@ -455,7 +501,10 @@ fn a_password_in_a_link_moves_out_of_the_url() {
     // What gets stored, logged and shown carries no password.
     assert_eq!(job.url, "https://files.test/big.iso");
     // dXNlcjpzM2NyZXQ= is "user:s3cret".
-    assert_eq!(header(&job, "authorization"), Some("Basic dXNlcjpzM2NyZXQ="));
+    assert_eq!(
+        header(&job, "authorization"),
+        Some("Basic dXNlcjpzM2NyZXQ=")
+    );
 }
 
 #[test]
@@ -478,7 +527,10 @@ fn percent_encoded_credentials_are_decoded_before_they_are_sent() {
     // An "@" or ":" in a password has to be escaped to fit in a URL at all.
     let job = strip_userinfo(job_from_url("https://a%40b.test:p%3Aw@files.test/x.iso"));
     // YUBiLnRlc3Q6cDp3 is "a@b.test:p:w".
-    assert_eq!(header(&job, "authorization"), Some("Basic YUBiLnRlc3Q6cDp3"));
+    assert_eq!(
+        header(&job, "authorization"),
+        Some("Basic YUBiLnRlc3Q6cDp3")
+    );
 }
 
 #[test]
@@ -494,7 +546,10 @@ fn a_configured_login_is_found_by_host_and_only_by_host() {
 
     // Case folds, as hostnames do.
     let found = authorization_for("https://files.test/big.iso", &settings);
-    assert_eq!(found.map(|h| h.value), Some("Basic dXNlcjpzM2NyZXQ=".into()));
+    assert_eq!(
+        found.map(|h| h.value),
+        Some("Basic dXNlcjpzM2NyZXQ=".into())
+    );
 
     // A neighbouring host under the same suffix is a different host, and
     // somebody else may own it.

@@ -113,7 +113,11 @@ pub fn destination(job: &Job, settings: &Settings, use_ytdlp: bool) -> Destinati
         _ => PathBuf::from(&settings.download_dir),
     };
 
-    Destination { dir, filename, category }
+    Destination {
+        dir,
+        filename,
+        category,
+    }
 }
 
 /// The folder a finished download belongs in, if that is not where it already
@@ -332,7 +336,10 @@ pub fn on_failure(
     let disable_native = d.use_ytdlp && !d.no_native && refused;
 
     let next = if !permanent && attempts <= settings.retry_limit {
-        Next::Retry { after: retry_backoff(attempts), attempt: attempts }
+        Next::Retry {
+            after: retry_backoff(attempts),
+            attempt: attempts,
+        }
     } else {
         Next::Fail
     };
@@ -345,7 +352,11 @@ pub fn on_failure(
         stop_capturing: spent.then_some(site),
         switch_to_ytdlp,
         disable_native,
-        scratch_stems: if disable_native { scratch_stems(d) } else { Vec::new() },
+        scratch_stems: if disable_native {
+            scratch_stems(d)
+        } else {
+            Vec::new()
+        },
         forget_extraction: retrying && d.use_ytdlp,
         refresh_extractor: retrying
             && d.use_ytdlp
@@ -557,8 +568,14 @@ mod tests {
         let plan = on_failure(&d, &settings(), &page_failure(), 1, true);
 
         assert_eq!(plan.stop_capturing.as_deref(), Some("filekeeper.net"));
-        assert!(!plan.switch_to_ytdlp, "a file host has no extractor to hand it to");
-        assert!(plan.permanent, "the address is spent; asking again spends nothing");
+        assert!(
+            !plan.switch_to_ytdlp,
+            "a file host has no extractor to hand it to"
+        );
+        assert!(
+            plan.permanent,
+            "the address is spent; asking again spends nothing"
+        );
         assert_eq!(plan.next, Next::Fail);
         assert!(
             plan.message.contains("single-use") && plan.message.contains("filekeeper.net"),
@@ -573,15 +590,25 @@ mod tests {
     /// capturing a site that works.
     #[test]
     fn an_ordinary_page_response_does_not_blacklist_the_host() {
-        for (bytes, mime) in [(0, ""), (0, "text/html"), (5_000, "text/html; charset=utf-8")] {
+        for (bytes, mime) in [
+            (0, ""),
+            (0, "text/html"),
+            (5_000, "text/html; charset=utf-8"),
+        ] {
             let mut d = download("https://tube.example.com/view_video.php?id=9");
             d.total_bytes = bytes;
             d.mime = mime.into();
 
             let plan = on_failure(&d, &settings(), &page_failure(), 1, true);
 
-            assert_eq!(plan.stop_capturing, None, "{bytes}/{mime} was read as spent");
-            assert!(plan.switch_to_ytdlp, "{bytes}/{mime} should go to the extractor");
+            assert_eq!(
+                plan.stop_capturing, None,
+                "{bytes}/{mime} was read as spent"
+            );
+            assert!(
+                plan.switch_to_ytdlp,
+                "{bytes}/{mime} should go to the extractor"
+            );
             assert!(!plan.permanent);
             assert!(matches!(plan.next, Next::Retry { .. }));
         }
@@ -623,7 +650,10 @@ mod tests {
 
             let plan = on_failure(&d, &settings(), &message, 1, true);
 
-            assert!(plan.disable_native, "{status} should abandon the native fetch");
+            assert!(
+                plan.disable_native,
+                "{status} should abandon the native fetch"
+            );
             assert_eq!(plan.scratch_stems, vec!["clip".to_string()]);
         }
     }
@@ -634,7 +664,16 @@ mod tests {
     fn a_dead_address_is_not_a_refusal() {
         let mut d = download("https://cdn.example.com/v.mp4");
         d.use_ytdlp = true;
-        assert!(!on_failure(&d, &settings(), "https://cdn.example.com/v.mp4 answered 404", 1, true).disable_native);
+        assert!(
+            !on_failure(
+                &d,
+                &settings(),
+                "https://cdn.example.com/v.mp4 answered 404",
+                1,
+                true
+            )
+            .disable_native
+        );
 
         // Nor is a status inside some other sentence.
         assert!(!refused_by_server("403 forbidden reading the config file"));
@@ -651,7 +690,9 @@ mod tests {
 
         // And never for a row that was never on yt-dlp's turf.
         let plain = download("https://cdn.example.com/v.mp4");
-        assert!(!on_failure(&plain, &settings(), "connection 1 answered 403", 1, true).disable_native);
+        assert!(
+            !on_failure(&plain, &settings(), "connection 1 answered 403", 1, true).disable_native
+        );
     }
 
     /// The name the user chose is tried before the one on disk: a muxing run
@@ -663,7 +704,10 @@ mod tests {
         d.use_ytdlp = true;
         d.output_name = Some("  Holiday  ".into());
         let plan = on_failure(&d, &settings(), "connection 1 answered 403", 1, true);
-        assert_eq!(plan.scratch_stems, vec!["Holiday".to_string(), "clip".to_string()]);
+        assert_eq!(
+            plan.scratch_stems,
+            vec!["Holiday".to_string(), "clip".to_string()]
+        );
 
         // A blank one is not a name.
         d.output_name = Some("   ".into());
@@ -675,7 +719,9 @@ mod tests {
     #[test]
     fn no_scratch_is_cleared_without_a_refusal() {
         let d = download("https://cdn.example.com/v.mp4");
-        assert!(on_failure(&d, &settings(), "connection reset", 1, true).scratch_stems.is_empty());
+        assert!(on_failure(&d, &settings(), "connection reset", 1, true)
+            .scratch_stems
+            .is_empty());
     }
 
     /* -------------------------------- retries ------------------------------- */
@@ -696,14 +742,21 @@ mod tests {
             );
             assert!(plan.message.contains("connection reset") || !plan.message.is_empty());
         }
-        assert_eq!(on_failure(&d, &s, "connection reset", 6, true).next, Next::Fail);
+        assert_eq!(
+            on_failure(&d, &s, "connection reset", 6, true).next,
+            Next::Fail
+        );
     }
 
     /// A missing format or a private video fails identically every time.
     #[test]
     fn a_permanent_failure_is_not_retried() {
         let d = download("https://youtube.com/watch?v=x");
-        for message in ["Private video", "Requested format is not available", "Video unavailable"] {
+        for message in [
+            "Private video",
+            "Requested format is not available",
+            "Video unavailable",
+        ] {
             let plan = on_failure(&d, &settings(), message, 1, true);
             assert!(plan.permanent, "{message} should be permanent");
             assert_eq!(plan.next, Next::Fail, "{message} should not be retried");
@@ -716,7 +769,11 @@ mod tests {
     fn the_backoff_spans_an_outage_and_then_holds() {
         let secs: Vec<u64> = (1..=7).map(|n| retry_backoff(n).as_secs()).collect();
         assert_eq!(secs, vec![2, 5, 15, 30, 60, 60, 60]);
-        assert_eq!(retry_backoff(0).as_secs(), 2, "a zeroth attempt must not underflow");
+        assert_eq!(
+            retry_backoff(0).as_secs(),
+            2,
+            "a zeroth attempt must not underflow"
+        );
     }
 
     /* ------------------------------- extractor ------------------------------ */
@@ -812,7 +869,10 @@ mod tests {
             );
         }
         // An empty entry is a stray comma, not a wildcard.
-        assert_eq!(single_use_match("https://example.com/f", &hosts(&["", "  "])), None);
+        assert_eq!(
+            single_use_match("https://example.com/f", &hosts(&["", "  "])),
+            None
+        );
     }
 
     /// Session-signed media hosts must never be fetched by a fresh connection.

@@ -308,8 +308,14 @@ impl Engine {
             .filter(|d| d.status == Status::Active)
             .map(|d| d.download_speed)
             .sum();
-        let active = downloads.iter().filter(|d| d.status == Status::Active).count() as i64;
-        let queued = downloads.iter().filter(|d| d.status == Status::Queued).count() as i64;
+        let active = downloads
+            .iter()
+            .filter(|d| d.status == Status::Active)
+            .count() as i64;
+        let queued = downloads
+            .iter()
+            .filter(|d| d.status == Status::Queued)
+            .count() as i64;
 
         Ok(Snapshot {
             downloads,
@@ -380,7 +386,9 @@ fn job_from(d: &Download) -> Job {
 /// presses Start nothing has been agreed to, and a half-offered file must not
 /// appear among the ones they chose to keep.
 fn blob_stash(id: i64) -> PathBuf {
-    crate::paths::runtime_dir().join("blobs").join(format!("{id}.bin"))
+    crate::paths::runtime_dir()
+        .join("blobs")
+        .join(format!("{id}.bin"))
 }
 
 fn stash_blob(id: i64, bytes: &[u8]) -> Result<()> {
@@ -422,9 +430,12 @@ fn reused_existing(output: &Option<PathBuf>, skipped: &Option<String>) -> bool {
 /// `Authorization: Basic …` for a username and password.
 pub fn basic_auth(username: &str, password: &str) -> Header {
     use base64::Engine as _;
-    let encoded = base64::engine::general_purpose::STANDARD
-        .encode(format!("{username}:{password}"));
-    Header { name: "Authorization".into(), value: format!("Basic {encoded}") }
+    let encoded =
+        base64::engine::general_purpose::STANDARD.encode(format!("{username}:{password}"));
+    Header {
+        name: "Authorization".into(),
+        value: format!("Basic {encoded}"),
+    }
 }
 
 /// Move any `user:password@` out of a job's URL and into its headers.
@@ -434,7 +445,9 @@ pub fn basic_auth(username: &str, password: &str) -> Header {
 /// gets stored, logged, shown in the list and copied to the clipboard, and a
 /// password should not be in any of those.
 pub fn strip_userinfo(mut job: Job) -> Job {
-    let Ok(mut url) = url::Url::parse(&job.url) else { return job };
+    let Ok(mut url) = url::Url::parse(&job.url) else {
+        return job;
+    };
     let username = percent_decode(url.username());
     if username.is_empty() {
         return job;
@@ -445,7 +458,8 @@ pub fn strip_userinfo(mut job: Job) -> Job {
     let _ = url.set_username("");
     let _ = url.set_password(None);
     job.url = url.to_string();
-    job.headers.retain(|h| !h.name.eq_ignore_ascii_case("authorization"));
+    job.headers
+        .retain(|h| !h.name.eq_ignore_ascii_case("authorization"));
     job.headers.push(basic_auth(&username, &password));
     job
 }
@@ -476,7 +490,6 @@ fn local_weekday() -> u8 {
     use chrono::Datelike;
     chrono::Local::now().weekday().num_days_from_monday() as u8
 }
-
 
 /// Whether yt-dlp belongs between this job and the fetcher.
 ///
@@ -555,7 +568,10 @@ mod tests {
                 "progress went backwards: {} after {highest}",
                 t.downloaded
             );
-            assert!(t.total >= t.downloaded, "a job cannot weigh less than it has fetched");
+            assert!(
+                t.total >= t.downloaded,
+                "a job cannot weigh less than it has fetched"
+            );
             highest = t.downloaded;
         };
 
@@ -577,7 +593,10 @@ mod tests {
     /// shrink it back down.
     #[test]
     fn a_weight_known_up_front_stands() {
-        let mut tally = Tally { total: 104_000_000, ..Tally::default() };
+        let mut tally = Tally {
+            total: 104_000_000,
+            ..Tally::default()
+        };
         tally.advance(10_000_000, 100_000_000);
         assert_eq!(tally.total, 104_000_000);
         tally.advance(100_000_000, 100_000_000);
@@ -597,5 +616,4 @@ mod tests {
         assert_eq!(tally.downloaded, 60_000_000);
         assert_eq!(tally.total, 100_000_000);
     }
-
 }

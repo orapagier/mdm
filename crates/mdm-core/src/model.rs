@@ -433,7 +433,10 @@ mod tests {
     #[test]
     fn a_capture_has_already_spent_the_link() {
         for source in ["webRequest", "downloads", "blob", "data"] {
-            assert!(from(source).spends_the_link(), "{source} was treated as unspent");
+            assert!(
+                from(source).spends_the_link(),
+                "{source} was treated as unspent"
+            );
         }
     }
 
@@ -443,7 +446,10 @@ mod tests {
     #[test]
     fn a_link_nothing_has_followed_is_still_good() {
         for source in ["menu", "cli", "ui", "preempt"] {
-            assert!(!from(source).spends_the_link(), "{source} was treated as spent");
+            assert!(
+                !from(source).spends_the_link(),
+                "{source} was treated as spent"
+            );
         }
     }
 

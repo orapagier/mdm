@@ -105,10 +105,7 @@ fn parse_xml(text: &str) -> Result<Node> {
                     ..Default::default()
                 };
                 for attr in e.attributes().flatten() {
-                    node.attrs.push((
-                        local(attr.key.as_ref()),
-                        value(&attr),
-                    ));
+                    node.attrs.push((local(attr.key.as_ref()), value(&attr)));
                 }
                 stack.push(node);
             }
@@ -118,10 +115,7 @@ fn parse_xml(text: &str) -> Result<Node> {
                     ..Default::default()
                 };
                 for attr in e.attributes().flatten() {
-                    node.attrs.push((
-                        local(attr.key.as_ref()),
-                        value(&attr),
-                    ));
+                    node.attrs.push((local(attr.key.as_ref()), value(&attr)));
                 }
                 stack
                     .last_mut()
@@ -232,9 +226,10 @@ fn expand(template: &str, id: &str, bandwidth: u64, number: u64, time: u64) -> S
             // e.g. "05d": pad to five digits with zeroes.
             Some(f) if name != "RepresentationID" => {
                 let digits: String = f.chars().take_while(|c| c.is_ascii_digit()).collect();
-                let width: usize = digits.trim_start_matches('0').parse().unwrap_or_else(|_| {
-                    digits.parse().unwrap_or(0)
-                });
+                let width: usize = digits
+                    .trim_start_matches('0')
+                    .parse()
+                    .unwrap_or_else(|_| digits.parse().unwrap_or(0));
                 out.push_str(&format!("{value:0>width$}"));
             }
             _ => out.push_str(&value),
@@ -376,7 +371,10 @@ fn locate(
     period_duration: f64,
 ) -> Result<(Option<Part>, Vec<Part>)> {
     // A template on the Representation wins over one on the AdaptationSet.
-    if let Some(t) = rep.kid("SegmentTemplate").or_else(|| set.kid("SegmentTemplate")) {
+    if let Some(t) = rep
+        .kid("SegmentTemplate")
+        .or_else(|| set.kid("SegmentTemplate"))
+    {
         return from_template(t, base, id, bandwidth, period_duration);
     }
     if let Some(l) = rep.kid("SegmentList").or_else(|| set.kid("SegmentList")) {
@@ -474,7 +472,10 @@ fn from_template(
         for i in 0..count {
             let number = start_number + i;
             segments.push(Part {
-                url: resolve(base, &expand(media, id, bandwidth, number, i * duration as u64)),
+                url: resolve(
+                    base,
+                    &expand(media, id, bandwidth, number, i * duration as u64),
+                ),
                 range: None,
             });
         }
@@ -518,7 +519,10 @@ mod tests {
     fn templates_expand_with_padding() {
         assert_eq!(expand("s-$Number$.m4s", "v1", 0, 7, 0), "s-7.m4s");
         assert_eq!(expand("s-$Number%05d$.m4s", "v1", 0, 7, 0), "s-00007.m4s");
-        assert_eq!(expand("$RepresentationID$/i.mp4", "v1", 0, 0, 0), "v1/i.mp4");
+        assert_eq!(
+            expand("$RepresentationID$/i.mp4", "v1", 0, 0, 0),
+            "v1/i.mp4"
+        );
         assert_eq!(expand("t-$Time$.m4s", "v1", 0, 0, 900), "t-900.m4s");
         // An escaped dollar must survive, and an unknown token must be left
         // alone rather than silently swallowed.
@@ -562,7 +566,10 @@ mod tests {
         );
         // 10 seconds of presentation at 5 seconds a segment.
         assert_eq!(video.segments.len(), 2);
-        assert_eq!(video.segments[1].url, "https://example.test/dash/seg-v0-2.m4s");
+        assert_eq!(
+            video.segments[1].url,
+            "https://example.test/dash/seg-v0-2.m4s"
+        );
     }
 
     #[test]

@@ -39,8 +39,10 @@ async fn main() -> anyhow::Result<()> {
         ("16 connections", Concurrency::Fixed(16)),
         ("auto", Concurrency::Auto { max: 32 }),
     ];
-    let mut results: Vec<(String, Vec<f64>)> =
-        variants.iter().map(|(n, _)| (n.to_string(), Vec::new())).collect();
+    let mut results: Vec<(String, Vec<f64>)> = variants
+        .iter()
+        .map(|(n, _)| (n.to_string(), Vec::new()))
+        .collect();
 
     let dir = std::env::current_dir()?;
     // The first successful download sets the reference every later one is
@@ -52,7 +54,11 @@ async fn main() -> anyhow::Result<()> {
             // variant resume someone else's work and look impossibly fast.
             for entry in std::fs::read_dir(&dir)?.flatten() {
                 let path = entry.path();
-                let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+                let name = path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned();
                 if name.starts_with("bench-") {
                     std::fs::remove_file(&path).ok();
                 }
