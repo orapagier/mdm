@@ -189,7 +189,7 @@ impl Store {
 
     pub fn set_status(&self, id: i64, status: Status, error: Option<&str>) -> Result<()> {
         let conn = self.conn.lock().unwrap();
-        let finished = status.is_terminal().then(|| crate::now());
+        let finished = status.is_terminal().then(crate::now);
         conn.execute(
             "UPDATE downloads SET status = ?1, error = ?2, finished_at = ?3 WHERE id = ?4",
             params![status.as_str(), error, finished, id],

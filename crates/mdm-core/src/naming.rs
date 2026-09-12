@@ -125,7 +125,7 @@ pub fn filename_from_url(url: &str) -> String {
         .ok()
         .and_then(|u| {
             u.path_segments()
-                .and_then(|s| s.filter(|p| !p.is_empty()).next_back())
+                .and_then(|mut s| s.rfind(|p: &&str| !p.is_empty()))
                 .map(percent_decode)
         })
         .filter(|s| !s.is_empty())

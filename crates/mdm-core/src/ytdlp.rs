@@ -1159,6 +1159,7 @@ fn is_youtube(url: &str) -> bool {
 ///
 /// `connections` becomes `--concurrent-fragments`, so streamed fragments get
 /// the same parallelism as ordinary files.
+#[allow(clippy::too_many_arguments)]
 pub async fn download(
     url: &str,
     dir: &Path,

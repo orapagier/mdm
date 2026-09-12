@@ -148,11 +148,13 @@ async fn a_single_use_host_is_asked_rather_than_assumed_about() {
 
     let (base, hits) = spawn_host().await;
 
-    let mut settings = Settings::default();
-    settings.download_dir = tmp.to_string_lossy().into_owned();
-    settings.categorize = false;
-    // The host is on the list, which is the state this whole test is about.
-    settings.single_use_hosts = vec!["127.0.0.1".into()];
+    let settings = Settings {
+        download_dir: tmp.to_string_lossy().into_owned(),
+        categorize: false,
+        // The host is on the list, which is the state this whole test is about.
+        single_use_hosts: vec!["127.0.0.1".into()],
+        ..Settings::default()
+    };
     let engine = Engine::start(settings).await.expect("engine starts");
 
     /* The host that only looked single-use. This is the case that used to be

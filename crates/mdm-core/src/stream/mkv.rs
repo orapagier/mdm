@@ -41,7 +41,7 @@ const DOC_TYPE_READ_VERSION: u32 = 0x4285;
 
 const SEGMENT: u32 = 0x1853_8067;
 const INFO: u32 = 0x1549_A966;
-const TIMESTAMP_SCALE: u32 = 0x2AD7_B1;
+const TIMESTAMP_SCALE: u32 = 0x2AD7B1;
 const DURATION: u32 = 0x4489;
 const MUXING_APP: u32 = 0x4D80;
 const WRITING_APP: u32 = 0x5741;
@@ -753,6 +753,7 @@ pub fn remux(sources: &[Source], out: &Path) -> Result<()> {
     let mut cluster_cues: Vec<Cue> = Vec::new();
     let mut copy = vec![0u8; 1 << 16];
 
+    #[allow(clippy::while_let_loop)]
     loop {
         // Whichever source has the next frame by time. Ties go to the lower
         // index, which puts video before its audio at the same instant.

@@ -483,12 +483,14 @@ fn percent_encoded_credentials_are_decoded_before_they_are_sent() {
 
 #[test]
 fn a_configured_login_is_found_by_host_and_only_by_host() {
-    let mut settings = Settings::default();
-    settings.credentials = vec![Credential {
-        host: "Files.Test".into(),
-        username: "user".into(),
-        password: "s3cret".into(),
-    }];
+    let settings = Settings {
+        credentials: vec![Credential {
+            host: "Files.Test".into(),
+            username: "user".into(),
+            password: "s3cret".into(),
+        }],
+        ..Settings::default()
+    };
 
     // Case folds, as hostnames do.
     let found = authorization_for("https://files.test/big.iso", &settings);
@@ -503,11 +505,13 @@ fn a_configured_login_is_found_by_host_and_only_by_host() {
 
 #[test]
 fn a_blank_host_matches_nothing_rather_than_everything() {
-    let mut settings = Settings::default();
-    settings.credentials = vec![Credential {
-        host: "  ".into(),
-        username: "user".into(),
-        password: "s3cret".into(),
-    }];
+    let settings = Settings {
+        credentials: vec![Credential {
+            host: "  ".into(),
+            username: "user".into(),
+            password: "s3cret".into(),
+        }],
+        ..Settings::default()
+    };
     assert!(authorization_for("https://files.test/big.iso", &settings).is_none());
 }

@@ -36,6 +36,7 @@ pub async fn set_settings(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn add_download(
     engine: State<'_, Arc<Engine>>,
     url: String,

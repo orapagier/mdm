@@ -53,7 +53,7 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let urls: Vec<String> = args.drain(..).collect();
+    let urls: Vec<String> = std::mem::take(&mut args);
     if urls.is_empty() {
         eprintln!("usage: mdm-cli <url> [url...]   |   mdm-cli --probe <page-url>");
         std::process::exit(2);
