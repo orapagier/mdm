@@ -2,11 +2,13 @@
 /**
  * Tests for choosing what a "Download this video" click stands for.
  *
- * Both functions run in contexts that cannot be loaded whole outside a
- * browser — `videoCandidates` lives among `browser.*` listeners, `mediaIn`
- * inside the content script's IIFE — so each is lifted out of its source and
- * run against stubs. Lifted rather than copied: a test carrying its own copy
- * would go on passing after the real one changed.
+ * `videoCandidates` lives among `browser.*` listeners and `mediaIn` inside the
+ * content script's IIFE, so each is lifted out of its source and run against
+ * stubs. Lifted rather than copied: a test carrying its own copy would go on
+ * passing after the real one changed.
+ *
+ * What a full media record gives up is no longer among them — that moved to
+ * mediarecord.js, which loads whole.
  *
  * Run: node extension/test/candidates.test.js
  */
@@ -53,6 +55,14 @@ function constant(file, name, indent = "", dir = SRC) {
  * ------------------------------------------------------------------ */
 
 const bg = vm.createContext({ console, URL, atob, JSON });
+/**
+ * Loaded whole, the way the extension loads it. mediarecord.js holds no
+ * `browser.*` reference, so what a full record gives up is exercised as the
+ * real thing rather than as a copy of it.
+ */
+vm.runInContext(fs.readFileSync(path.join(SRC, "mediarecord.js"), "utf8"), bg, {
+  filename: "mediarecord.js",
+});
 vm.runInContext(
   `
   ${lift("util.js", "withoutByteRange")}
@@ -85,16 +95,11 @@ vm.runInContext(
   function setPageStreams(urls) { pageTiming = urls; }
   async function pageStreams() { return pageTiming; }
   ${lift("background.js", "videoCandidates")}
-  const MAX_SNIFFED = ${constant("background.js", "MAX_SNIFFED")};
-  ${lift("background.js", "makeRoom")}
   /** Fill a tab's record the way a long watch does, and report what survived. */
   function watchFor(manifest, fragments) {
     const m = new Map();
-    m.set(manifest.url, manifest);
-    for (const f of fragments) {
-      while (m.size >= MAX_SNIFFED) makeRoom(m);
-      m.set(f.url, f);
-    }
+    noteMedia(m, manifest);
+    for (const f of fragments) noteMedia(m, f);
     tabMedia = new Map([[TAB, m]]);
     return [...m.keys()];
   }
@@ -102,10 +107,15 @@ vm.runInContext(
   bg,
   { filename: "background.js (extracted)" }
 );
-const { videoCandidates, setSniffed, setPageStreams, watchFor, makeRoom } = bg;
-/** The tab the harness records against, and the sniffer's own ceiling. */
+const { videoCandidates, setSniffed, setPageStreams, watchFor, makeRoom, noteMedia } = bg;
+/**
+ * The sniffer's ceiling, as mediarecord.js sets it. A top-level `const` in a
+ * vm context lands in the lexical scope rather than on the context object, so
+ * it is read by evaluating the name rather than by reaching for a property.
+ */
+const MAX_SNIFFED = vm.runInContext("MAX_SNIFFED", bg);
+/** The tab the harness records against. The ceiling comes from mediarecord.js. */
 const TAB = 1;
-const MAX_SNIFFED = Number(constant("background.js", "MAX_SNIFFED"));
 
 const PAGE = "https://www.tiktok.com/";
 /** TikTok's HEVC capability probe: two seconds, played at every page load. */

@@ -81,6 +81,16 @@ const REQUEST_TTL_MS = 60_000;
 const recentlyCaptured = new Map(); // url -> timestamp
 const CAPTURE_DEDUPE_MS = 5_000;
 
+/**
+ * downloadId -> tabId, populated by onCreated (which fires first) so that
+ * onDeterminingFilename can resolve the page that triggered the download.
+ * The downloads API gives no referrer; onDeterminingFilename has no tabId.
+ * The one thing both lack is what a single-use host's server checks: the
+ * page that sent the browser here. Without it the server returns its own
+ * HTML instead of the file, and the download is left to the browser.
+ */
+const downloadTabIds = new Map(); // downloadId -> { tabId, at }
+
 /** tabId -> Map<url, mediaInfo> discovered by the sniffer. */
 const tabMedia = new Map();
 
@@ -179,35 +189,15 @@ setInterval(() => {
     if (now - t > CAPTURE_DEDUPE_MS) recentlyCaptured.delete(url);
   for (const [url, seen] of seenResponses)
     if (now - seen.at > RESPONSE_TTL_MS) seenResponses.delete(url);
+  for (const [id, entry] of downloadTabIds)
+    if (now - entry.at > 60_000) downloadTabIds.delete(id);
 }, 30_000);
 
 /* ------------------------------------------------------------------ *
  * Header forwarding
  * ------------------------------------------------------------------ */
 
-/**
- * Headers that must not be replayed by the downloader. Hop-by-hop headers are
- * connection-scoped, and Range/Accept-Encoding/Host must be set by the fetcher
- * itself — forwarding Range in particular would truncate every segmented
- * download.
- */
-const STRIP_HEADERS = new Set([
-  "host","connection","keep-alive","proxy-authorization","proxy-connection",
-  "te","trailer","transfer-encoding","upgrade","content-length","range",
-  "if-range","accept-encoding","if-modified-since","if-none-match",
-  "sec-fetch-dest","sec-fetch-mode","sec-fetch-site","sec-fetch-user",
-  "upgrade-insecure-requests","priority",
-]);
 
-function forwardableHeaders(list) {
-  const out = [];
-  for (const h of list || []) {
-    if (STRIP_HEADERS.has(h.name.toLowerCase())) continue;
-    if (h.value === undefined) continue;
-    out.push({ name: h.name, value: h.value });
-  }
-  return out;
-}
 
 /* ------------------------------------------------------------------ *
  * Net 1 — webRequest
@@ -382,24 +372,6 @@ function cleanup(details) {
 browser.webRequest.onCompleted.addListener(cleanup, { urls: ["<all_urls>"] });
 browser.webRequest.onErrorOccurred.addListener(cleanup, { urls: ["<all_urls>"] });
 
-function buildJob(req, details, headers, reason) {
-  const filename = deriveFilename(details.url, headers);
-  return {
-    url: details.url,
-    // Other servers holding the same bytes, if this one said so. Only the
-    // webRequest net sees response headers, so only it can find them.
-    mirrors: mirrorsOf(headers, details.url),
-    filename,
-    size: sizeOf(headers),
-    mime: mimeOf(headers),
-    headers: req.headers,
-    referrer: req.documentUrl || "",
-    cookieStoreId: req.cookieStoreId || "",
-    tabId: req.tabId ?? -1,
-    reason,
-    source: "webRequest",
-  };
-}
 
 /* ------------------------------------------------------------------ *
  * Net 0 — before the browser asks
@@ -432,19 +404,11 @@ let singleUseHosts = [];
 /** Whether the blocking listener below is currently registered. */
 let preempting = false;
 
-/**
- * Take the app's list, and put the listener up or down to match.
- *
- * A blocking listener on every request is not a small thing to add — it makes
- * the browser wait on this script before it opens a socket — and for anyone
- * who has never met a host like this there would be nothing behind the wait.
- * So it exists only while there is a host to use it on, which for most people
- * is never.
- */
+/** Take the app's list, and put the listener up or down to match. */
 function learnSingleUse(hosts) {
   singleUseHosts = Array.isArray(hosts) ? hosts : [];
   publishSingleUse();
-  const wanted = CAN_BLOCK && singleUseHosts.length > 0;
+  const wanted = wantsPreempt(singleUseHosts, CAN_BLOCK);
   if (wanted === preempting) return;
   if (wanted) {
     browser.webRequest.onBeforeRequest.addListener(
@@ -485,29 +449,11 @@ function publishSingleUse() {
   browser.storage.local.set({ singleUseHosts }).catch(() => {});
 }
 
-/**
- * How long to let MDM think about a hand-off.
- *
- * Ordinarily a hand-off is bookkeeping: the app writes a row and answers, and
- * anything slower than a second or two is the app not being there. A capture
- * from a single-use host is not that. The app no longer declines those on
- * sight — it opens the connection and decides from what comes back, and where
- * a file comes back that same connection *is* the download. Which means the
- * answer now waits on a server, and the old deadline expired while the app was
- * still holding a perfectly good response to a file it had been asked for.
- *
- * The ceiling is Chromium's, not ours: `onDeterminingFilename` holds a
- * download for fifteen seconds, `ensureNative` may spend two of them, and the
- * app gives up on the server at six. Ten leaves room at both ends.
- */
+/** The hand-off deadline for a URL, against the list this script holds. */
 function handoffDeadline(url) {
-  const host = hostOf(url);
-  const listed = host && singleUseHosts.some((h) => hostMatches(host, h));
-  return listed ? 10_000 : 0;
+  return handoffDeadlineFor(url, singleUseHosts);
 }
 
-/** How often to ask for it again, at most. */
-const SINGLE_USE_REFRESH_MS = 30_000;
 let singleUseAskedAt = 0;
 
 /**
@@ -529,16 +475,13 @@ let appAnswered = false;
 /**
  * Catch up with the app's list.
  *
- * The app learns a host the moment a capture from it fails, and the download
- * after that one is the first that can be saved — so a list fetched only at
- * startup would be a version behind for the whole session. Asked on
- * navigation, which is the event just before somebody presses a download
- * button, and throttled because navigation is not rare.
+ * A list fetched only at startup would be a version behind for the whole
+ * session; `singleUseRefreshDue` decides how often it is worth asking.
  */
 async function refreshSingleUse(force = false) {
   if (!appAnswered) return;
   const now = Date.now();
-  if (!force && now - singleUseAskedAt < SINGLE_USE_REFRESH_MS) return;
+  if (!singleUseRefreshDue(now, singleUseAskedAt, force)) return;
   singleUseAskedAt = now;
   try {
     const reply = await Native.request({ type: "ping" }, 2000);
@@ -887,11 +830,23 @@ if (HOLDS_FILENAME) {
     (async () => {
       let taken = false;
       try {
+        const entry = downloadTabIds.get(item.id);
+        downloadTabIds.delete(item.id);
+        if (entry && entry.tabId >= 0 && !item.referrer) {
+          try {
+            const tab = await browser.tabs.get(entry.tabId);
+            if (tab?.url) item.referrer = tab.url;
+          } catch { /* tab may have been closed */ }
+        }
+
         taken = await offerWebDownload(item);
       } catch (e) {
         console.warn("[mdm] handoff failed, leaving it to the browser:", e.message);
       }
-      if (taken) await takeOverDownload(item.id);
+      if (taken) {
+        markCaptured(item.url);
+        await takeOverDownload(item.id);
+      }
 
       // Released either way, and last. Until this call the browser has neither
       // asked where to put the file nor written a byte of it to disk, so the
@@ -919,18 +874,15 @@ if (HOLDS_FILENAME) {
  * ------------------------------------------------------------------ */
 
 browser.downloads.onCreated.addListener(async (item) => {
+  // Store tabId for onDeterminingFilename, which fires next and has no tabId.
+  // Synchronous — before any await — so it is written before the next listener reads it.
+  if (item.tabId >= 0) downloadTabIds.set(item.id, { tabId: item.tabId, at: Date.now() });
+
   // Whether this is a network transfer at all, decided without awaiting
   // anything. blob: and data: downloads are the page's own bytes, already in
   // memory; there is no second transfer to race with, and captureBlob and
   // captureDataUrl clear the browser's copy themselves.
   const isWeb = /^https?:\/\//i.test(item.url);
-
-  // Where the browser is about to hold the download for us, that is where it
-  // is caught: net 2a decides it before the file picker opens, and deciding it
-  // here as well would be two hand-offs for one click. A web download that
-  // never reaches that listener is left to the browser, which is the same
-  // failing open every other path in this file does.
-  if (isWeb && HOLDS_FILENAME) return;
 
   // Nothing above this line awaits, and that is the whole point.
   //
@@ -973,6 +925,17 @@ browser.downloads.onCreated.addListener(async (item) => {
       return await captureDataUrl(item);
     }
     if (!isWeb) return;
+
+    // The downloads API gives no referrer, and offerWebDownload needs one:
+    // a single-use host's server checks the Referer to decide whether the
+    // address is still live. Without it the server returns its own HTML
+    // instead of the file, and the download is left to the browser.
+    if (!item.referrer && item.tabId >= 0) {
+      try {
+        const tab = await browser.tabs.get(item.tabId);
+        if (tab?.url) item.referrer = tab.url;
+      } catch { /* tab may have been closed */ }
+    }
 
     if (!(await offerWebDownload(item))) return;
     taken = true;
@@ -1201,29 +1164,6 @@ async function captureDataUrl(item) {
   }
 }
 
-/** Enough of a mapping to name a file the browser did not name. */
-const MIME_EXTENSION = {
-  "image/jpeg": ".jpg", "image/png": ".png", "image/gif": ".gif",
-  "image/webp": ".webp", "image/avif": ".avif", "image/bmp": ".bmp",
-  "image/tiff": ".tif", "image/heic": ".heic", "image/svg+xml": ".svg",
-  "application/pdf": ".pdf", "application/zip": ".zip", "application/json": ".json",
-  "text/plain": ".txt", "text/csv": ".csv", "text/html": ".html",
-  "video/mp4": ".mp4", "video/webm": ".webm", "video/quicktime": ".mov",
-  "audio/mpeg": ".mp3", "audio/ogg": ".ogg", "audio/wav": ".wav",
-};
-
-function extensionForMime(mime) {
-  return MIME_EXTENSION[(mime || "").split(";", 1)[0].trim().toLowerCase()] || "";
-}
-
-function originOfBlob(url) {
-  try {
-    return new URL(url.replace(/^blob:/i, "")).origin;
-  } catch {
-    return "";
-  }
-}
-
 /**
  * Ask the document that owns the blob to read it back for us.
  *
@@ -1306,13 +1246,6 @@ async function framesOn(tab, origin) {
   }
 }
 
-function originOfUrl(url) {
-  try {
-    return new URL(url).origin;
-  } catch {
-    return "";
-  }
-}
 
 /**
  * The downloads API gives no request headers, so rebuild the essentials from
@@ -1342,33 +1275,7 @@ async function headersForUrl(url, referrer, storeId) {
  * Media sniffer (non-blocking)
  * ------------------------------------------------------------------ */
 
-/** How many media responses to remember per tab, newest kept. */
-const MAX_SNIFFED = 50;
 
-/**
- * Make room in a tab's media — the oldest first, but never a manifest while
- * there is a fragment to drop instead.
- *
- * Age is the wrong measure for a stream. The manifest is fetched once, before
- * the first frame, so it is always the oldest thing here; the pieces it lists
- * arrive every few seconds for as long as anyone watches. Fifty slots is about
- * five minutes of playback, after which the oldest-out rule had thrown away
- * the one entry that describes the whole video and kept fifty slices of it.
- * Press Download at six minutes in and the best thing left to offer was a
- * six-second fragment, which downloaded completely, weighed 1.6 MB and would
- * not open in anything.
- */
-function makeRoom(m) {
-  for (const [url, item] of m) {
-    if (item.kind !== "stream") {
-      m.delete(url);
-      return;
-    }
-  }
-  // Nothing but manifests: a page with more streams than slots, where the
-  // oldest is the fairest thing to lose after all.
-  m.delete(m.keys().next().value);
-}
 
 browser.webRequest.onHeadersReceived.addListener(
   async (details) => {
@@ -1385,20 +1292,14 @@ browser.webRequest.onHeadersReceived.addListener(
 
     let m = tabMedia.get(details.tabId);
     if (!m) tabMedia.set(details.tabId, (m = new Map()));
-    if (m.has(details.url)) return;
-    // Fragmented streams emit endlessly, so there has to be a ceiling — but it
-    // drops the *oldest* rather than refusing the newest. Refusing went deaf:
-    // scroll far enough down a feed and the fifty slots are full of videos
-    // already gone by, the one on screen is never recorded, and the button has
-    // nothing to offer for it.
-    while (m.size >= MAX_SNIFFED) makeRoom(m);
-    m.set(details.url, {
+    const added = noteMedia(m, {
       url: details.url,
       mime,
       size: sizeOf(headers),
       kind: isStream ? "stream" : "media",
       at: Date.now(),
     });
+    if (!added) return;
     persistMedia();
     updateBadge();
   },

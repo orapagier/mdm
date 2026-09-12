@@ -36,6 +36,9 @@
       "src/polyfill.js",
       "src/util.js",
       "src/capture.js",
+      "src/job.js",
+      "src/singleuse.js",
+      "src/mediarecord.js",
       "src/native.js",
       "src/background.js"
     ]

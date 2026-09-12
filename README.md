@@ -1002,10 +1002,22 @@ between rounds. It will say `INCONCLUSIVE` and mean it.
 ```bash
 cargo test                              # engine logic: categories, scheduling, manifests, MP4 muxing
 node extension/test/capture.test.js     # capture rules and header parsing
+node extension/test/decisions.test.js   # the job handed over, single-use hosts, what a full record keeps
 node extension/test/permalink.test.js   # finding the post a feed video sits in
 node extension/test/candidates.test.js  # which URL, and which file, a grab means
+node extension/test/preempt.test.js     # holding a click before the server answers it
 node extension/test/streams.test.js     # what counts as a manifest in a page's own record
 ```
+
+Most of what the engine decides lives in `crates/mdm-core/src/rules.rs`, which
+has no store, no filesystem and no runtime: a failure arrives as a message and
+a row, and a plan comes back. `engine/` then carries that plan out. The split
+is what makes the interesting half — is this link spent, is this worth another
+attempt, which host should stop being captured — testable without a database.
+
+The extension does the same thing with `src/job.js`, `src/singleuse.js` and
+`src/mediarecord.js`: no `browser.*` anywhere in them, so the tests load them
+whole rather than lifting functions out of `background.js` by name.
 
 `cargo test` includes `tests/single_use.rs`, which runs the whole single-use
 decision — take it, or leave it to the browser — against a loopback server that
@@ -1052,6 +1064,7 @@ python3 packaging/test-native-host.py target/debug/mdm-host
 |---|---|
 | `extension/` | Firefox MV3 extension: capture rules, video button, popup, options |
 | `crates/mdm-core/` | Engine, HTTP fetcher, HLS/DASH + MP4 remux, SQLite store, scheduler, IPC |
+| `crates/mdm-core/src/rules.rs` | What a failure, a name or a queue window *means* — pure, and where those decisions are tested |
 | `crates/mdm-host/` | Native messaging bridge (dependency-free, std only) |
 | `src-tauri/` | Desktop app and its commands |
 | `ui/` | Frontend — plain HTML/CSS/JS, no bundler |
