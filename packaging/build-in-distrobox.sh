@@ -2,11 +2,16 @@
 #
 # Build the redistributable packages against an old glibc, inside a distrobox.
 #
-# The same job as packaging/build-in-container.sh, driven by distrobox instead
-# of a throwaway docker/podman run. distrobox keeps the toolchain in a named,
-# reusable box rather than an image you rebuild and run: the box is created
-# once, the first entry installs the toolchain inside it, and every build after
-# that is a short commute rather than a rebuild of the world.
+# The same job as packaging/build-in-container.sh, against the same Ubuntu and
+# with the same glibc floor, driven by distrobox instead of a throwaway
+# docker/podman run.
+#
+# Both amortize the toolchain, so neither is the faster one: that script caches
+# an image built from packaging/Containerfile.build, this one installs the
+# toolchain inside a named box on first entry, behind a marker file. The
+# difference is what you are left holding afterwards -- a box you can enter and
+# poke at, which is worth something if you already live in distrobox and
+# nothing at all if you do not.
 #
 #     ./packaging/build-in-distrobox.sh
 #

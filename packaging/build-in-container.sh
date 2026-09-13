@@ -16,6 +16,10 @@
 #
 #     ./packaging/build-in-container.sh
 #
+# If you already use distrobox, packaging/build-in-distrobox.sh does the same
+# job against the same Ubuntu, in a named box you can enter rather than a
+# throwaway container off a cached image.
+#
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
