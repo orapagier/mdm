@@ -39,7 +39,6 @@ const {
 
 const CFG = {
   enabled: true,
-  minSize: 1024 * 1024,
   blockedSites: [],
   blockedExtensions: [],
   captureImages: true,
@@ -94,7 +93,7 @@ expectCapture("Content-Disposition attachment", {
   headers: { "content-disposition": 'attachment; filename="report.pdf"' },
 });
 
-expectCapture("attachment ignores the size threshold", {
+expectCapture("a 512-byte attachment", {
   headers: { "content-disposition": "attachment", "content-length": "512" },
 });
 
@@ -125,9 +124,52 @@ expectCapture("an image asked for as a download", {
   headers: { "content-type": "image/jpeg", "content-length": "400000" },
 });
 
-expectCapture("an image download link below the size threshold", {
+expectCapture("a 40 KB image download link", {
   url: "https://example.com/media/photo.jpg?dl=1",
   headers: { "content-type": "image/jpeg", "content-length": "40000" },
+});
+
+/* Size says nothing about whether something is a download. These are the
+ * files that used to fall through a one-megabyte floor onto the downloads-API
+ * backstop, which is the net that can race the browser's own transfer — so
+ * they were both the most commonly missed and the most commonly duplicated. */
+
+expectCapture("a small .docx by its Office MIME", {
+  url: "https://example.com/minutes.docx",
+  headers: {
+    "content-type":
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "content-length": "24000",
+  },
+});
+
+expectCapture("a small .xlsx by its Office MIME", {
+  url: "https://example.com/budget.xlsx",
+  headers: {
+    "content-type":
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "content-length": "18000",
+  },
+});
+
+expectCapture("a small .webp asked for as a download", {
+  url: "https://cdn.example.com/sticker.webp?dl=1",
+  headers: { "content-type": "image/webp", "content-length": "9000" },
+});
+
+expectCapture("a 12 KB PDF", {
+  url: "https://example.com/receipt.pdf",
+  headers: { "content-type": "application/pdf", "content-length": "12000" },
+});
+
+expectCapture("a short audio navigation", {
+  url: "https://example.com/notify.mp3",
+  headers: { "content-type": "audio/mpeg", "content-length": "7000" },
+});
+
+expectCapture("a tiny archive by extension despite a useless MIME", {
+  url: "https://example.com/keys.tar.gz",
+  headers: { "content-type": "application/octet-stream", "content-length": "800" },
 });
 
 expectCapture("an image served from a /download/ path", {
@@ -207,8 +249,30 @@ expectSkip("data URLs", {
   headers: { "content-type": "application/octet-stream" },
 });
 
-expectSkip("below the size threshold", {
+/* What keeps MDM out of traffic nobody asked for is the resource type, not a
+ * size: a small octet-stream *navigation* is a download and is taken, while
+ * the same bytes fetched by a page are refused however big they are. */
+
+expectCapture("a 1 KB octet-stream navigation", {
   headers: { "content-type": "application/octet-stream", "content-length": "1024" },
+});
+
+expectSkip("a page's own image fetch", {
+  type: "image",
+  url: "https://example.com/hero.jpg",
+  headers: { "content-type": "image/jpeg", "content-length": "9000000" },
+});
+
+expectSkip("a page's own script fetch", {
+  type: "script",
+  url: "https://example.com/bundle.js",
+  headers: { "content-type": "application/javascript", "content-length": "9000000" },
+});
+
+expectSkip("a player's range request", {
+  type: "media",
+  url: "https://example.com/stream.mp4",
+  headers: { "content-type": "video/mp4", "content-length": "9000000" },
 });
 
 expectSkip("redirects", {

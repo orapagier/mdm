@@ -203,7 +203,6 @@ function classify(req, res, cfg, state) {
 
   const headers = res.headers;
   const mime = mimeOf(headers);
-  const size = sizeOf(headers);
   const name = deriveFilename(url, headers);
   const ext = extensionOf(name);
 
@@ -213,16 +212,32 @@ function classify(req, res, cfg, state) {
   const cd = parseContentDisposition(headers["content-disposition"]);
   if (cd.disposition === "attachment") return TAKE("content-disposition");
 
-  // Below here everything is size-gated: grabbing a 4 KB file adds latency
-  // and gains nothing, and tiny hits are usually API responses.
-  const bigEnough = size < 0 || size >= cfg.minSize;
+  // There is no size floor below here, and its absence is the point.
+  //
+  // A megabyte floor used to stand here, on the reasoning that segmenting a
+  // small file gains nothing. Speed is not why a download belongs to MDM,
+  // though — the list is, and the folder it gets filed into. A 40 KB
+  // spreadsheet is a document exactly as much as a 40 MB one, and a floor
+  // meant Documents/ held whichever of them happened to be big.
+  //
+  // Nor was the floor what kept MDM out of traffic nobody asked for; that is
+  // `CAPTURABLE_TYPES` above, which refuses an in-page image, script,
+  // stylesheet, XHR or media range request by its resource type whatever it
+  // weighs. What was left for a floor to judge was navigations and downloads
+  // — the very things somebody clicked on.
+  //
+  // What it did instead was hand every small file to the downloads-API
+  // backstop, which acts after the browser has begun transferring rather than
+  // before it. So the files most likely to finish inside the hand-off were
+  // precisely the ones no other net was allowed to catch, and a .docx that
+  // arrived twice was this test's doing.
 
   // An unmistakably binary extension beats a *generic* Content-Type, but never
   // a specific one. A server that says "application/json" or "text/html" has
   // identified its response deliberately — commonly a 200-with-error-page at a
   // /thing.zip URL, which would be worse saved than rendered.
   if (ext && BINARY_EXTENSIONS.has(ext) && GENERIC_MIME.has(mime))
-    return bigEnough ? TAKE("binary extension ." + ext) : SKIP("below size threshold");
+    return TAKE("binary extension ." + ext);
 
   // --- Images -------------------------------------------------------
   // An image response is a *view* until something says otherwise, or every
@@ -241,16 +256,14 @@ function classify(req, res, cfg, state) {
 
   const mimeSaysFile =
     ALWAYS_MIME.has(mime) || ALWAYS_MIME_PREFIX.some((p) => mime.startsWith(p));
-  if (mimeSaysFile)
-    return bigEnough ? TAKE("mime " + mime) : SKIP("below size threshold");
+  if (mimeSaysFile) return TAKE("mime " + mime);
 
   // Standalone audio/video navigations are downloads; in-page playback was
   // already filtered out by the resource-type check above.
   if (mime.startsWith("video/") || mime.startsWith("audio/"))
-    return bigEnough ? TAKE("media navigation") : SKIP("below size threshold");
+    return TAKE("media navigation");
 
-  if (ext && FILE_EXTENSIONS.has(ext))
-    return bigEnough ? TAKE("extension ." + ext) : SKIP("below size threshold");
+  if (ext && FILE_EXTENSIONS.has(ext)) return TAKE("extension ." + ext);
 
   return SKIP("no download signal");
 }

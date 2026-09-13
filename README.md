@@ -134,6 +134,32 @@ Four independent nets, because none of them is sufficient alone:
 3. A content script, for downloads that never had a URL to begin with — see
    **In-memory downloads** below.
 
+### No size floor, and no favoured file types
+
+Every net takes what it catches whatever it weighs. There was a one-megabyte
+floor here once, defended as "segmenting a small file gains nothing" — which is
+true and beside the point. Speed is not why a download belongs to MDM. The list
+is, and the category folder it gets filed into: a 40 KB spreadsheet is a
+document exactly as much as a 40 MB one, and a floor meant `Documents/` held
+whichever of the user's files happened to be large.
+
+It was not what kept MDM out of traffic nobody asked for, either. That is the
+resource type: an in-page image, script, stylesheet, XHR or media range request
+is refused for what it *is*, at any size. All a floor could judge was
+navigations and downloads — the things somebody had just clicked on.
+
+What it did instead was hand every small file to net 2, which acts after the
+browser has begun transferring rather than before. So the files most likely to
+finish inside the hand-off were exactly the ones no earlier net was allowed to
+catch, and a small `.docx` arriving twice — once from the browser, once from
+MDM — was the floor's doing rather than the race's.
+
+What still decides is whether a response is a download at all: the browser has
+to render its own pages, stylesheets and scripts, and a photo opened in a tab is
+being looked at rather than saved. **Sites to ignore** and **File extensions to
+ignore** in Settings are where the exceptions live — putting `pdf` in the second
+one is how you keep small PDFs opening in the viewer.
+
 ### Links that answer once
 
 File hosts hand out an address that is good for a single request: serve it
@@ -248,9 +274,8 @@ something says otherwise, and capturing every one of them would mean opening a
 photo in a tab saved it to disk instead of putting it on screen. Two things
 say otherwise: `Content-Disposition: attachment`, and a URL that spells out a
 download — `?dl=1` and its cousins, which is what chat and gallery sites append
-when the button says Download. Those are captured, and the size floor does not
-apply to them: it exists to keep MDM out of automatic captures, and a photo
-saved on purpose is a real download at 200 KB.
+when the button says Download. Those are captured whatever they weigh: a photo
+saved on purpose is a real download at 9 KB.
 
 The **Grab images from this page…** context menu reads the live DOM instead,
 offering every picture the page actually put on screen — with the size each one
@@ -668,7 +693,6 @@ Deliberately **not** captured, because they cannot work out of process:
 | POST-initiated downloads | Cannot be replayed as a GET |
 | `206 Partial Content` | A range request — usually a `<video>` element playing |
 | `type: "media"` | In-page playback; cancelling it breaks the player |
-| Below the size threshold | Segmenting a 4 KB file costs more than it saves |
 
 If the daemon is unreachable or slow to answer, capture **fails open**: Firefox
 downloads the file itself. A broken download manager must never mean a broken

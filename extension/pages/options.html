@@ -12,16 +12,10 @@
 <label class="row"><input type="checkbox" id="captureImages"> <span>Capture image downloads</span></label>
 <label class="row"><input type="checkbox" id="captureBlobs"> <span>Capture downloads pages build in memory</span></label>
 <p class="hint">Images are only taken when they are actually being downloaded &mdash; saved, or fetched through a
-  link that asks for a download. One opened in a tab is still shown, not saved, and the size limit below does
-  not apply to them.</p>
+  link that asks for a download. One opened in a tab is still shown, not saved.</p>
 <p class="hint">Chat and gallery sites often assemble a file in the page and hand the browser a
   <code>blob:</code> link to it, which no downloader can fetch. MDM asks the page for those bytes instead. Turn
   this off to leave them to the browser.</p>
-
-<label>Minimum size to capture (MiB)
-  <input type="number" id="minSize" min="0" step="0.5">
-  <p class="hint">Smaller files are left to the browser — segmenting them gains nothing. Files sent with <code>Content-Disposition: attachment</code> are always captured regardless of size.</p>
-</label>
 
 <label>Hand-off timeout (ms)
   <input type="number" id="handoffTimeoutMs" min="200" max="10000" step="100">
@@ -29,6 +23,8 @@
 </label>
 
 <h2>Exclusions</h2>
+<p class="hint">MDM captures every download regardless of its size or type, so that the list and the category
+  folders hold all of them rather than the large ones. These two lists are how you carve out the exceptions.</p>
 <label>Sites to ignore
   <textarea id="blockedSites" placeholder="example.com&#10;mail.google.com"></textarea>
   <p class="hint">One host per line. Subdomains are included.</p>

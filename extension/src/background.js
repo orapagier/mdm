@@ -6,7 +6,6 @@
 
 const DEFAULTS = {
   enabled: true,
-  minSize: 1024 * 1024, // 1 MiB
   blockedSites: [],
   blockedExtensions: [],
   askBeforeDownload: false,
@@ -733,6 +732,29 @@ async function ensureNative(timeoutMs = 2000) {
 const HOLDS_FILENAME = !!browser.downloads.onDeterminingFilename;
 
 /**
+ * How long to let MDM think about a download the browser is holding for us.
+ *
+ * Net 1's deadline is short because net 1 is *blocking*: every millisecond it
+ * waits is a response the browser has not been allowed to finish, on a
+ * listener that sees all of them. Nothing here is like that. Both nets below
+ * hold one download and one download only — paused, or suspended at the
+ * naming step — so waiting costs the user nothing but the wait, and giving up
+ * early costs them the capture.
+ *
+ * Four seconds was too short for the one case that matters: when MDM is not
+ * already running, the native host answers by *starting* it, and waits up to
+ * fifteen seconds for the socket. The app would come up, take the job and
+ * write the row a beat after the extension had stopped listening — so the
+ * browser downloaded the file, MDM listed it, and the user got both. The
+ * first download after opening the browser was the one that did this.
+ *
+ * Ten, for the same arithmetic as `SINGLE_USE_HANDOFF_MS`: Chromium suspends
+ * a download at `onDeterminingFilename` for fifteen seconds, `ensureNative`
+ * may spend two of them, and this has to answer inside what is left.
+ */
+const DOWNLOADS_HANDOFF_MS = 10_000;
+
+/**
  * Decide a plain http(s) download and hand it to MDM.
  *
  * Everything the two nets below must agree on lives here; they differ only in
@@ -760,15 +782,16 @@ async function offerWebDownload(item) {
   if (cfg.blockedExtensions.includes(ext)) return false;
   if (looksLikeImage(item.mime || "", ext) && !cfg.captureImages) return false;
 
-  // No size floor here, deliberately, and none by file type either.
+  // No size floor here and none by file type, which is now true of net 1 as
+  // well — see the note where its own floor used to be.
   //
-  // That threshold belongs to the *automatic* net, where a small response is
-  // far more likely to be an API reply than a file and guessing wrong costs
-  // the user a download they never asked for. Nothing reaches these listeners
-  // by guesswork: the browser has already decided every one of these is a
-  // download. A 40 KB photo saved out of a chat is exactly as much a download
-  // as a 4 GB image, and skipping it only meant MDM captured some of what the
-  // browser downloaded rather than all of it.
+  // It is worth saying twice all the same, because this net is the one that
+  // cannot be wrong about it. Everything reaching these listeners has already
+  // been called a download by the browser itself: there is no response to
+  // read, nothing to classify and nothing to guess at. A 40 KB photo saved
+  // out of a chat is exactly as much a download as a 4 GB image, and a rule
+  // that skipped it only meant MDM held some of what the user downloaded
+  // rather than all of it — which is no basis for filing anything.
 
   if (!(await ensureNative())) return false;
 
@@ -802,7 +825,7 @@ async function offerWebDownload(item) {
 
   const reply = await Native.request(
     { type: "download", job },
-    handoffDeadline(item.url) || 4000
+    handoffDeadline(item.url) || DOWNLOADS_HANDOFF_MS
   );
   if (!reply || !reply.accepted) return false;
 
@@ -884,7 +907,24 @@ browser.downloads.onCreated.addListener(async (item) => {
   // captureDataUrl clear the browser's copy themselves.
   const isWeb = /^https?:\/\//i.test(item.url);
 
-  // Nothing above this line awaits, and that is the whole point.
+  // Where the browser has a naming step, the hand-off belongs there and not
+  // here. Net 2a fires a moment after this one, with the download named but
+  // not yet placed and not yet asked about, so a capture from there leaves no
+  // partial file and no "Save as" dialog to dismiss.
+  //
+  // Both of them running is not a second copy on disk — the app recognises the
+  // same unfinished target and reuses the row — but it is two hand-offs for
+  // one download, and the native host answers them one at a time. When that
+  // host is busy starting the app, the second one waits out the first before
+  // it is even read, which is how a download could still be lost inside the
+  // fifteen seconds Chromium allows net 2a.
+  //
+  // blob: and data: stay here: net 2a returns false for anything that is not
+  // http(s), because their bytes belong to the page rather than to a server.
+  if (isWeb && HOLDS_FILENAME) return;
+
+  // Nothing below this line awaits before the browser's copy is stopped, and
+  // that is the whole point.
   //
   // On a browser that will not hold the download, the transfer is already
   // running by the time this fires, so every await before the browser's copy
