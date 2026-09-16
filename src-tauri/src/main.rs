@@ -124,7 +124,7 @@ fn main() {
 
     // If an instance already owns the socket, hand this launch to it and exit
     // rather than starting a second engine on the same database.
-    if hand_off(&urls) {
+    if hand_off(&urls, background) {
         return;
     }
 
@@ -472,13 +472,23 @@ fn main() {
 /// clicking the Start Menu entry while the app was already running in the
 /// background did nothing whatsoever — no window, no message, no log. Speaking
 /// on the connection we already hold removes the race instead of narrowing it.
-fn hand_off(urls: &[String]) -> bool {
+fn hand_off(urls: &[String], background: bool) -> bool {
     use std::io::Write;
 
     let Some(mut conn) = connect_to_running() else {
         return false;
     };
     let lines: Vec<String> = if urls.is_empty() {
+        // A launch with nothing to say is a person asking for the app, and the
+        // window is the answer. A `--background` launch is not: the native
+        // messaging host starts one for every browser that comes up, so two
+        // browsers starting together race for the socket -- and the loser
+        // asking the winner to show itself is a window nobody asked for,
+        // which is exactly what `--background` exists to avoid.
+        if background {
+            log::info!("another instance is running; a background launch has nothing to ask of it");
+            return true;
+        }
         log::info!("another instance is running; asking it to show itself");
         vec![r#"{"type":"focus"}"#.to_string()]
     } else {
