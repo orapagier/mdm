@@ -61,11 +61,25 @@ mdm_manifest_failed:
   WriteRegStr HKCU "Software\Classes\mdm\shell\open\command" "" \
     '"$INSTDIR\mdm.exe" "%1"'
 
-  ; The signed extension, copied out of the install directory to a stable
-  ; place. Firefox will not install an add-on from an installer, so this is
-  ; put where the user can open it — the finish page says how.
-  IfFileExists "$INSTDIR\mdm-firefox.xpi" 0 +2
-    CopyFiles /SILENT "$INSTDIR\mdm-firefox.xpi" "$APPDATA\mdm\mdm-firefox.xpi"
+  ; The extension, copied out of the install directory to a stable place:
+  ; %APPDATA%\mdm\extension, which is where install.ps1 puts it, and the same
+  ; directory relative to MDM's own that install.sh and the app use on Linux.
+  ; One path to write down, whichever way somebody installed.
+  ;
+  ; Firefox will not install an add-on from an installer, so the .xpi is put
+  ; where the user can open it — the finish page says how.
+  CreateDirectory "$APPDATA\mdm\extension"
+  IfFileExists "$INSTDIR\extension\mdm-firefox.xpi" 0 +2
+    CopyFiles /SILENT "$INSTDIR\extension\mdm-firefox.xpi" "$APPDATA\mdm\extension\mdm-firefox.xpi"
+
+  ; The flat layout an installer before this one left behind. The .xpi is only
+  ; litter — Firefox copied the add-on into the profile as it installed it —
+  ; but the folder is not: Chromium re-reads an unpacked extension's folder at
+  ; every start, so a browser pointed at the old one would keep running it,
+  ; and a version that is never updated again has no symptom beyond fixes that
+  ; appear to do nothing.
+  Delete "$APPDATA\mdm\mdm-firefox.xpi"
+  RMDir /r "$APPDATA\mdm\mdm-chrome"
 
   ; ---------------------------------------------------------------- Chromium
   ;
@@ -102,9 +116,9 @@ mdm_chrome_manifest_failed:
   ; Chromium loads an *unpacked folder*, not a file, so the extension is put
   ; somewhere stable and the user points "Load unpacked" at it. It keeps its
   ; pinned id, which is the one the manifest above just allowed.
-  IfFileExists "$INSTDIR\mdm-chrome\manifest.json" 0 +3
-    CreateDirectory "$APPDATA\mdm\mdm-chrome"
-    CopyFiles /SILENT "$INSTDIR\mdm-chrome\*.*" "$APPDATA\mdm\mdm-chrome"
+  IfFileExists "$INSTDIR\extension\mdm-chrome\manifest.json" 0 +3
+    CreateDirectory "$APPDATA\mdm\extension\mdm-chrome"
+    CopyFiles /SILENT "$INSTDIR\extension\mdm-chrome\*.*" "$APPDATA\mdm\extension\mdm-chrome"
 !macroend
 
 !macro NSIS_HOOK_POSTUNINSTALL
@@ -120,6 +134,8 @@ mdm_chrome_manifest_failed:
 
   Delete "$APPDATA\mdm\${MDM_HOST_NAME}.json"
   Delete "$APPDATA\mdm\${MDM_HOST_NAME}.chrome.json"
+  RMDir /r "$APPDATA\mdm\extension"
+  ; And the flat layout, for a machine that has had both.
   Delete "$APPDATA\mdm\mdm-firefox.xpi"
   RMDir /r "$APPDATA\mdm\mdm-chrome"
 

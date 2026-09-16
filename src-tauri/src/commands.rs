@@ -199,13 +199,14 @@ pub fn ytdlp_available() -> bool {
 
 /// Where this install put the browser extension.
 ///
-/// It is carried by every way of installing MDM — the .deb and .rpm stage it
-/// under /usr/lib, the Windows installer copies it to %APPDATA%, install.sh
-/// leaves it in the data directory — and until now nothing said so anywhere.
-/// Somebody who installed from a release build got the app, got the native
-/// host, and had no way to find the half that does the capturing short of
-/// cloning the repository and building it, which is the one thing a release
-/// build exists to avoid.
+/// It is carried by every way of installing MDM, and every one of them now
+/// leaves it in the same place: `paths::extension_dir()`, one directory with
+/// both browsers' copies in it. install.sh, install.ps1 and the Windows
+/// installer write it directly. A .deb or .rpm cannot — its postinstall runs
+/// as root, and a system package has no business writing into one user's home
+/// — so it stages the pair beside the app under /usr/lib and this is what
+/// copies them across, which is why the answer is a search rather than a
+/// constant.
 #[derive(serde::Serialize)]
 pub struct ExtensionAssets {
     /// The signed .xpi, which Firefox installs in one click.
@@ -226,8 +227,15 @@ fn extension_dirs(app: &AppHandle) -> Vec<std::path::PathBuf> {
     use tauri::Manager;
     let mut dirs: Vec<std::path::PathBuf> = Vec::new();
 
-    // What the bundler staged, wherever this build actually is. First because
-    // it is the only one that is right by construction rather than by guess.
+    // MDM's own data directory, first. With the `extension` the loop at the
+    // bottom adds, that is `paths::extension_dir()` — where every installer
+    // puts the two copies and where this one copies them to. Searching the
+    // directory itself as well costs a stat and finds the flat layout an
+    // install from before this one left there, which is then copied into
+    // place like any other.
+    dirs.push(mdm_core::paths::data_dir());
+
+    // What the bundler staged, wherever this build actually is.
     if let Ok(dir) = app.path().resource_dir() {
         dirs.push(dir.clone());
         // Tauri stages resources under `resources/` in some layouts and beside
@@ -275,7 +283,79 @@ fn extension_dirs(app: &AppHandle) -> Vec<std::path::PathBuf> {
             }
         }
     }
-    dirs
+
+    // Each of those, with `extension` first and the directory itself second.
+    // Everything stages into a subdirectory of that name now — see the
+    // `resources` map in tauri.bundle.linux.conf.json — while a development
+    // tree has the two loose under target/, and an install from before this
+    // layout had them loose in the data directory. Doubling the list is
+    // cheaper than choosing wrongly: a miss here is the app reporting no
+    // extension on a machine that has one.
+    dirs.into_iter()
+        .flat_map(|d| {
+            let nested = d.join("extension");
+            [nested, d]
+        })
+        .collect()
+}
+
+/// Copy what this install carries into the directory the documentation names.
+///
+/// Only ever a package's copy moving to the place install.sh would have put
+/// it, and only when it is newer than what is there: a browser is pointed at
+/// this folder for as long as the extension stays loaded, so an upgrade that
+/// left it on the version it was installed with would be a fix that never
+/// arrives however many times the extension is reloaded.
+///
+/// Best-effort throughout. A copy that fails leaves the caller with the path
+/// it already found, which is a working answer — the point of the copy is that
+/// one path can be written down, not that this particular one works.
+fn adopt(src: &std::path::Path) -> Option<std::path::PathBuf> {
+    let dir = mdm_core::paths::extension_dir();
+    let dst = dir.join(src.file_name()?);
+    if src == dst {
+        return Some(dst);
+    }
+    // A directory's age is its manifest's: copying a folder does not carry the
+    // folder's own mtime, and the manifest is rewritten by every build.
+    let stamp = |p: &std::path::Path| {
+        let f = if p.is_dir() {
+            p.join("manifest.json")
+        } else {
+            p.to_path_buf()
+        };
+        std::fs::metadata(f).and_then(|m| m.modified()).ok()
+    };
+    match (stamp(src), stamp(&dst)) {
+        (Some(new), Some(old)) if new <= old => return Some(dst),
+        (None, _) => return None,
+        _ => {}
+    }
+    std::fs::create_dir_all(&dir).ok()?;
+    if src.is_dir() {
+        // Replaced rather than copied over: an extension folder that is half
+        // one version and half another loads, and then fails in whichever way
+        // the mixture happens to produce.
+        let _ = std::fs::remove_dir_all(&dst);
+        copy_dir(src, &dst).ok()?;
+    } else {
+        std::fs::copy(src, &dst).ok()?;
+    }
+    Some(dst)
+}
+
+fn copy_dir(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let to = dst.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir(&entry.path(), &to)?;
+        } else {
+            std::fs::copy(entry.path(), &to)?;
+        }
+    }
+    Ok(())
 }
 
 /// Find the extension, wherever this install left it.
@@ -288,6 +368,10 @@ pub fn extension_assets(app: AppHandle) -> ExtensionAssets {
                 let p = dir.join(name);
                 let ok = if want_dir { p.is_dir() } else { p.is_file() };
                 if ok {
+                    // Wherever it was found, the path handed back is the one
+                    // the README names — `adopt` puts it there if it is not
+                    // there already, and falls back to what was found.
+                    let p = adopt(&p).unwrap_or(p);
                     return Some(p.to_string_lossy().into_owned());
                 }
             }
@@ -295,14 +379,119 @@ pub fn extension_assets(app: AppHandle) -> ExtensionAssets {
         None
     };
     ExtensionAssets {
-        // Both names, because the bundler renames the signed package as it
-        // stages it and install.sh does not.
+        // Both names: everything stages it as mdm-firefox.xpi, but a copy
+        // left under the name AMO signed it with is the same file.
         firefox: find(&["mdm-firefox.xpi", "mdm-firefox-signed.xpi"], false),
         // A folder rather than the .zip: "Load unpacked" is what Chrome, Brave,
         // Edge and Vivaldi offer without a store listing, and it takes a
         // directory. The .zip is for uploading to a store dashboard.
         chrome: find(&["mdm-chrome"], true),
     }
+}
+
+#[cfg(test)]
+mod extension_tests {
+    use super::*;
+
+    /// The three things `adopt` has to get right, in the order they happen to
+    /// a machine: nothing there yet, something newer arriving, and something
+    /// older arriving that must be left alone.
+    ///
+    /// Worth a test because two of the three are invisible when wrong. A copy
+    /// that does not happen leaves the app reporting a path under /usr/lib,
+    /// which works; a copy that happens when it should not replaces a folder a
+    /// browser is reading, and neither says anything.
+    #[test]
+    fn adopt_copies_only_what_is_newer() {
+        let tmp = std::env::temp_dir().join(format!("mdm-adopt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let pkg = tmp.join("usr-lib");
+        std::fs::create_dir_all(&pkg).unwrap();
+        std::env::set_var("XDG_DATA_HOME", tmp.join("data"));
+        std::env::set_var("APPDATA", tmp.join("data"));
+
+        let write = |dir: &std::path::Path, body: &str| {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(dir.join("manifest.json"), body).unwrap();
+        };
+
+        // Nothing in the data directory yet: the package's copy is taken.
+        let src = pkg.join("mdm-chrome");
+        write(&src, "one");
+        let dst = adopt(&src).expect("a first copy");
+        assert_eq!(dst, mdm_core::paths::extension_dir().join("mdm-chrome"));
+        assert_eq!(
+            std::fs::read_to_string(dst.join("manifest.json")).unwrap(),
+            "one"
+        );
+
+        // An upgrade leaves a newer one beside the app: it replaces the copy,
+        // files and all, rather than merging into it.
+        std::fs::write(src.join("gone.js"), "x").unwrap();
+        write(&src, "two");
+        filetime_bump(&src.join("manifest.json"), 10);
+        adopt(&src).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dst.join("manifest.json")).unwrap(),
+            "two"
+        );
+        assert!(dst.join("gone.js").is_file());
+        std::fs::remove_file(src.join("gone.js")).unwrap();
+        filetime_bump(&src.join("manifest.json"), 20);
+        adopt(&src).unwrap();
+        assert!(
+            !dst.join("gone.js").exists(),
+            "the folder is replaced, not merged"
+        );
+
+        // An older one -- a package rolled back, or simply reinstalled over
+        // itself -- leaves what the browser is reading alone.
+        write(&src, "three");
+        filetime_bump(&src.join("manifest.json"), -3600);
+        adopt(&src).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dst.join("manifest.json")).unwrap(),
+            "two"
+        );
+
+        // And the copy that is already in place is itself, not a copy of one.
+        assert_eq!(adopt(&dst).unwrap(), dst);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// `set_file_mtime` without pulling in a crate for it: a file written in
+    /// the same second as the last one is neither newer nor older, and the
+    /// whole of `adopt` is a comparison between the two.
+    fn filetime_bump(p: &std::path::Path, secs: i64) {
+        let now = std::time::SystemTime::now();
+        let when = if secs >= 0 {
+            now + std::time::Duration::from_secs(secs as u64)
+        } else {
+            now - std::time::Duration::from_secs((-secs) as u64)
+        };
+        let f = std::fs::File::options().write(true).open(p).unwrap();
+        f.set_modified(when).unwrap();
+    }
+}
+
+/// Put the extension where the documentation says it is, without being asked.
+///
+/// `extension_assets` does the copying, but it is only called when somebody
+/// opens the extension dialog — which is once, on a first run, and then not
+/// again. That is enough to *create* the copy and not enough to keep it: a
+/// packaged install that upgrades leaves a new extension under /usr/lib and a
+/// browser still reading the one in the data directory, and an extension a
+/// version behind its native host has no symptom beyond things that used to
+/// work quietly not working.
+///
+/// On its own thread because it is filesystem work on the way to showing a
+/// window, and nothing waits for the answer.
+pub fn sync_extension(app: &AppHandle) {
+    let app = app.clone();
+    std::thread::spawn(move || {
+        let _ = extension_assets(app);
+    });
 }
 
 /// Hand the .xpi to Firefox, which is the click that installs it.

@@ -34,8 +34,7 @@ per-user.
 |---|---|
 | The app and the native messaging host | `%LOCALAPPDATA%\Programs\mdm` |
 | Downloads database, settings, fetched tools | `%APPDATA%\mdm` |
-| Firefox extension package | `%APPDATA%\mdm\mdm-firefox.xpi` |
-| Chromium extension folder | `%APPDATA%\mdm\mdm-chrome` |
+| Browser extension, both copies | `%APPDATA%\mdm\extension` — `mdm-firefox.xpi` for Firefox, `mdm-chrome\` for the Chromium browsers |
 | Native messaging manifests | `%APPDATA%\mdm\io.mdm.host.json` (Firefox), `%APPDATA%\mdm\io.mdm.host.chrome.json` (Chromium) |
 | Start Menu entry | **My Download Manager** |
 | Uninstall entry | Settings → Apps → Installed apps |
@@ -59,13 +58,27 @@ MDM captures downloads *through the browser*, so nothing is captured until the
 extension is installed. Both browsers can be set up at once; they share the one
 running app.
 
+Both copies are in one directory, `%APPDATA%\mdm\extension` — the same place
+relative to MDM's own files that `install.sh` and the Linux packages use, so
+the instructions are the same wherever you are reading them from:
+
+```
+extension\
+├── mdm-firefox.xpi   Firefox
+└── mdm-chrome\       Chrome, Edge, Brave, Vivaldi
+```
+
+The app will also do all of this for you: **Settings ▸ Browser extension ▸
+"Install or check it…"**, which it offers by itself the first time it is
+opened.
+
 #### Firefox
 
 Open this in Firefox — paste the whole line into the address bar, with your own
 username in place of `<you>`:
 
 ```
-file:///C:/Users/<you>/AppData/Roaming/mdm/mdm-firefox.xpi
+file:///C:/Users/<you>/AppData/Roaming/mdm/extension/mdm-firefox.xpi
 ```
 
 Click **Add**, then **Okay**. It stays installed across restarts.
@@ -78,7 +91,7 @@ Chromium browsers install an *unpacked folder*, not a file:
    They are the same page.
 2. Turn on **Developer mode** (top right).
 3. Click **Load unpacked**.
-4. Select `%APPDATA%\mdm\mdm-chrome`.
+4. Select `%APPDATA%\mdm\extension\mdm-chrome`.
 
 The extension ID will be **`pegdlonllkokelfmdafooihklghlkimh`**. That is pinned
 deliberately: the native messaging manifest names exactly that ID, so it has to
@@ -245,9 +258,10 @@ git config --global --add safe.directory '%(prefix)///tsclient/media/Data/dev/md
 ```
 
 Same layout under XDG paths: binaries in `~/.local/bin`, data in
-`~/.local/share/mdm`, native messaging manifests written to every Firefox and
-Chromium config tree that exists. Files you have already downloaded are
-untouched by either script.
+`~/.local/share/mdm`, both browsers' copies of the extension in
+`~/.local/share/mdm/extension`, native messaging manifests written to every
+Firefox and Chromium config tree that exists. Files you have already downloaded
+are untouched by either script.
 
 `uninstall.sh` removes only what `install.sh` wrote. If MDM is also installed
 from the `.rpm` or `.deb`, that install belongs to the package manager and is
@@ -461,9 +475,14 @@ Run the app from a terminal with `RUST_LOG=mdm=debug,mdm_core=debug`.
     bin\qjs.exe                   fetched when a site needs JavaScript run
     io.mdm.host.json              native messaging manifest (Firefox)
     io.mdm.host.chrome.json       native messaging manifest (Chromium)
-    mdm-firefox.xpi               the Firefox extension, ready to install
-    mdm-chrome\                   the Chromium extension, ready to load
+    extension\
+        mdm-firefox.xpi           the Firefox extension, ready to install
+        mdm-chrome\               the Chromium extension, ready to load
 ```
+
+The `extension\` directory is the same one every way of installing MDM leaves
+behind — `install.ps1` and the `.exe` here, `~/.local/share/mdm/extension` on
+Linux — so an instruction written for one machine is right on the other.
 
 Downloaded files go wherever you chose — by default `%USERPROFILE%\Downloads`,
 sorted into `Video`, `Compressed`, `Documents` and so on unless categories are

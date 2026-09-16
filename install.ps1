@@ -443,7 +443,7 @@ New-Zip $ChromeDir $ChromeZip
 #
 # Two reasons, and the second is the one that actually bites.
 #
-# First, installer.nsh copies this folder to %APPDATA%\mdm\mdm-chrome, so that
+# First, installer.nsh copies this folder to %APPDATA%\mdm\extension, so that
 # is where it lives once anyone has run a setup.exe. Writing it here too keeps
 # the installed copy in step with a rebuild instead of leaving the browser on
 # whatever the last installer carried -- the id is pinned in both, so a stale
@@ -460,8 +460,34 @@ New-Zip $ChromeDir $ChromeZip
 #
 # So target\mdm-chrome stays the build output -- it is what the .zip and the
 # installer are made from -- and this copy on local disk is the one to load.
+#
+# It goes in $ExtDir with the .xpi rather than loose beside the database: one
+# directory, both browsers' copies, and the same directory relative to MDM's
+# own that the setup.exe writes and that install.sh and the app use on Linux.
+# One path to write down, whichever way somebody installed.
+$ExtDir = "$NmDir\extension"
 if (-not $BundleOnly) {
-    $InstalledChromeDir = "$NmDir\mdm-chrome"
+    New-Item -ItemType Directory -Force -Path $ExtDir | Out-Null
+
+    # The flat layout an earlier install.ps1 left behind. The .xpi is only
+    # litter -- Firefox copied the add-on into the profile as it installed it
+    # -- but the folder is not: Chromium re-reads an unpacked extension's
+    # folder at every start, so a browser pointed at the old one goes on
+    # running a copy nothing updates any more, and the only symptom is a fix
+    # that never arrives however often the extension is reloaded.
+    $stale = Test-Path "$NmDir\mdm-chrome"
+    foreach ($old in @("$NmDir\mdm-firefox.xpi", "$NmDir\mdm-chrome")) {
+        if (Test-Path $old) { Remove-Item $old -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+    if ($stale) {
+        Warn ("an earlier install left the extension loose in $NmDir; both copies " +
+              "now live together in $ExtDir and the old ones are gone. If you had " +
+              "already loaded it into a Chromium browser, open chrome://extensions, " +
+              "remove the card, and load the new folder once -- Firefox needs " +
+              "nothing, it copied the add-on into its profile.")
+    }
+
+    $InstalledChromeDir = "$ExtDir\mdm-chrome"
     Say "Installing the Chromium extension to $InstalledChromeDir"
     Reset-Dir $InstalledChromeDir
     Copy-Item "$ChromeDir\*" $InstalledChromeDir -Recurse -Force
@@ -505,9 +531,13 @@ if (Test-Path $SignedXpi) {
 }
 
 if ($signed) {
-    $InstalledXpi = "$env:APPDATA\mdm\mdm-firefox.xpi"
+    $InstalledXpi = "$ExtDir\mdm-firefox.xpi"
     Copy-Item $SignedXpi $InstalledXpi -Force
-    $extLine = "  Extension     $InstalledXpi"
+    $extLine = @"
+  Extension     $ExtDir
+                  mdm-firefox.xpi  for Firefox
+                  mdm-chrome\      for Chrome, Edge, Brave and Vivaldi
+"@
     $extHelp = @"
 Install the extension in Firefox -- open this and click "Add":
 
@@ -517,7 +547,12 @@ It stays installed across restarts, and it keeps the id the host manifest
 above allows, so the app and the browser find each other straight away.
 "@
 } else {
-    $extLine = "  Extension     $Xpi"
+    $extLine = @"
+  Extension     $ExtDir
+                  mdm-chrome\      for Chrome, Edge, Brave and Vivaldi
+                Firefox's copy is unsigned, so it stays in the build tree:
+                  $Xpi
+"@
     $extHelp = @"
 Load the extension in Firefox:
 
@@ -542,7 +577,6 @@ Write-Host "  Native host   $BinDir\mdm-host.exe"
 Write-Host "  Host manifest $ManifestPath"
 Write-Host "  Chrome/Edge   $ChromeManifestPath"
 Write-Host "$extLine"
-Write-Host "  Chromium      $InstalledChromeDir"
 Write-Host ""
 Write-Host $extHelp
 Write-Host ""

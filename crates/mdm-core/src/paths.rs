@@ -181,3 +181,20 @@ pub fn db_path() -> PathBuf {
 pub fn config_path() -> PathBuf {
     config_dir().join("settings.toml")
 }
+
+/// Where an install leaves the browser extension.
+///
+/// One directory holding both browsers' copies, in the same place whichever
+/// installer put them there: `~/.local/share/mdm/extension` on Linux,
+/// `%APPDATA%\mdm\extension` on Windows. install.sh, install.ps1 and the
+/// Windows installer write it directly; a .deb or .rpm cannot, because its
+/// postinstall runs as root and has no business writing into somebody's home,
+/// so the app copies what the package carries here the first time it is asked
+/// where the extension is (see `extension_assets` in src-tauri).
+///
+/// Worth the copy because the alternative is what this replaced: three
+/// installers leaving the extension in three different places, a README with a
+/// table of them, and somebody following the wrong row.
+pub fn extension_dir() -> PathBuf {
+    data_dir().join("extension")
+}

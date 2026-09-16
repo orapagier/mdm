@@ -548,9 +548,10 @@ stage_extension
 
 find_signed_xpi
 
-# The Chromium copy, out of the checkout.
+# Both copies, out of the checkout and into the one directory MDM keeps them
+# in -- $EXT_DIR, which is where every other way of installing leaves them too.
 #
-# `stage_extension` builds it under target/, which is the right place for a
+# `stage_extension` builds them under target/, which is the right place for a
 # build artefact and the wrong place for a file the browser is going to be
 # pointed at for as long as the extension is installed. Chromium does not copy
 # an unpacked extension anywhere -- it reads that folder every time it starts,
@@ -558,11 +559,26 @@ find_signed_xpi
 # the extension. It reappears as "this extension may be corrupted" weeks later,
 # with nothing to connect it to the tidying up that caused it.
 #
-# The app looks here too, so this is also what makes the toolbar's Browser
+# The app looks here too, so this is also what makes Settings' Browser
 # extension button work on a source install: see `extension_dirs` in
 # src-tauri/src/commands.rs.
-INSTALLED_CHROME="${XDG_DATA_HOME:-$HOME/.local/share}/mdm/mdm-chrome"
-mkdir -p "$(dirname "$INSTALLED_CHROME")"
+
+# The copies an older install.sh left loose in the data directory. Removed
+# rather than left, because Chromium goes on reading whichever folder it was
+# pointed at: leaving the old one gives a machine two extensions, one of them
+# no longer updated by anything, and the only symptom is a fix that never
+# arrives however many times the extension is reloaded.
+stale=no
+while read -r old_path; do
+  [[ -e "$old_path" ]] || continue
+  # Only the folder is worth mentioning afterwards: a browser that installed
+  # the .xpi has its own copy in the profile and never looks at the file again.
+  if [[ -d "$old_path" ]]; then stale=yes; fi
+  rm -rf "$old_path"
+done < <(legacy_extension_paths)
+
+mkdir -p "$EXT_DIR"
+INSTALLED_CHROME="$EXT_DIR/mdm-chrome"
 rm -rf "$INSTALLED_CHROME"
 cp -r "$CHROME_DIR" "$INSTALLED_CHROME"
 chmod -R a+rX "$INSTALLED_CHROME"
@@ -571,10 +587,11 @@ if [[ "$signed" == yes ]]; then
   # Kept out of the checkout on purpose. Firefox copies the package into the
   # profile as it installs it, but this file is what a re-install or a repaired
   # profile goes back to months later, and it outlives any one clone.
-  INSTALLED_XPI="${XDG_DATA_HOME:-$HOME/.local/share}/mdm/mdm-firefox.xpi"
-  mkdir -p "$(dirname "$INSTALLED_XPI")"
+  INSTALLED_XPI="$EXT_DIR/mdm-firefox.xpi"
   install -m644 "$SIGNED_XPI" "$INSTALLED_XPI"
-  ext_line="  Extension     $INSTALLED_XPI"
+  ext_line="  Extension     $EXT_DIR
+                  mdm-firefox.xpi  for Firefox
+                  mdm-chrome/      for Chrome, Brave, Edge and Vivaldi"
   ext_help="Install the extension in Firefox — open this and click \"Add\":
 
   file://$INSTALLED_XPI
@@ -582,7 +599,10 @@ if [[ "$signed" == yes ]]; then
   It stays installed across restarts, and it keeps the id the host manifest
   above allows, so the app and the browser find each other straight away."
 else
-  ext_line="  Extension     $XPI"
+  ext_line="  Extension     $EXT_DIR
+                  mdm-chrome/      for Chrome, Brave, Edge and Vivaldi
+                Firefox's copy is unsigned, so it stays in the build tree:
+                  $XPI"
   ext_help="Load the extension in Firefox:
 
   1. Open  about:debugging#/runtime/this-firefox
@@ -604,7 +624,6 @@ $(say "Installed")
   App           $BIN_DIR/mdm
   Native host   $BIN_DIR/mdm-host
 ${manifest_lines}${ext_line}
-  Chromium      $INSTALLED_CHROME
 
 ${migrated:+If you had the older "ldm" build, its binaries, launcher entry and host
 manifest have been removed and your settings and history moved across. The
@@ -625,6 +644,17 @@ steps for whichever browser you use.
 Then start the app:  mdm
 The extension launches it automatically on the first captured download.
 DONE
+
+# Said only to somebody who has an older install, and only about the folder,
+# because it is the one that leaves a browser pointing at something that is no
+# longer there.
+if [[ "$stale" == yes ]]; then
+  warn "an earlier install left the extension loose in ${EXT_DIR%/extension}; both
+  copies now live together in $EXT_DIR and the old ones are gone. A Chromium
+  browser you had already loaded it into is pointing at the folder that just
+  went: open chrome://extensions, remove the card, and load the new folder
+  once. Firefox needs nothing — it copied the add-on into its profile."
+fi
 
 # ----------------------------------------------------------------- packages
 

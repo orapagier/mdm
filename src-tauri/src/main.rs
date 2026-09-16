@@ -237,6 +237,12 @@ fn main() {
                 }
             }
 
+            // Keep the extension in the one place everything documents. A
+            // packaged install carries it under /usr/lib, where root put it;
+            // this is what gets it into the data directory beside the copy
+            // install.sh and the Windows installer write.
+            commands::sync_extension(&handle);
+
             // Push engine state to the frontend as it changes.
             let mut rx = app_engine.subscribe();
             let emit_handle = handle.clone();

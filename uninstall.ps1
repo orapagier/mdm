@@ -84,7 +84,14 @@ if (Test-Path $BinDir) {
 foreach ($file in @("$DataDir\$HostName.json", "$DataDir\$HostName.chrome.json")) {
     if (Test-Path $file) { Remove-Item $file -Force -ErrorAction SilentlyContinue }
 }
-foreach ($path in @("$DataDir\mdm-firefox.xpi", "$DataDir\mdm-chrome")) {
+# Both browsers' copies, from the one directory an install keeps them in --
+# and from the flat layout an older install.ps1 used, which is still on any
+# machine that has not been re-installed since. They are install artefacts
+# rather than anything the user made, so they go whether or not the data is
+# being kept; the Chromium folder especially, because a browser reads it at
+# every start and would otherwise be running an extension that outlives the
+# app it talks to.
+foreach ($path in @("$DataDir\extension", "$DataDir\mdm-firefox.xpi", "$DataDir\mdm-chrome")) {
     if (Test-Path $path) { Remove-Item $path -Recurse -Force -ErrorAction SilentlyContinue }
 }
 

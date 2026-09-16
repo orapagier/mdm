@@ -154,23 +154,31 @@ done < <(firefox_manifest_dirs; chromium_manifest_dirs)
 
 # ----------------------------------------------------------------- extension
 
-# The signed package install.sh put aside so a re-install or a repaired profile
-# could go back to it. It goes whether or not the data is being kept: it is an
-# install artefact, not something the user made.
-if [[ -e "$DATA_DIR/mdm-firefox.xpi" ]]; then
-  rm -f "$DATA_DIR/mdm-firefox.xpi"
-  removed+=("$DATA_DIR/mdm-firefox.xpi")
-fi
+# Both browsers' copies, from the one directory install.sh keeps them in --
+# and from the flat layout an older install.sh used, which is still on any
+# machine that has not been re-installed since.
+#
+# They go whether or not the data is being kept: they are install artefacts,
+# not something the user made. The signed .xpi is what a re-install or a
+# repaired profile would have gone back to; the Chromium folder matters more
+# than it does. Firefox copies an add-on into the profile as it installs it, so
+# removing the file takes nothing away from a running browser -- but Chromium
+# reads an unpacked extension's folder every time it starts, so that one is
+# still in use by whatever browser it was loaded into, and leaving it would
+# leave an extension that outlives the app it talks to.
+had_chrome=no
+while read -r path; do
+  [[ -e "$path" ]] || continue
+  # The folder is the Chromium one -- the other two entries are files.
+  if [[ -d "$path" ]]; then had_chrome=yes; fi
+  rm -rf "$path"
+  removed+=("$path")
+done < <(printf '%s\n' "$EXT_DIR/mdm-firefox.xpi" "$EXT_DIR/mdm-chrome"; legacy_extension_paths)
 
-# The Chromium copy, for the same reason. It matters more than the .xpi does:
-# Firefox copies an add-on into the profile as it installs it, so removing this
-# file takes nothing away from a running browser -- but Chromium reads an
-# unpacked extension's folder every time it starts. So this one is still in use
-# by whatever browser it was loaded into, and leaving it would leave an
-# extension that outlives the app it talks to.
-if [[ -d "$DATA_DIR/mdm-chrome" ]]; then
-  rm -rf "$DATA_DIR/mdm-chrome"
-  removed+=("$DATA_DIR/mdm-chrome")
+# Left behind only if something else put a file in it; an empty one goes.
+rmdir "$EXT_DIR" 2>/dev/null || true
+
+if [[ "$had_chrome" == yes ]]; then
   warn "if you loaded the extension into a Chromium browser, remove it there too
   — it was loaded from the folder just deleted, and the browser will report it
   as missing or corrupted until you do."

@@ -119,11 +119,17 @@ done
 # the capturing was already on the machine. The app says the same thing in
 # Settings, but only after it has been opened, and the first thing anyone does
 # is look for the extension.
+#
+# This is the one install that cannot put them where the documentation says
+# they are. It runs as root, and ~/.local/share/mdm/extension belongs to a
+# user this script has no business guessing at -- so the package stages the
+# pair beside the app, the app copies them across the first time it is asked
+# where they are, and what is printed here is what exists at this moment.
 EXT_DIR=""
 for candidate in \
-  "/usr/lib/My Download Manager" \
-  "/usr/lib/my-download-manager" \
-  "/usr/lib/mdm"
+  "/usr/lib/My Download Manager/extension" \
+  "/usr/lib/my-download-manager/extension" \
+  "/usr/lib/mdm/extension"
 do
   if [ -f "$candidate/mdm-firefox.xpi" ] || [ -d "$candidate/mdm-chrome" ]; then
     EXT_DIR="$candidate"
@@ -132,7 +138,8 @@ do
 done
 
 if [ -n "$EXT_DIR" ]; then
-  echo "mdm: the browser extension is installed with the app --"
+  echo "mdm: the browser extension is installed with the app, in"
+  echo "     $EXT_DIR --"
   if [ -f "$EXT_DIR/mdm-firefox.xpi" ]; then
     echo "     Firefox:  open file://$EXT_DIR/mdm-firefox.xpi and click Add"
   fi
@@ -142,7 +149,10 @@ if [ -n "$EXT_DIR" ]; then
   fi
   echo "     Or let the app show you: it offers this the first time it is"
   echo "     opened, and afterwards it is in Settings under \"Browser"
-  echo "     extension\"."
+  echo "     extension\". Opening it also copies both to"
+  echo "     ~/.local/share/mdm/extension, which is where every other way of"
+  echo "     installing MDM leaves them -- load the extension from there and"
+  echo "     an upgrade keeps it up to date."
 fi
 
 # The launcher and its icon, so the app appears in the menu without a logout.

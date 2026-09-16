@@ -31,6 +31,20 @@ MDM already carries it — there is nothing separate to download. It is not in a
 store yet, so Chromium takes it as an unpacked folder and Firefox as a signed
 `.xpi`.
 
+Both of them are in one directory, and it is the same directory whichever way
+you installed:
+
+| | |
+| --- | --- |
+| **Linux** | `~/.local/share/mdm/extension` |
+| **Windows** | `%APPDATA%\mdm\extension` |
+
+```
+extension/
+├── mdm-firefox.xpi   Firefox
+└── mdm-chrome/       Chrome, Edge, Brave, Vivaldi, Chromium
+```
+
 **Chrome, Edge, Brave, Vivaldi, Chromium**
 
 1. Open a new tab and **type** `chrome://extensions` (`edge://extensions` on
@@ -39,16 +53,18 @@ store yet, so Chromium takes it as an unpacked folder and Firefox as a signed
    offer to open it for you.
 2. Turn on **Developer mode**, top right.
 3. Click **Load unpacked**.
-4. Paste the folder this install left, and choose it:
-
-| Installed by | Folder |
-| --- | --- |
-| The Windows `.exe`, or `install.ps1` | `%APPDATA%\mdm\mdm-chrome` |
-| `install.sh` | `~/.local/share/mdm/mdm-chrome` |
-| The `.deb` or `.rpm` | `/usr/lib/My Download Manager/mdm-chrome` |
+4. Paste the `mdm-chrome` folder from the table above, and choose it.
 
 **Firefox** is one click instead: open `mdm-firefox.xpi` from the same
 directory and answer Firefox's own "Add" prompt.
+
+The `.deb` and `.rpm` are the one exception, and only until the app has been
+opened once: their postinstall runs as root, which has no business writing into
+somebody's home, so the package stages both copies beside the app under
+`/usr/lib` and prints where. The app copies them to the directory above the
+first time it is started, and keeps that copy in step with later upgrades — so
+load the extension from there rather than from `/usr/lib` and an upgrade needs
+nothing from you.
 
 **Or let the app find them.** **Settings ▸ Browser extension ▸ "Install or
 check it…"** locates both copies whatever shape the install was, hands the
@@ -815,7 +831,7 @@ this one does not pretend to. Signing is free and costs one submission: send
 `target/mdm-firefox.xpi` to addons.mozilla.org as an unlisted, self-distributed
 add-on, and save what comes back as `packaging/mdm-firefox-signed.xpi`.
 
-From then on `install.sh` copies that to `~/.local/share/mdm/mdm-firefox.xpi`
+From then on `install.sh` copies that to `~/.local/share/mdm/extension/mdm-firefox.xpi`
 and offers to open Firefox on it, which is a one-click permanent install: the
 click is "Add" in Firefox's own prompt. `MDM_XPI=/path/to.xpi` points the
 installer at a signed package kept somewhere else, and an install with no
@@ -967,14 +983,24 @@ the registry value for Chrome, Edge, Chromium, Brave and Vivaldi.
 ### Getting the extension without building it
 
 Every way of installing MDM already carries the extension, and until recently
-nothing said so. The `.deb` and `.rpm` stage both browsers' copies under
-`/usr/lib/My Download Manager`, the Windows installer copies them to
-`%APPDATA%\mdm`, and `install.sh` leaves them in the data directory — but a
-package manager prints nothing about its own payload, so somebody installing a
-release build got a working app, a registered native host, and no indication
-that the half doing the capturing was already on the machine. The only visible
-route to the add-on was cloning the repository and building it, which is the
-one thing a release build exists to avoid.
+nothing said so — and what it did say pointed at three different places. The
+`.deb` and `.rpm` staged both browsers' copies under `/usr/lib/My Download
+Manager`, the Windows installer copied them to `%APPDATA%\mdm`, and
+`install.sh` left them loose in the data directory beside `mdm.db`. A package
+manager prints nothing about its own payload, so somebody installing a release
+build got a working app, a registered native host, and no indication that the
+half doing the capturing was already on the machine; somebody who found the
+instructions then had a table of locations to pick their own row out of.
+
+There is one location now — `~/.local/share/mdm/extension`, or
+`%APPDATA%\mdm\extension`, holding `mdm-firefox.xpi` and `mdm-chrome/`. Every
+installer writes it, and the one that cannot, because it runs as root and the
+directory is inside somebody's home, is covered by the app: `sync_extension`
+copies what the package staged under `/usr/lib` into it at startup, and copies
+again when an upgrade leaves a newer one there. A browser is pointed at that
+folder for as long as the extension stays loaded, so an install that left it on
+the version it shipped with would be a fix that never arrives however many
+times the extension is reloaded.
 
 Three things now point at it, because people arrive from three directions:
 
@@ -988,10 +1014,11 @@ Three things now point at it, because people arrive from three directions:
   it, and the app raises the dialog on a first run.
 
   `extension_assets` in `src-tauri/src/commands.rs` finds the copies on this
-  machine, whatever shape the install was — the resource directory first,
-  because that one is right by construction, then each package layout in turn.
-  Firefox's button hands the `.xpi` to Firefox, which is the click that
-  installs it.
+  machine, whatever shape the install was — the directory above first, because
+  that is where they are meant to be, then the resource directory and each
+  package layout in turn, and whatever it finds elsewhere it copies there
+  before answering. Firefox's button hands the `.xpi` to Firefox, which is the
+  click that installs it.
 
   Chromium gets instructions rather than a button, and that too is a
   correction. The button used to open the browser at `chrome://extensions` and
@@ -1008,9 +1035,9 @@ Three things now point at it, because people arrive from three directions:
 * **The package.** `linux/postinstall.sh` prints where the two copies landed as
   it registers the native host, which is the moment the question is being
   asked. `install.sh` does the same for a source install, and copies both out
-  of `target/` into the data directory on the way — Chromium re-reads an
-  unpacked extension's folder at every start, so one left inside the checkout
-  is an extension a `cargo clean` quietly breaks.
+  of `target/` into `~/.local/share/mdm/extension` on the way — Chromium
+  re-reads an unpacked extension's folder at every start, so one left inside
+  the checkout is an extension a `cargo clean` quietly breaks.
 * **The release.** `bundle.sh` copies the signed `.xpi` and the Chromium `.zip`
   out beside the packages it builds, ready to upload as release assets. Inside
   a package covers everyone who installs one; it does not cover an AppImage,
@@ -1155,4 +1182,5 @@ python3 packaging/test-native-host.py target/debug/mdm-host
 |---|---|
 | `~/.config/mdm/settings.toml` | Settings |
 | `~/.local/share/mdm/mdm.db` | History and queues |
+| `~/.local/share/mdm/extension/` | The browser extension, both copies |
 | `$XDG_RUNTIME_DIR/mdm/mdm.sock` | IPC socket (0700) |

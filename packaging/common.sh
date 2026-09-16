@@ -26,6 +26,33 @@ HOST_NAME="io.mdm.host"
 # so must anything that goes looking for what it produced.
 TARGET_DIR="${CARGO_TARGET_DIR:-$REPO/target}"
 
+# Where an install leaves the extension, for a browser to be pointed at.
+#
+# One directory with both browsers' copies in it, and the same directory
+# whichever installer did the installing -- install.ps1 and the Windows
+# installer write %APPDATA%\mdm\extension, and the app copies what a .deb or
+# .rpm carries here the first time it is opened. See `extension_dir` in
+# crates/mdm-core/src/paths.rs, which is the same path for the app.
+#
+# It is a directory of its own rather than the data directory itself because
+# the data directory is also the database, settings and the binaries the app
+# fetches for itself, and "the folder to paste into Load unpacked" should be
+# somewhere a person can look at and see two things they recognise.
+EXT_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/mdm/extension"
+
+# The flat layout that came before it, where both copies sat directly in the
+# data directory beside mdm.db.
+#
+# Listed because install.sh has to remove them and uninstall.sh has to keep
+# finding them: a leftover mdm-chrome is not inert the way a stale file usually
+# is -- Chromium re-reads an unpacked extension's folder at every start, so
+# whichever copy the browser was pointed at is the one still running, and two
+# copies means a rebuild that updates the other one and appears to do nothing.
+legacy_extension_paths() {
+  local data="${XDG_DATA_HOME:-$HOME/.local/share}/mdm"
+  printf '%s\n' "$data/mdm-firefox.xpi" "$data/mdm-chrome"
+}
+
 # Both browsers' copies of the extension, built out of the one source tree.
 #
 # Sets XPI and CHROME_DIR for the caller.
