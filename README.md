@@ -24,6 +24,59 @@ browser ──webRequest/downloads──▶ extension ──native messaging─�
                                                           manifests in JS)
 ```
 
+## Installing the browser extension
+
+The extension is the half that watches the browser, and every way of installing
+MDM already carries it — there is nothing separate to download. It is not in a
+store yet, so Chromium takes it as an unpacked folder and Firefox as a signed
+`.xpi`.
+
+**Chrome, Edge, Brave, Vivaldi, Chromium**
+
+1. Open a new tab and **type** `chrome://extensions` (`edge://extensions` on
+   Edge). Typing it is the only way in: a Chromium browser refuses that address
+   when a program passes it on the command line, which is why MDM does not
+   offer to open it for you.
+2. Turn on **Developer mode**, top right.
+3. Click **Load unpacked**.
+4. Paste the folder this install left, and choose it:
+
+| Installed by | Folder |
+| --- | --- |
+| The Windows `.exe`, or `install.ps1` | `%APPDATA%\mdm\mdm-chrome` |
+| `install.sh` | `~/.local/share/mdm/mdm-chrome` |
+| The `.deb` or `.rpm` | `/usr/lib/My Download Manager/mdm-chrome` |
+
+**Firefox** is one click instead: open `mdm-firefox.xpi` from the same
+directory and answer Firefox's own "Add" prompt.
+
+**Or let the app find them.** **Settings ▸ Browser extension ▸ "Install or
+check it…"** locates both copies whatever shape the install was, hands the
+`.xpi` to Firefox, and prints the four steps above with the folder to paste for
+each Chromium browser actually on the machine. It is offered by itself on a
+first run, and `install.sh` and the packages say the same thing as they finish.
+
+Two things catch people:
+
+* **The app has to be installed too.** The extension reaches it through a
+  native messaging host that the installer registers; on its own it has nothing
+  to hand a download to.
+* **Load the installed copy, not `target/mdm-chrome`.** That one is the build
+  output — a `cargo clean` deletes it, and since Chromium re-reads an unpacked
+  extension's folder at every start, the extension breaks with no symptom
+  beyond fixes that appear to do nothing. A rebuild refreshes the installed
+  copy, so it needs only **Reload** on the extension's card.
+
+The id is pinned — `pegdlonllkokelfmdafooihklghlkimh`, unpacked or from a store
+listing — and the native host is registered to accept exactly that one, so it
+survives reloads, rebuilds and re-installs. Developer mode is needed only for
+as long as there is no store listing.
+
+[Setup-guide.md](Setup-guide.md#4-install-the-browser-extension) has the same
+ground at length, including what to check when nothing connects; **[Chrome,
+Edge and the other Chromium browsers](#chrome-edge-and-the-other-chromium-browsers)**
+below is why it works this way rather than how.
+
 ## Why this shape
 
 **Firefox, not Chromium.** Chrome's Manifest V3 removed blocking `webRequest`,
