@@ -191,33 +191,37 @@ if ([version]$have -lt [version]$msrv) {
 # `cargo tauri build` further down runs a cargo of its own and asks it where the
 # target directory is; the environment reaches both. A CARGO_TARGET_DIR the
 # caller set always wins, network path or not.
+#
+# Whether the repo is reached over a share is asked here and again at bundle
+# time, so it is settled once, for every path through the target-directory
+# choice below -- including the one where the caller has already pinned
+# CARGO_TARGET_DIR and none of the rest of this runs.
+$OnNetwork = $Repo.StartsWith("\\")
+if (-not $OnNetwork) {
+    # A mapped drive letter is the same share wearing a shorter name, and
+    # fails in exactly the same way. An unrecognised drive is no reason to
+    # stop: assume local, and let cargo be the one to complain if it isn't.
+    try {
+        $drive = New-Object System.IO.DriveInfo `
+            -ArgumentList ((Split-Path -Qualifier $Repo) + "\")
+        $OnNetwork = $drive.DriveType -eq "Network"
+    } catch { }
+}
+
 if ($env:CARGO_TARGET_DIR) {
     $Target = $env:CARGO_TARGET_DIR
+} elseif ($OnNetwork) {
+    $md5 = [System.Security.Cryptography.MD5]::Create()
+    $sum = $md5.ComputeHash([System.Text.Encoding]::Unicode.GetBytes($Repo.ToLower()))
+    $tag = [System.BitConverter]::ToString($sum).Replace("-", "").Substring(0, 8)
+    $Target = "$env:LOCALAPPDATA\mdm\build\$(Split-Path -Leaf $Repo)-$tag"
+    $env:CARGO_TARGET_DIR = $Target
+    Warn ("$Repo is on a network drive, which rustc cannot build on: it " +
+          "cleans up its temporary directories in a way the drive " +
+          "redirector rejects (os error 87). Building in $Target instead " +
+          "-- set CARGO_TARGET_DIR to that path to build there by hand too.")
 } else {
-    $onNetwork = $Repo.StartsWith("\\")
-    if (-not $onNetwork) {
-        # A mapped drive letter is the same share wearing a shorter name, and
-        # fails in exactly the same way. An unrecognised drive is no reason to
-        # stop: assume local, and let cargo be the one to complain if it isn't.
-        try {
-            $drive = New-Object System.IO.DriveInfo `
-                -ArgumentList ((Split-Path -Qualifier $Repo) + "\")
-            $onNetwork = $drive.DriveType -eq "Network"
-        } catch { }
-    }
-    if ($onNetwork) {
-        $md5 = [System.Security.Cryptography.MD5]::Create()
-        $sum = $md5.ComputeHash([System.Text.Encoding]::Unicode.GetBytes($Repo.ToLower()))
-        $tag = [System.BitConverter]::ToString($sum).Replace("-", "").Substring(0, 8)
-        $Target = "$env:LOCALAPPDATA\mdm\build\$(Split-Path -Leaf $Repo)-$tag"
-        $env:CARGO_TARGET_DIR = $Target
-        Warn ("$Repo is on a network drive, which rustc cannot build on: it " +
-              "cleans up its temporary directories in a way the drive " +
-              "redirector rejects (os error 87). Building in $Target instead " +
-              "-- set CARGO_TARGET_DIR to that path to build there by hand too.")
-    } else {
-        $Target = "$Repo\target"
-    }
+    $Target = "$Repo\target"
 }
 
 # ------------------------------------------------------------------- build
@@ -657,6 +661,30 @@ if ($Installer) {
               "it there, then build again.")
     }
 
+    # Before it builds anything, the Tauri CLI rewrites src-tauri\Cargo.toml to
+    # match the features the config asks for, and watches the file so it can
+    # wait for its own edit to land rather than race the rebuild against it.
+    #
+    # That watch cannot be set up over a share. notify asks for
+    # ReadDirectoryChangesW, the RDP redirector behind \\tsclient\... answers
+    # ERROR_NOT_SUPPORTED, and the failure is logged as "unknown error in
+    # ReadDirectoryChangesW for directory ...: 50" -- in red, at the top of a
+    # build that then runs to completion perfectly well. It is the same refusal
+    # the Chromium extension directory runs into further up. The only real cost
+    # is the two seconds the CLI spends waiting for an event that never comes.
+    #
+    # Nothing here can teach the redirector the call, so the line is silenced
+    # where it is emitted. The CLI builds its logger with
+    # env_logger::Builder::from_default_env(), so a RUST_LOG directive reaches
+    # it; the filters it then installs of its own are for the catch-all and for
+    # three named crates, none of them notify, so this one survives and only
+    # notify goes quiet. Everything else the CLI prints comes through as before.
+    if ($OnNetwork) {
+        $SavedRustLog = $env:RUST_LOG
+        $env:RUST_LOG = if ($SavedRustLog) { "$SavedRustLog,notify=off" }
+                        else { "notify=off" }
+    }
+
     Push-Location $Repo
     try {
         # The overlay carries the sidecar, the extension and the NSIS hooks.
@@ -678,6 +706,10 @@ if ($Installer) {
         if ($LASTEXITCODE -ne 0) { Die "cargo tauri build failed" }
     } finally {
         Pop-Location
+        if ($OnNetwork) {
+            if ($SavedRustLog) { $env:RUST_LOG = $SavedRustLog }
+            else { Remove-Item Env:\RUST_LOG -ErrorAction SilentlyContinue }
+        }
     }
 
     $setup = Get-ChildItem "$Target\release\bundle\nsis\*-setup.exe" `
