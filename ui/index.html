@@ -17,7 +17,7 @@
   <button id="btn-clear">Clear finished</button>
   <div class="grow"></div>
   <div class="stat" id="stat-speed">0 B/s</div>
-  <button id="btn-settings" title="Settings" class="icon">⚙</button>
+  <button id="btn-settings" title="Settings" aria-label="Settings" class="icon">⚙</button>
 </header>
 
 <!-- Only ever shown when a check has actually found something newer. -->
@@ -42,6 +42,10 @@
   </nav>
 
   <main>
+    <div class="list-tools">
+      <input id="download-search" type="search" aria-label="Search downloads" placeholder="Search name, URL or category…">
+      <span id="list-count" role="status"></span>
+    </div>
     <table class="list">
       <thead>
         <tr>
@@ -60,7 +64,7 @@
 </div>
 
 <!-- Add URL -->
-<dialog id="dlg-add">
+<dialog id="dlg-add" aria-label="Add download">
   <form method="dialog">
     <h2>Add download</h2>
     <label>URL<input type="url" id="add-url" placeholder="https://…" required></label>
@@ -72,31 +76,32 @@
     </label>
     <label class="check"><input type="checkbox" id="add-ytdlp"> Extract with yt-dlp (video pages)</label>
     <menu>
-      <button value="cancel">Cancel</button>
+      <button type="button" value="cancel">Cancel</button>
       <button value="ok" class="primary" id="add-ok">Download</button>
     </menu>
   </form>
 </dialog>
 
 <!-- Batch links from the extension -->
-<dialog id="dlg-batch">
+<dialog id="dlg-batch" aria-label="Batch downloads">
   <form method="dialog">
     <h2 id="batch-title">Links on page</h2>
     <div class="batch-tools">
-      <input type="text" id="batch-filter" placeholder="Filter, e.g. .pdf or .zip">
+      <input type="text" id="batch-filter" aria-label="Filter batch links" placeholder="Filter, e.g. .pdf or .zip">
       <button type="button" id="batch-all">Select all</button>
       <button type="button" id="batch-none">Select none</button>
     </div>
+    <p id="batch-count" class="hint" role="status"></p>
     <div id="batch-list" class="batch-list"></div>
     <menu>
-      <button value="cancel">Cancel</button>
+      <button type="button" value="cancel">Cancel</button>
       <button value="ok" class="primary" id="batch-ok">Download selected</button>
     </menu>
   </form>
 </dialog>
 
 <!-- The browser extension, and where this install put it -->
-<dialog id="dlg-extension">
+<dialog id="dlg-extension" aria-label="Browser extension">
   <form method="dialog">
     <h2>Browser extension</h2>
     <p class="hint">This is the half that captures downloads out of the
@@ -139,7 +144,7 @@
 </dialog>
 
 <!-- Settings -->
-<dialog id="dlg-settings">
+<dialog id="dlg-settings" aria-label="Settings">
   <form method="dialog">
     <h2>Settings</h2>
 
@@ -221,13 +226,13 @@
       <button type="button" id="s-cred-add">Add</button>
     </div>
     <menu>
-      <button value="cancel">Cancel</button>
+      <button type="button" value="cancel">Cancel</button>
       <button value="ok" class="primary" id="s-save">Save</button>
     </menu>
   </form>
 </dialog>
 
-<div id="toast" class="toast" hidden></div>
+<div id="toast" class="toast" role="status" hidden></div>
 
 <script src="format.js"></script>
 <script src="app.js"></script>

@@ -1097,11 +1097,19 @@ async function start(paused) {
   if (id === null) return;
 
   watching = id;
+  // Once submitted, replace the format picker with the compact progress view.
+  $("file-name").textContent = $("vid-name").value.trim() || info?.title || url;
+  $("file-name").title = $("file-name").textContent;
+  say("file-sub", url, "hint");
+  $("file-sub").title = url;
+  setKind("file");
+  $("picker-body").hidden = true;
   $("dl-strip").hidden = false;
   // Cancel meant "never mind"; now the picking is over and the button's job is
   // to get the window out of the way without touching the download.
   $("vid-close").textContent = "Close";
   clearStrip();
+  await call("compact_download_window");
 
   // The snapshot arrives on its own schedule; ask for one now rather than
   // leaving the strip blank for most of a second.
@@ -1143,6 +1151,8 @@ function note(text, tone, tip) {
  * snapshot arrives, which reads as the new pick having finished instantly.
  */
 function clearStrip() {
+  $("vid-close").hidden = false;
+  $("dl-close").hidden = !$("pick-actions").hidden;
   $("dl-bar").firstElementChild.style.width = "0%";
   $("dl-bar").className = "bar idle";
   $("dl-pct").textContent = "…";
@@ -1203,6 +1213,8 @@ function render(snapshot) {
 
   const done = d.status === "complete";
   const finished = done || d.status === "failed";
+  $("vid-close").hidden = done;
+  $("dl-close").hidden = !done && !$("pick-actions").hidden;
   $("dl-pause").textContent = d.status === "paused" ? "Resume" : "Pause";
   $("dl-pause").hidden = finished;
   $("dl-cancel").hidden = finished;
@@ -1297,10 +1309,16 @@ $("dl-cancel").addEventListener("click", async () => {
   if ($("pick-actions").hidden) closeWindow();
 });
 $("dl-close").addEventListener("click", closeWindow);
-$("dl-open").addEventListener("click", (e) =>
-  call("open_path", { path: e.currentTarget.dataset.path, reveal: false }));
-$("dl-folder").addEventListener("click", (e) =>
-  call("open_path", { path: e.currentTarget.dataset.path, reveal: true }));
+async function openDownload(e, reveal) {
+  try {
+    await invoke("open_path", { path: e.currentTarget.dataset.path, reveal });
+    closeWindow();
+  } catch (e) {
+    toast(String(e));
+  }
+}
+$("dl-open").addEventListener("click", (e) => openDownload(e, false));
+$("dl-folder").addEventListener("click", (e) => openDownload(e, true));
 
 listen("mdm://snapshot", (event) => render(event.payload));
 
@@ -1314,6 +1332,7 @@ let lastRequestId = 0;
 /** Show the picker, or hide it for a download with nothing left to decide. */
 function setKind(kind) {
   const file = kind === "file";
+  $("picker-body").hidden = false;
   // A capture has no page to fetch and no formats to choose between, so the
   // whole picking apparatus goes and its head takes the URL row's place.
   $("url-row").hidden = file;
@@ -1338,6 +1357,7 @@ async function handleRequest(request) {
   pendingCapture = null;
   $("dl-strip").hidden = true;
   $("vid-close").textContent = "Cancel";
+  $("vid-close").hidden = false;
   reset();
   $("vid-dir").value = "";
   setKind(request.kind);

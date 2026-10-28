@@ -20,7 +20,7 @@ use tauri::{
 pub const LABEL: &str = "video";
 
 /// Tall enough for the picker: a format list, the name field and the buttons.
-const PICKER_SIZE: (f64, f64) = (660.0, 740.0);
+const PICKER_SIZE: (f64, f64) = (620.0, 560.0);
 /// A captured file being offered: a name, a folder and the buttons.
 const FILE_SIZE: (f64, f64) = (620.0, 300.0);
 /// The same window once it is running and the choices are behind it.
@@ -171,16 +171,9 @@ fn deliver(app: &AppHandle, request: Request) {
     );
     match app.get_webview_window(LABEL) {
         Some(window) => {
-            // Only when the shape changes: the user may well have sized this
-            // window to taste, and undoing that on every download would be its
-            // own kind of rude.
-            if app
-                .try_state::<Mutex<Option<Kind>>>()
-                .map(|last| last.lock().unwrap().replace(request.kind) != Some(request.kind))
-                .unwrap_or(false)
-            {
-                let _ = window.set_size(LogicalSize::new(w, h));
-            }
+            // A reused progress window needs room for the next picker again.
+            let _ = window.unmaximize();
+            let _ = window.set_size(LogicalSize::new(w, h));
             let _ = window.emit("mdm://videoPage", &request);
             let _ = window.show();
             let _ = window.unminimize();
@@ -198,13 +191,24 @@ fn deliver(app: &AppHandle, request: Request) {
 }
 
 fn build(app: &AppHandle, width: f64, height: f64) -> tauri::Result<()> {
-    WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App("video.html".into()))
-        .title("My Download Manager")
+    let window = WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App("video.html".into()))
+        .title("MDM Download")
         .inner_size(width, height)
         .min_inner_size(480.0, 150.0)
         .resizable(true)
+        .maximizable(false)
+        .visible(false)
         .center()
         .focused(true)
         .build()?;
+    // Advertise a dialog before mapping on Linux. This is a non-modal window:
+    // downloads must remain usable independently of the main library window.
+    #[cfg(target_os = "linux")]
+    {
+        use gtk::prelude::GtkWindowExt;
+        window.gtk_window()?.set_type_hint(gtk::gdk::WindowTypeHint::Dialog);
+    }
+    window.show()?;
+    window.set_focus()?;
     Ok(())
 }

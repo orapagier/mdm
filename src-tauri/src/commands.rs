@@ -691,6 +691,12 @@ pub async fn start_capture(
     Ok(())
 }
 
+/// Switch the submitted video picker to a compact progress window.
+#[tauri::command]
+pub fn compact_download_window(app: AppHandle) {
+    crate::video::shrink_to_progress(&app);
+}
+
 /// Make the download window tall enough for what the page has laid out.
 ///
 /// The page is the only thing that can measure this, so it does, and this

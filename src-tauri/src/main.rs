@@ -220,6 +220,7 @@ fn main() {
             commands::take_pending_main,
             commands::start_capture,
             commands::fit_window,
+            commands::compact_download_window,
             commands::check_update,
             commands::install_update,
         ])

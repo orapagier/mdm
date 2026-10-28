@@ -12,6 +12,7 @@ const { listen } = window.__TAURI__.event;
 let snapshot = { downloads: [], globalSpeed: 0, active: 0, queued: 0 };
 let filter = { kind: "all", value: null };
 let settings = null;
+let search = "";
 
 /* Set by wireBatchDialog. The window is torn down when closed, so a capture
    can arrive with nothing listening; init() collects the parked one and hands
@@ -20,6 +21,8 @@ let showBatch = () => {};
 let showMedia = () => {};
 
 function visible(d) {
+  if (search && ![d.filename, d.url, d.category].some((v) =>
+    String(v || "").toLowerCase().includes(search))) return false;
   if (filter.kind === "all") return true;
   if (filter.kind === "category") return d.category === filter.value;
   return d.status === filter.kind;
@@ -39,6 +42,13 @@ function render() {
   const items = snapshot.downloads.filter(visible);
 
   $("empty").hidden = items.length > 0;
+  $("empty").textContent = search
+    ? "No matching downloads. Try another name or URL, or change the selected filter."
+    : filter.kind !== "all"
+      ? "No downloads in this view. Choose All to see your library."
+      : "Add a URL or video to get started. Downloads captured by the browser extension appear here.";
+  const count = `${items.length} of ${snapshot.downloads.length} downloads`;
+  if ($("list-count").textContent !== count) $("list-count").textContent = count;
   $("stat-speed").textContent = rate(snapshot.globalSpeed);
   $("c-active").textContent = snapshot.active || "";
   $("c-queued").textContent = snapshot.queued || "";
@@ -71,6 +81,13 @@ function render() {
   }
 
   renderCategories();
+  document.querySelectorAll(".nav[data-filter]").forEach((btn) => {
+    const selected = btn.dataset.filter === filter.kind &&
+      (filter.kind !== "category" || btn.dataset.value === filter.value);
+    btn.classList.toggle("active", selected);
+    if (selected) btn.setAttribute("aria-current", "page");
+    else btn.removeAttribute("aria-current");
+  });
 }
 
 function buildRow(d) {
@@ -98,9 +115,11 @@ function buildRow(d) {
   return { tr, refs };
 }
 
-function updateRow({ refs }, d) {
+function updateRow(entry, d) {
+  const { refs } = entry;
+  entry.download = d;
   refs.file.textContent = d.filename;
-  refs.file.title = d.url;
+  refs.file.title = `${d.filename}\n${d.url}`;
 
   const parts = [d.category];
   if (d.status === "failed" && d.error) parts.push(d.error);
@@ -120,7 +139,8 @@ function updateRow({ refs }, d) {
 
   refs.size.textContent = bytes(d.totalBytes);
 
-  const pct = d.totalBytes > 0 ? (d.completedBytes / d.totalBytes) : 0;
+  const pct = d.status === "complete" ? 1
+    : d.totalBytes > 0 ? Math.max(0, Math.min(1, d.completedBytes / d.totalBytes)) : 0;
   refs.fill.style.width = `${Math.min(100, pct * 100).toFixed(1)}%`;
   refs.bar.className =
     "bar" +
@@ -140,33 +160,41 @@ function updateRow({ refs }, d) {
   const signature = d.status + (d.sha256 ? ":hashed" : "");
   if (refs.lastSignature !== signature) {
     refs.lastSignature = signature;
-    refs.actions.replaceChildren(...actionsFor(d));
+    refs.actions.replaceChildren(...actionsFor(() => entry.download));
   }
 }
 
-function actionsFor(d) {
+function actionsFor(current) {
+  const d = current();
   const make = (label, title, fn) => {
     const b = document.createElement("button");
     b.textContent = label;
     b.title = title;
-    b.addEventListener("click", fn);
+    b.setAttribute("aria-label", title);
+    b.addEventListener("click", async () => {
+      if (b.disabled) return;
+      b.disabled = true;
+      try { await fn(current()); }
+      catch { /* call() already reported the error. */ }
+      finally { b.disabled = false; }
+    });
     return b;
   };
   const out = [];
 
   if (d.status === "active" || d.status === "queued") {
-    out.push(make("❚❚", "Pause", () => call("pause", { id: d.id })));
+    out.push(make("❚❚", "Pause", (d) => call("pause", { id: d.id })));
   } else if (d.status === "paused") {
-    out.push(make("▶", "Resume", () => call("resume", { id: d.id })));
+    out.push(make("▶", "Resume", (d) => call("resume", { id: d.id })));
   } else if (d.status === "failed") {
-    out.push(make("↻", "Retry", () => call("retry", { id: d.id })));
+    out.push(make("↻", "Retry", (d) => call("retry", { id: d.id })));
   } else if (d.status === "complete") {
-    out.push(make("↗", "Open file", () =>
+    out.push(make("↗", "Open file", (d) =>
       call("open_path", { path: `${d.directory}/${d.filename}`, reveal: false })));
-    out.push(make("🗀", "Open folder", () =>
+    out.push(make("🗀", "Open folder", (d) =>
       call("open_path", { path: `${d.directory}/${d.filename}`, reveal: true })));
     if (d.sha256) {
-      out.push(make("#", "Copy SHA-256", async () => {
+      out.push(make("#", "Copy SHA-256", async (d) => {
         try {
           await navigator.clipboard.writeText(d.sha256);
           toast("SHA-256 copied");
@@ -179,14 +207,12 @@ function actionsFor(d) {
     }
   }
 
-  out.push(make("✕", "Remove", async () => {
-    const unfinished = d.status !== "complete";
-    // Only offer to delete bytes when there are bytes worth deleting.
-    const deleteFile =
-      unfinished && d.completedBytes > 0
-        ? confirm(`Remove "${d.filename}" and delete the partial file?`)
-        : false;
-    if (!unfinished && !confirm(`Remove "${d.filename}" from the list?`)) return;
+  out.push(make("✕", "Remove", async (d) => {
+    const deleteFile = d.status !== "complete" && d.completedBytes > 0;
+    const message = deleteFile
+      ? `Remove "${d.filename}" and delete the partial file?`
+      : `Remove "${d.filename}" from the list?`;
+    if (!confirm(message)) return;
     await call("remove", { id: d.id, deleteFile });
   }));
 
@@ -200,13 +226,13 @@ function renderCategories() {
   }
   const host = $("nav-categories");
   const wanted = [...counts.keys()].sort();
-  if (host.dataset.keys === wanted.join(",")) {
+  if (host.dataset.keys === JSON.stringify(wanted)) {
     for (const btn of host.children) {
       btn.querySelector(".count").textContent = counts.get(btn.dataset.value) || "";
     }
     return;
   }
-  host.dataset.keys = wanted.join(",");
+  host.dataset.keys = JSON.stringify(wanted);
   host.replaceChildren(
     ...wanted.map((name) => {
       const b = document.createElement("button");
@@ -260,6 +286,49 @@ async function refresh() {
  * Dialogs
  * ------------------------------------------------------------------ */
 
+// Save on submit, never on close: Escape retains a dialog's old returnValue.
+// Keep entered values and a readable error in place when the backend fails.
+function wireDialogSubmit(dlg, save) {
+  const form = dlg.querySelector("form");
+  const error = document.createElement("p");
+  error.className = "hint bad";
+  error.setAttribute("role", "alert");
+  error.hidden = true;
+  form.querySelector("menu").before(error);
+  let busy = false;
+  for (const button of form.querySelectorAll('button[value="cancel"]')) {
+    button.addEventListener("click", () => {
+      if (!busy) dlg.close("cancel");
+    });
+  }
+  dlg.addEventListener("cancel", (event) => {
+    if (busy) event.preventDefault();
+  });
+  dlg.addEventListener("close", () => { error.hidden = true; });
+  form.addEventListener("submit", async (event) => {
+    if (busy) { event.preventDefault(); return; }
+    if (event.submitter?.value === "cancel") return;
+    event.preventDefault();
+    busy = true;
+    error.hidden = true;
+    form.setAttribute("aria-busy", "true");
+    const buttons = [...form.querySelectorAll("button")];
+    const disabled = buttons.map((button) => button.disabled);
+    buttons.forEach((button) => { button.disabled = true; });
+    try {
+      await save();
+      dlg.close("ok");
+    } catch (e) {
+      error.textContent = String(e);
+      error.hidden = false;
+    } finally {
+      busy = false;
+      form.removeAttribute("aria-busy");
+      buttons.forEach((button, i) => { button.disabled = disabled[i]; });
+    }
+  });
+}
+
 function wireAddDialog() {
   const dlg = $("dlg-add");
   $("btn-add").addEventListener("click", async () => {
@@ -276,8 +345,7 @@ function wireAddDialog() {
     if (dir) $("add-dir").value = dir;
   });
 
-  dlg.addEventListener("close", async () => {
-    if (dlg.returnValue !== "ok") return;
+  wireDialogSubmit(dlg, async () => {
     const url = $("add-url").value.trim();
     if (!url) return;
     await call("add_download", {
@@ -298,7 +366,14 @@ function wireBatchDialog() {
   const dlg = $("dlg-batch");
   let links = [];
 
+  function selectionCount() {
+    const selected = links.filter((l) => l.selected !== false).length;
+    $("batch-count").textContent = `${selected} of ${links.length} selected (including hidden links)`;
+    $("batch-ok").disabled = selected === 0;
+  }
+
   function draw() {
+    selectionCount();
     const needle = $("batch-filter").value.trim().toLowerCase();
     const shown = needle
       ? links.filter((l) => l.url.toLowerCase().includes(needle))
@@ -313,6 +388,7 @@ function wireBatchDialog() {
         row.querySelector("input").checked = l.selected !== false;
         row.querySelector("input").addEventListener("change", (e) => {
           l.selected = e.target.checked;
+          selectionCount();
         });
         return row;
       })
@@ -358,8 +434,7 @@ function wireBatchDialog() {
     draw();
   });
 
-  dlg.addEventListener("close", async () => {
-    if (dlg.returnValue !== "ok") return;
+  wireDialogSubmit(dlg, async () => {
     const urls = links.filter((l) => l.selected !== false).map((l) => l.url);
     if (!urls.length) return;
     const failures = await call("add_many", { urls, directory: null });
@@ -383,6 +458,7 @@ function minutesToTime(m) {
 function timeToMinutes(value) {
   const m = /^(\d{1,2}):(\d{2})$/.exec((value || "").trim());
   if (!m) return null;
+  if (Number(m[1]) > 23 || Number(m[2]) > 59) return null;
   const mins = Number(m[1]) * 60 + Number(m[2]);
   return mins >= 0 && mins < 1440 ? mins : null;
 }
@@ -625,8 +701,14 @@ function wireSettingsDialog() {
     return names.slice(0, -1).join(", ") + " and " + names[names.length - 1];
   }
 
-  dlg.addEventListener("close", async () => {
-    if (dlg.returnValue !== "ok" || !settings) return;
+  wireDialogSubmit(dlg, async () => {
+    if (!settings) throw new Error("Settings have not loaded. Reopen Settings and try again.");
+    const on = $("q-enabled").checked;
+    const start = timeToMinutes($("q-start").value);
+    const stop = timeToMinutes($("q-stop").value);
+    if (on && (start === null || stop === null)) {
+      throw new Error("Choose both a start and stop time for the schedule.");
+    }
     const next = {
       ...settings,
       downloadDir: $("s-dir").value.trim() || settings.downloadDir,
@@ -662,9 +744,6 @@ function wireSettingsDialog() {
     const days = [...$("q-days").querySelectorAll("input")]
       .filter((i) => i.checked)
       .map((i) => Number(i.dataset.day));
-    const on = $("q-enabled").checked;
-    const start = timeToMinutes($("q-start").value);
-    const stop = timeToMinutes($("q-stop").value);
     await call("save_queue", {
       queue: {
         ...mainQueue,
@@ -695,6 +774,19 @@ async function init() {
   document.querySelectorAll(".nav[data-filter]").forEach((btn) => {
     if (btn.dataset.filter === "category") return;
     btn.addEventListener("click", () => selectFilter(btn, btn.dataset.filter, null));
+  });
+
+  $("download-search").addEventListener("input", (event) => {
+    search = event.target.value.trim().toLowerCase();
+    render();
+  });
+  document.addEventListener("keydown", (event) => {
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "f" &&
+        !document.querySelector("dialog[open]")) {
+      event.preventDefault();
+      $("download-search").focus();
+      $("download-search").select();
+    }
   });
 
   // The picker lives in its own window, the way IDM keeps a download separate

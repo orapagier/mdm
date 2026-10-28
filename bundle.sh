@@ -85,12 +85,28 @@ install -m755 "$HOST_BIN" "$REPO/src-tauri/binaries/mdm-host-$triple"
 # left over from an older checkout looks exactly like a current one.
 stage_extension
 
-# The packages carry the *signed* extension. Without it they would ship an
-# add-on Firefox refuses, which is worse than shipping none.
+# Stage the selected Firefox package at the path the Linux overlay actually
+# consumes. The signed artifact is optional and may live outside the checkout
+# through MDM_XPI; referring to it directly in the overlay broke clean builds.
 find_signed_xpi
-[[ "$signed" == yes ]] || warn "packaging/mdm-firefox-signed.xpi is missing or unsigned, so the
-  packages will carry an add-on Firefox refuses. Sign the package at
-  addons.mozilla.org and save it there, then build again."
+mkdir -p "$REPO/target"
+if [[ "$signed" == yes ]]; then
+  install -m644 "$SIGNED_XPI" "$REPO/target/mdm-firefox.xpi"
+else
+  warn "No signed Firefox extension was found. This local build will carry an
+  unsigned add-on that standard Firefox cannot install. For a signed build,
+  set MDM_XPI to your signed .xpi or put it at packaging/mdm-firefox-signed.xpi."
+  if [[ "$XPI" != "$REPO/target/mdm-firefox.xpi" ]]; then
+    install -m644 "$XPI" "$REPO/target/mdm-firefox.xpi"
+  fi
+fi
+# Resource paths in Tauri's overlay are relative to the checkout, even when
+# Cargo's compilation output is redirected with CARGO_TARGET_DIR.
+if [[ "$CHROME_DIR" != "$REPO/target/mdm-chrome" ]]; then
+  rm -rf "$REPO/target/mdm-chrome"
+  mkdir -p "$REPO/target/mdm-chrome"
+  cp -a "$CHROME_DIR/." "$REPO/target/mdm-chrome/"
+fi
 
 say "Building the redistributable packages"
 

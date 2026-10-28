@@ -4,7 +4,7 @@
     "createUpdaterArtifacts": false,
     "externalBin": ["binaries/mdm-host"],
     "resources": {
-      "../packaging/mdm-firefox-signed.xpi": "extension/mdm-firefox.xpi",
+      "../target/mdm-firefox.xpi": "extension/mdm-firefox.xpi",
       "../target/mdm-chrome/": "extension/mdm-chrome/"
     },
     "linux": {
