@@ -181,7 +181,7 @@ pub fn force_check() {
 /// What a version check or update did, for the caller to log or show.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
-    /// Nothing to do: no copy of ours to update, or it was already current.
+    /// Nothing to do: no yt-dlp to update, or the one in use is current.
     UpToDate,
     /// Ours, and now newer. Carries what it says it is now.
     Updated(String),
@@ -265,6 +265,12 @@ pub async fn install() -> Result<PathBuf> {
     if let Some(existing) = ytdlp() {
         return Ok(existing);
     }
+    install_owned().await
+}
+
+/// Fetch the official release into MDM's own directory, prove it runs, and
+/// leave it where [`ytdlp`] will find it first.
+async fn install_owned() -> Result<PathBuf> {
     let target = ytdlp_path();
     let staged = fetch_release(&bin_dir()).await?;
     std::fs::rename(&staged, &target)
@@ -274,24 +280,32 @@ pub async fn install() -> Result<PathBuf> {
     Ok(target)
 }
 
-/// Update MDM's own copy, if there is one and it is behind.
+/// Update the yt-dlp MDM runs, if it is behind.
 ///
-/// Only ever our copy: one from a package manager belongs to that package
-/// manager. `force` skips the "is it due yet" question, for the case that has
-/// already answered it — an extraction that just failed the way a stale yt-dlp
-/// fails.
+/// A copy from a package manager belongs to that package manager, so it is
+/// never written to. It can still be *behind*, though — Debian freezes one for
+/// the life of a release, and Fedora's is routinely weeks old — and then MDM
+/// installs its own copy beside it, which [`ytdlp`] prefers from that moment
+/// on. Without that, a machine with a stale system yt-dlp could never be
+/// brought up to date by the app at all: `update` used to answer "nothing to
+/// do" precisely because it did not own the copy that was failing.
+///
+/// `force` skips the "is it due yet" question, for the case that has already
+/// answered it — an extraction that just failed the way a stale yt-dlp fails.
 ///
 /// Nothing here can leave the machine worse off than it was. The new copy is
 /// fetched beside the old one and proved to run before either is touched, and
 /// if it cannot be moved into place — Windows will not let a running program
 /// be replaced — the old one stays exactly as it was for the next attempt.
 pub async fn update(force: bool) -> Outcome {
-    let Some(path) = owned_ytdlp() else {
-        return Outcome::UpToDate;
-    };
     if !force && !check_due() {
         return Outcome::UpToDate;
     }
+    // Ours when there is one, otherwise the copy on PATH. Both can be stale;
+    // only one of them can be replaced, and that is the one this installs.
+    let Some(path) = ytdlp() else {
+        return Outcome::UpToDate;
+    };
     // Stamped before the attempt rather than after: a check that fails should
     // not be retried on the next tick a few seconds later, hammering GitHub
     // for as long as the network happens to be down.
@@ -311,9 +325,11 @@ pub async fn update(force: bool) -> Outcome {
         Ok(staged) => staged,
         Err(e) => return Outcome::Failed(format!("{e:#}")),
     };
-    if let Err(e) = std::fs::rename(&staged, &path) {
+    // Always our own path, not `path`: a copy from PATH must not be touched.
+    let target = ytdlp_path();
+    if let Err(e) = std::fs::rename(&staged, &target) {
         let _ = std::fs::remove_file(&staged);
-        return Outcome::Failed(format!("could not replace {}: {e}", path.display()));
+        return Outcome::Failed(format!("could not replace {}: {e}", target.display()));
     }
     Outcome::Updated(latest)
 }

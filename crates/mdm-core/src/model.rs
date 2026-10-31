@@ -299,12 +299,12 @@ pub struct Settings {
     /// `["--extractor-args", "youtube:player_client=web_safari"]`.
     /// YouTube's extraction changes often; this avoids needing a rebuild.
     pub ytdlp_extra_args: Vec<String>,
-    /// Whether MDM keeps its own copy of yt-dlp current.
+    /// Whether MDM keeps the yt-dlp it runs current.
     ///
-    /// Only ever its own copy — one installed by a package manager is that
-    /// package manager's to update. Worth a switch because a pinned version
-    /// is a real thing to want: a site can break in a new release as easily
-    /// as it is fixed by one.
+    /// A copy installed by a package manager is never written to; when it is
+    /// behind, MDM fetches its own beside it and runs that instead. Worth a
+    /// switch because a pinned version is a real thing to want: a site can
+    /// break in a new release as easily as it is fixed by one.
     pub ytdlp_auto_update: bool,
     /// Hosts that hand out an address good for exactly one request, so
     /// captures from them are left with the browser.

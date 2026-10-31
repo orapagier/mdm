@@ -619,7 +619,12 @@ async fn run_probe(
     // Default" rows came from — and fetching it measured as a third of the
     // whole probe on a slow link. It is *not* redundant for a live stream,
     // which is served over HLS and nothing else, so `probe` asks again
-    // without this when an extraction comes back with no formats at all.
+    // without this when an extraction comes back with no separate streams.
+    //
+    // Deliberately no `player_client` here. yt-dlp's default client set is
+    // chosen to maximise what a page offers; pinning it to a short list is how
+    // a video that has 4K on one client and only a combined 360p format on
+    // another comes back with the one format nobody wanted.
     if skip_hls && is_youtube(url) {
         cmd.arg("--extractor-args").arg("youtube:skip=hls");
     }
@@ -951,10 +956,15 @@ pub async fn probe(
     // this asks again for — at the cost of one extra extraction on the rare
     // page that needs it, rather than a slower probe on every page that
     // does not.
-    if out.status.success() && !offers_formats(&out.stdout) {
-        log::info!("{url}: nothing to download without the HLS manifest, asking again with it");
+    if is_youtube(url) && out.status.success() && !offers_choices(&out.stdout) {
+        log::info!(
+            "{url}: the fast extraction offered no real quality choices, \
+             asking again with the HLS manifest"
+        );
         let full = run_probe(&bin, url, cookies_from, extra, false).await?;
-        if full.status.success() && offers_formats(&full.stdout) {
+        if full.status.success()
+            && format_count(&full.stdout).unwrap_or(0) > format_count(&out.stdout).unwrap_or(0)
+        {
             out = full;
         }
     }
@@ -993,21 +1003,53 @@ pub async fn probe(
     Ok(info)
 }
 
-/// Did this extraction come back with anything to download?
+/// How many formats the picker could actually offer.
 ///
-/// A playlist counts: it carries entries rather than formats, and asking
-/// again would only produce the same list more slowly. Output that cannot be
-/// parsed at all counts too — the caller reports that failure far better than
-/// a second extraction would.
-fn offers_formats(stdout: &[u8]) -> bool {
+/// Storyboards are excluded by [`parse_format`], which is the same reading the
+/// picker does: counting yt-dlp's raw array would call four thumbnail sheets a
+/// quality list. A playlist counts as everything, because asking again would
+/// only produce the same list more slowly. Output that cannot be parsed is
+/// unknown, not empty — the caller reports that failure far better than a
+/// second extraction would.
+fn format_count(stdout: &[u8]) -> Option<usize> {
+    let v: serde_json::Value = serde_json::from_slice(stdout).ok()?;
+    if v.get("entries").is_some() {
+        return Some(usize::MAX);
+    }
+    Some(
+        v.get("formats")
+            .and_then(|f| f.as_array())
+            .map(|arr| arr.iter().filter(|f| parse_format(f).is_some()).count())
+            .unwrap_or(0),
+    )
+}
+
+/// Does this extraction offer a real choice of quality?
+///
+/// A separate picture stream is the shape a quality list has. Combined files
+/// are what YouTube's progressive formats look like — `18` and `22`, one
+/// resolution each — and they are also what a video falls back to when every
+/// adaptive stream was dropped. Asking again with the HLS manifest is cheap
+/// next to presenting a lone 360p MP4 as if it were the only thing the page
+/// ever had.
+fn offers_choices(stdout: &[u8]) -> bool {
     let Ok(v) = serde_json::from_slice::<serde_json::Value>(stdout) else {
+        // Unreadable output is not a reason to ask again; the caller has a
+        // better failure to report than a second extraction would produce.
         return true;
     };
-    let has_formats = v
-        .get("formats")
+    if v.get("entries").is_some() {
+        return true;
+    }
+    v.get("formats")
         .and_then(|f| f.as_array())
-        .is_some_and(|a| !a.is_empty());
-    has_formats || v.get("entries").is_some()
+        .is_some_and(|arr| {
+            arr.iter().any(|f| {
+                let codec = |key| f.get(key).and_then(serde_json::Value::as_str).unwrap_or("");
+                let vcodec = codec("vcodec");
+                vcodec != "none" && !vcodec.is_empty() && codec("acodec") == "none"
+            })
+        })
 }
 
 /// Fold yt-dlp's `-J` output into what the picker needs.
@@ -1839,6 +1881,46 @@ mod tests {
 
         // Nothing to name is not a reason to say nothing.
         assert!(plain_error("ERROR: Unsupported URL: rtmp://x/y").contains("this site"));
+    }
+
+    /// The "only a general .mp4" complaint, reduced to the extraction that
+    /// causes it: one progressive format and a handful of storyboards is not
+    /// a quality list, so the probe is worth repeating with the HLS manifest.
+    #[test]
+    fn one_combined_format_is_not_a_quality_choice() {
+        let storyboards_only = br#"{"formats":[
+            {"format_id":"sb0","vcodec":"none","acodec":"none"},
+            {"format_id":"sb1","vcodec":"none","acodec":"none"}
+        ]}"#;
+        assert_eq!(format_count(storyboards_only), Some(0));
+        assert!(!offers_choices(storyboards_only));
+
+        let one_mp4 = br#"{"formats":[
+            {"format_id":"18","vcodec":"avc1.42001E","acodec":"mp4a.40.2"},
+            {"format_id":"sb0","vcodec":"none","acodec":"none"}
+        ]}"#;
+        assert_eq!(format_count(one_mp4), Some(1));
+        assert!(!offers_choices(one_mp4), "a lone 360p MP4 is the fallback");
+
+        // Two progressive formats are still two combined files, not the
+        // adaptive streams the picker is meant to offer.
+        let two_progressive = br#"{"formats":[
+            {"format_id":"18","vcodec":"avc1.42001E","acodec":"mp4a.40.2"},
+            {"format_id":"22","vcodec":"avc1.64001F","acodec":"mp4a.40.2"}
+        ]}"#;
+        assert_eq!(format_count(two_progressive), Some(2));
+        assert!(!offers_choices(two_progressive));
+
+        let real_choices = br#"{"formats":[
+            {"format_id":"18","vcodec":"avc1.42001E","acodec":"mp4a.40.2"},
+            {"format_id":"137","vcodec":"avc1.640028","acodec":"none"},
+            {"format_id":"140","vcodec":"none","acodec":"mp4a.40.2"}
+        ]}"#;
+        assert_eq!(format_count(real_choices), Some(3));
+        assert!(offers_choices(real_choices));
+
+        // A playlist is an answer, not an extraction that needs asking again.
+        assert!(offers_choices(br#"{"entries":[{},{}]}"#));
     }
 
     #[test]
